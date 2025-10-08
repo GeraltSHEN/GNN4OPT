@@ -4,7 +4,23 @@ import torch_scatter
 from torch.nn import Embedding, Linear
 from torch_geometric.data import Data
 from torch_geometric.nn import MLP, GCNConv, SAGEConv
-from utils import tied_topk_indices
+
+
+def tied_topk_indices(values, k, expansion=2):
+    """
+    >>> tied_topk_indices(torch.tensor([4,4,4,5,5]), 2, 2).sort()[0]
+    tensor([3, 4])
+    >>> tied_topk_indices(torch.tensor([4,1,4,5,5,1]), 3, 2).sort()[0]
+    tensor([0, 2, 3, 4])
+    """
+    assert len(values) >= k * expansion
+
+    values, indices = torch.topk(values, k * expansion)
+    assert values[k - 1] != values[-1], (
+        "Cannot break ties within expansion.\nTry a larger expansion value"
+    )
+
+    return indices[: k + ((values[k - 1] == values[k:]).sum())]
 
 
 class PowerMethod(torch.nn.Module):

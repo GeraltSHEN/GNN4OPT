@@ -21,8 +21,9 @@ def get_default_args(dataset):
     defaults["batch_size"] = 32
     defaults["weight_decay"] = 5e-4
 
-    if dataset == '???':
+    if dataset == "set_cover":
         # dataset related parameters
+        defaults["dataset_path"] = "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d"
         defaults["num_features"] = 421452352
         defaults["out_dim"] = 21435262
         # layers related parameters
