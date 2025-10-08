@@ -1,6 +1,3 @@
-from collections.abc import Sequence
-from typing import Literal
-
 import torch
 import torch.nn.functional as F
 import torch_scatter
@@ -26,6 +23,7 @@ class PowerMethod(torch.nn.Module):
 
 
 class SymmetryBreakingGNN(torch.nn.Module):
+    """Symmetry breaking model using a 2-layer GCN."""
     def __init__(self, in_channels, hidden_channels):
         super().__init__()
         self.conv1 = GCNConv(
@@ -93,11 +91,14 @@ class Holo(torch.nn.Module):
         return tied_topk_indices(node_degrees, k=n_breakings)
 
     def forward(self, X, adj_t, tuples_coo, group_idx=None):
+        # X: (n_nodes, hidden_channels)
         break_node_indices = self.get_nodes_to_break(
             adj_t, n_breakings=self.n_breakings
         )
 
+        # break_node_indices: (n_breakings,)
         one_hot_breakings = F.one_hot(break_node_indices, X.size(0)).unsqueeze(-1)
+        # one_hot_breakings: (n_breakings, n_nodes, 1)
         holo_repr = self.symmetry_breaking_model(
             torch.cat(
                 (
@@ -108,9 +109,11 @@ class Holo(torch.nn.Module):
             ),
             adj_t,
         )  # (t, n, f), where n includes both movies and users
+        # holo_repr: (n_breakings, n_nodes, symmetry_breaking_model.out_dim)
         holo_repr = self.ln(holo_repr)
 
         set_of_link_repr = holo_repr[:, tuples_coo].prod(dim=1)  # (t, k, f)
+        # set_of_link_repr: (n_breakings, n_tuples, out_dim)
 
         if group_idx is not None:
             link_repr = torch_scatter.scatter(
@@ -120,84 +123,6 @@ class Holo(torch.nn.Module):
             link_repr = set_of_link_repr.mean(0, keepdim=True)  # (l=1, k, f)
 
         return link_repr.transpose(0, 1).flatten(1, 2)  # (k, f*l)
-
-
-# =================================================================================
-# MovieLens-Specific Modules
-# =================================================================================
-class BipartiteSAGEEncoder(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels):
-        super().__init__()
-        self.conv1 = SAGEConv((-1, -1), hidden_channels)
-        self.conv2 = SAGEConv((-1, -1), hidden_channels)
-        self.conv3 = SAGEConv((-1, -1), hidden_channels)
-        self.lin1 = Linear(hidden_channels, out_channels)
-        self.lin2 = Linear(hidden_channels, out_channels)
-
-    def forward(self, x_dict, edge_index_dict):
-        user_x = self.conv1(
-            (x_dict["movie"], x_dict["user"]),
-            edge_index_dict[("movie", "rev_rates", "user")],
-        ).relu()
-
-        movie_x = self.conv2(
-            (user_x, x_dict["movie"]),
-            edge_index_dict[("user", "rates", "movie")],
-        ).relu()
-
-        user_x = self.conv3(
-            (movie_x, user_x),
-            edge_index_dict[("movie", "rev_rates", "user")],
-        ).relu()
-
-        return {"user": self.lin1(user_x), "movie": self.lin2(movie_x)}
-
-
-class SAGEEncoder(torch.nn.Module):
-    def __init__(self, hidden_channels, out_channels):
-        super().__init__()
-        self.conv1 = SAGEConv((-1, -1), hidden_channels)
-        self.conv2 = SAGEConv((-1, -1), out_channels)
-
-    def forward(self, x, edge_index):
-        x = self.conv1(x, edge_index).relu()
-        x = self.conv2(x, edge_index)
-        return x
-
-
-class MovieLensEncoder(torch.nn.Module):
-    def __init__(
-        self,
-        metadata,
-        hidden_channels,
-        out_channels,
-        *,
-        relation_schema: Sequence[Literal["user", "movie"]],
-    ):
-        super().__init__()
-        self.user_emb = Embedding(1, hidden_channels)
-        self.gnn_encoder = BipartiteSAGEEncoder(hidden_channels, out_channels)
-        # self.gnn_encoder = to_hetero(
-        #     SAGEEncoder(hidden_channels, out_channels), metadata
-        # )
-        self.relation_schema = relation_schema
-
-    def forward(self, data, tuples_coo) -> tuple[Data, torch.Tensor]:
-        assert len(self.relation_schema) == tuples_coo.size(0)
-        x_dict, edge_index_dict = data.x_dict, data.edge_index_dict
-        n_users = x_dict["user"].size(0)
-
-        z_dict = {}
-        x_dict["user"] = self.user_emb.weight.repeat((n_users, 1))
-        z_dict = self.gnn_encoder(x_dict, edge_index_dict)
-        X = torch.vstack((z_dict["user"], z_dict["movie"]))
-
-        new_entity_index = []
-        for entity, entity_index in zip(self.relation_schema, tuples_coo):
-            offset = 0 if entity == "user" else n_users
-            new_entity_index.append(entity_index + offset)
-
-        return X, torch.vstack(new_entity_index)
 
 
 # =================================================================================
@@ -239,7 +164,7 @@ class GCNEncoder(torch.nn.Module):
         return F.dropout(x, self.dropout, training=self.training)
 
 
-class PlanetoidEncoder(torch.nn.Module):
+class GCNDataEncoder(torch.nn.Module):
     def __init__(
         self,
         in_channels,
