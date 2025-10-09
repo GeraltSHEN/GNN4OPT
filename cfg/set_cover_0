@@ -1,0 +1,16 @@
+batch_size: 32
+dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dropout: 0.0
+hidden_channels: 64
+lr: 0.01
+model: holo
+n_breakings: 8
+n_epochs: 5
+num_features: 421452352
+num_layers: 4
+out_dim: 21435262
+power: 2
+sample_negatives: false
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005

@@ -1,9 +1,14 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch_scatter
 from torch.nn import Embedding, Linear
-from torch_geometric.data import Data
-from torch_geometric.nn import MLP, GCNConv, SAGEConv
+from torch_geometric.data import Data, HeteroData
+from torch_geometric.nn import HeteroConv, MLP, GCNConv, SAGEConv
+
+from typing import Optional
+
+from model_torch import PreNormLayer
 
 
 def tied_topk_indices(values, k, expansion=2):
@@ -141,9 +146,6 @@ class Holo(torch.nn.Module):
         return link_repr.transpose(0, 1).flatten(1, 2)  # (k, f*l)
 
 
-# =================================================================================
-# Planetoid-Specific Modules
-# =================================================================================
 class GCNEncoder(torch.nn.Module):
     def __init__(
         self,
@@ -197,3 +199,173 @@ class GCNDataEncoder(torch.nn.Module):
         x, adj_t = data.x, data.adj_t
         X = self.gnn_encoder(x, adj_t)
         return X, tuples_coo
+
+
+class BipartiteDataEncoder(torch.nn.Module):
+    """Encode bipartite MILP graphs stored as HeteroData into variable embeddings."""
+
+    def __init__(
+        self,
+        *,
+        emb_size: int = 64,
+        cons_nfeats: int = 5,
+        var_nfeats: int = 19,
+        edge_nfeats: int = 1,
+        num_layers: int = 2,
+        conv_type: str = "sage",
+    ):
+        super().__init__()
+        self.emb_size = emb_size
+        self.cons_nfeats = cons_nfeats
+        self.var_nfeats = var_nfeats
+        self.edge_nfeats = edge_nfeats
+        self.num_layers = num_layers
+
+        self.cons_embedding = nn.Sequential(
+            PreNormLayer(cons_nfeats),
+            nn.Linear(cons_nfeats, emb_size),
+            nn.ReLU(),
+            nn.Linear(emb_size, emb_size),
+            nn.ReLU(),
+        )
+        self.edge_embedding = PreNormLayer(edge_nfeats)
+        self.var_embedding = nn.Sequential(
+            PreNormLayer(var_nfeats),
+            nn.Linear(var_nfeats, emb_size),
+            nn.ReLU(),
+            nn.Linear(emb_size, emb_size),
+            nn.ReLU(),
+        )
+
+        conv_type = conv_type.lower()
+        conv_cls = {
+            "sage": lambda: SAGEConv((-1, -1), emb_size),
+            "gcn": lambda: GCNConv((-1, -1), emb_size),
+        }.get(conv_type)
+        if conv_cls is None:
+            raise ValueError(f"Unsupported conv_type '{conv_type}'. Use 'sage' or 'gcn'.")
+
+        self.use_edge_weight = conv_type == "gcn"
+
+        self.convs = nn.ModuleList()
+        for _ in range(num_layers):
+            conv = HeteroConv(
+                {
+                    ("constraint", "to", "variable"): conv_cls(),
+                    ("variable", "to_rev", "constraint"): conv_cls(),
+                },
+                aggr="sum",
+            )
+            self.convs.append(conv)
+        self.out_dim = emb_size
+
+    def forward(self, data: HeteroData) -> torch.Tensor:
+        constraint_x = data["constraint"].x
+        variable_x = data["variable"].x
+        edge_storage = data["constraint", "to", "variable"]
+        edge_index = edge_storage.edge_index
+        edge_attr = getattr(edge_storage, "edge_attr", None)
+        if edge_attr is None:
+            edge_attr = constraint_x.new_zeros(edge_index.size(1), self.edge_nfeats)
+        edge_attr = edge_attr.view(-1, self.edge_nfeats)
+        edge_index = edge_index.contiguous()
+
+        constraint_features = self.cons_embedding(constraint_x)
+        edge_features = self.edge_embedding(edge_attr)
+        variable_features = self.var_embedding(variable_x)
+
+        x_dict = {
+            "constraint": constraint_features,
+            "variable": variable_features,
+        }
+        edge_index_dict = {
+            ("constraint", "to", "variable"): edge_index,
+            ("variable", "to_rev", "constraint"): edge_index.flip(0).contiguous(),
+        }
+        edge_attr_dict = None
+        if self.use_edge_weight:
+            edge_weight = edge_features.squeeze(-1)
+            edge_attr_dict = {
+                ("constraint", "to", "variable"): edge_weight,
+                ("variable", "to_rev", "constraint"): edge_weight,
+            }
+
+        for conv in self.convs:
+            if edge_attr_dict is None:
+                x_dict = conv(x_dict, edge_index_dict)
+            else:
+                x_dict = conv(x_dict, edge_index_dict, edge_attr_dict)
+            x_dict = {key: F.relu(x) for key, x in x_dict.items()}
+
+        return x_dict["variable"]
+
+
+class VariableTupleEncoder(torch.nn.Module):
+    """Tuple encoder selecting variable embeddings for candidate indices."""
+
+    def __init__(self):
+        super().__init__()
+        self.out_dim: Optional[int] = None
+
+    def forward(
+        self,
+        variable_embeddings: torch.Tensor,
+        candidate_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        candidate_embeddings = variable_embeddings.index_select(0, candidate_indices)
+        if self.out_dim is None:
+            self.out_dim = candidate_embeddings.size(-1)
+        return candidate_embeddings
+
+
+class GNNPolicy(torch.nn.Module):
+    """
+    Policy network composed of a bipartite data encoder, tuple encoder, and head.
+    """
+
+    def __init__(
+        self,
+        *,
+        data_encoder: Optional[torch.nn.Module] = None,
+        tuple_encoder: Optional[torch.nn.Module] = None,
+        emb_size: int = 64,
+        linear_classifier: bool = False,
+    ):
+        super().__init__()
+        self.data_encoder = (
+            data_encoder
+            if data_encoder is not None
+            else BipartiteDataEncoder(emb_size=emb_size)
+        )
+        self.tuple_encoder = (
+            tuple_encoder if tuple_encoder is not None else VariableTupleEncoder()
+        )
+
+        head_in_dim = getattr(self.tuple_encoder, "out_dim", None)
+        if head_in_dim is None:
+            head_in_dim = getattr(self.data_encoder, "out_dim", emb_size)
+        self.head = (
+            nn.Linear(head_in_dim, 1)
+            if linear_classifier
+            else MLP([head_in_dim, head_in_dim, 1], norm=None, dropout=0.0)
+        )
+
+    def forward(
+        self,
+        data: HeteroData,
+        candidate_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if candidate_indices is None:
+            candidate_indices = getattr(data, "candidate_indices", None)
+            if candidate_indices is None:
+                raise ValueError("candidate_indices must be provided with the batch.")
+
+        variable_embeddings = self.data_encoder(data)
+
+        tuple_repr = self.tuple_encoder(
+            variable_embeddings,
+            candidate_indices,
+        )
+
+        logits = self.head(tuple_repr).squeeze(-1)
+        return logits

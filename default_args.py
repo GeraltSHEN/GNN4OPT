@@ -1,3 +1,6 @@
+import argparse
+import sys
+
 import yaml
 
 
@@ -39,5 +42,23 @@ def get_default_args(dataset):
     print(f"Default Configuration file saved to ./cfg/{dataset}_0")
 
 
-get_default_args("???")
+def parse_args(argv=None):
+    """Parse CLI arguments for generating default configuration files."""
+    parser = argparse.ArgumentParser(description="Generate default configuration files.")
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        choices=["set_cover"],
+        help="Dataset name for which to generate defaults."
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    get_default_args(args.dataset)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
 
