@@ -1,313 +1,211 @@
-
-from typing import Callable
-import torch
-import torch.nn.functional as F
-import csv
-import numpy as np
-from torch_geometric.utils import (negative_sampling)
-
-import time
 import os
 import pickle
-import matplotlib.pyplot as plt
+import time
+from pathlib import Path
+from typing import Dict, Optional
 
 import psutil
+import torch
+import torch.nn.functional as F
+from torch_geometric.data import HeteroData
+from torch_geometric.loader import DataLoader
 
-from utils import *
+from utils import get_optimizer, load_model
 
 
-def log_cpu_memory_usage(epoch, step=None):
+def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
+    """Report CPU memory usage at coarse intervals."""
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
-    if epoch % 50 == 0:
-        print(f"[Epoch {epoch}{f', Step {step}' if step is not None else ''}] CPU Memory - RSS: {memory_info.rss / (1024 ** 3):.2f} GB")
+    if epoch == 1 or epoch % 1 == 0:
+        tag = f", Step {step}" if step is not None else ""
+        print(
+            f"[Epoch {epoch}{tag}] CPU Memory - RSS: {memory_info.rss / (1024 ** 3):.2f} GB"
+        )
 
 
-def run_training(args, data):
-    model = load_model(args)
-    if args.continue_training:
-        print('loading pretrained model weights')
-        model = load_weights(model, args)
-    print(f'----- {args.model_id} in {args.dataset} dataset -----')
-    print('#params:', sum(p.numel() for p in model.parameters()))
-    optimizer = get_optimizer(args, model)
-    print('loss_type: ', args.loss_type)
-
-    start_time = time.time()
-    ##############################################################################################################
-    Learning(args, data, model, optimizer)
-    ##############################################################################################################
-    end_time = time.time()
-    training_time = end_time - start_time
-    print(f'----time required for {args.epochs} epochs training: {round(training_time)}s----')
-    print(f'----time required for {args.epochs} epochs training: {round(training_time / 60)}min----')
-    print(f'----time required for {args.epochs} epochs training: {round(training_time / 3600)}hr----')
-    # check the model on the test set
-    scores = evaluate_model(args, data)
+def _to_data_list(batch) -> list[HeteroData]:
+    if hasattr(batch, "to_data_list"):
+        return batch.to_data_list()
+    return [batch]
 
 
-def train_model(optimizer, model, args, data, problem, epoch_stats):
-    for batch in (data['train'] if args.data_generator else data['train']):
-        optimizer_step(model, optimizer, batch, args, problem, epoch_stats)
-
-
-def optimizer_step(model, optimizer, batch, args, problem, epoch_stats):
-    start_time = time.time()
-    optimizer.zero_grad()
-    train_loss = get_loss(model, batch, problem, args, args.loss_type)
-    train_loss.backward()
-    optimizer.step()
-    train_time = time.time() - start_time
-    dict_agg(epoch_stats, 'train_time', train_time)
-    dict_agg(epoch_stats, 'train_loss', float(train_loss.detach().cpu()))
-    dict_agg(epoch_stats, 'train_agg', 1.)
-
-
-def get_train_step(
+def _forward_sample(
     model: torch.nn.Module,
+    sample: HeteroData,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    sample = sample.to(device)
+    candidate_indices = sample.candidate_indices.to(device)
+    logits = model(sample, candidate_indices)
+    target = sample.candidate_choice.to(device)
+    return logits, target
+
+
+def train_one_epoch(
+    model: torch.nn.Module,
+    loader: Optional[DataLoader],
     optimizer: torch.optim.Optimizer,
-    loss_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    sample_negatives: bool = False,
-):
-    def get_negatives(train_data, pos_y_coos, pos_y_values):
-        neg_y_coos = negative_sampling(
-            edge_index=train_data.edge_index,
-            num_nodes=train_data.num_nodes,
-            num_neg_samples=pos_y_coos.size(-1),
-            method="sparse",
-        )
+    device: torch.device,
+) -> Dict[str, float]:
+    if loader is None:
+        return {"loss": 0.0, "accuracy": 0.0}
 
-        y_coos = torch.cat(
-            [pos_y_coos, neg_y_coos],
-            dim=-1,
-        )
-        y_values = torch.cat([pos_y_values, torch.zeros_like(pos_y_values)], dim=0)
-        return y_coos, y_values
+    model.train()
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
 
-    def fun(train_data, adj, y_dl) -> float:
-        model.train()
+    for batch in loader:
+        samples = _to_data_list(batch)
+        if not samples:
+            continue
+
         optimizer.zero_grad()
-        tot_loss = 0
-        for y_coos, y_values in y_dl:
-            if sample_negatives:
-                y_coos, y_values = get_negatives(train_data, y_coos, y_values)
+        batch_loss = torch.tensor(0.0, device=device)
+        batch_correct = 0
 
-            out = model(train_data, y_coos, adj)
-            loss = loss_fn(out, y_values)
-            loss.backward()
-            tot_loss += float(loss)
+        for sample in samples:
+            logits, target = _forward_sample(model, sample, device)
+            sample_loss = F.cross_entropy(
+                logits.unsqueeze(0),
+                target.view(1),
+            )
+            batch_loss = batch_loss + sample_loss
+
+            pred = logits.argmax(dim=-1)
+            batch_correct += int((pred == target).item())
+
+        batch_size = len(samples)
+        batch_loss = batch_loss / batch_size
+        batch_loss.backward()
         optimizer.step()
-        return tot_loss
 
-    return fun
+        total_loss += batch_loss.item() * batch_size
+        total_correct += batch_correct
+        total_samples += batch_size
 
-
-def Learning(args, data, model, optimizer):
-    best = float('inf')
-    stats = {}
-
-    # TODO:
-    loss_fn = get_loss_fn(args)
-
-    train_step = get_train_step(
-        model, optimizer, loss_fn, sample_negatives=args.sample_negatives
-    )
-
-    train_y_dl = CooSampler(
-        train_y.indices(), train_y.values(), batch_size=cfg.batch_size, shuffle=True
-    )
-    val_y_dl = CooSampler(
-        val_y.indices(), val_y.values(), batch_size=val_y._nnz(), shuffle=False
-    )
-
-    for epoch in range(args.epochs):
-        if args.data_generator and epoch % args.renew_freq == 0:
-            data['train'].dataset.refresh()
-        epoch_stats = {}
-        # train
-        model.train()
-        start_time = time.time()
-        train_loss = train_step(train_data, train_adj, train_y_dl)
-        epoch_stats['train_loss'] = train_loss / len(train_y_dl)
-        epoch_stats['train_time'] = time.time() - start_time
-        curr_loss = epoch_stats['train_loss'] / epoch_stats['train_agg']
-        log_cpu_memory_usage(epoch, 'training')
-        # validate
-        model.eval()
-        start_time = time.time()
-        val_metric = test(val_data, val_adj, val_y_dl)
-        epoch_stats['val_metric'] = val_metric
-        epoch_stats['val_time'] = time.time() - start_time
-        # model checkpointg'])
-        if val_metric < best:
-            torch.save({'state_dict': model.state_dict()}, './models/' + args.model_id + '.pth')
-            print(f'checkpoint saved at epoch {epoch}')
-            best = val_metric
-
-        # print epoch_stats
-        if epoch % args.resultPrintFreq == 0 or epoch == args.epochs - 1:
-            print('----- Epoch {} -----'.format(epoch))
-            print('Train Loss: {:.5f}, '
-                  'Train Time: {: .5f}'.format(epoch_stats['train_loss'],
-                                               epoch_stats['train_time']))
-            print('Val Metric: {:.5f}, '
-                  'Val Time: {: .5f}'.format(epoch_stats['val_metric'],
-                                             epoch_stats['val_time']))
-
-        if epoch % args.resultSaveFreq == 0 or epoch == args.epochs - 1:
-            stats = epoch_stats
-            with open(f'./logs/run_training/{args.model_id}_TrainingStats.dict', 'wb') as f:
-                pickle.dump(stats, f)
+    avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+    accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+    return {"loss": avg_loss, "accuracy": accuracy}
 
 
-def featurize_batch(args, batch):
-    with torch.no_grad():
-        batch = batch.to(args.device)
-        return batch
+@torch.no_grad()
+def evaluate(
+    model: torch.nn.Module,
+    loader: Optional[DataLoader],
+    device: torch.device,
+) -> Dict[str, float]:
+    if loader is None:
+        return {"loss": 0.0, "accuracy": 0.0}
 
-
-def get_loss_fn(args):
-    # TODO
-    return torch.nn.MSELoss()
-
-
-def get_obj_loss(V, batch, problem, is_loss_batched):
-    if problem.name == "primal":
-        predicted_obj = problem.obj_fn(V=V,
-                                       edge_index_triu=batch.edge_index_directed,
-                                       num_edges=batch.n_edges,
-                                       batched_obj=is_loss_batched)
-        obj_loss = - predicted_obj / batch.num_graphs  # obj_fn gave positive objective value and negative loss is needed for training (minimization problem)
-    elif problem.name == "dual":
-        predicted_obj = problem.new_obj_fn(V=V, L=batch.L,
-                                           batched_obj=is_loss_batched)
-        obj_loss = predicted_obj / batch.num_graphs
-    else:
-        raise ValueError('Invalid problem')
-    return obj_loss
-
-
-def get_soln_loss(V, batch):
-    # TODO: need validation
-    bsz = batch.num_graphs
-    V = V.view(bsz, batch.num_nodes, -1)
-    predicted_soln = torch.bmm(V, V.transpose(1, 2))
-    soln_loss = F.mse_loss(predicted_soln, batch.soln.view(bsz, batch.num_nodes, -1))
-    return soln_loss
-
-
-def get_gap(model, batch, problem, args, is_loss_batched):
-    x, batch = featurize_batch(args, batch)
-    V, p = model(x, batch.edge_index)
-    if problem.name == "primal":
-        predicted_obj = problem.obj_fn(V=V,
-                                       edge_index_triu=batch.edge_index_directed,
-                                       num_edges=batch.n_edges,
-                                       batched_obj=is_loss_batched)
-    elif problem.name == "dual":
-        predicted_obj = problem.new_obj_fn(V=V, L=batch.L,
-                                           batched_obj=is_loss_batched)
-    else:
-        raise ValueError('Invalid problem')
-    gap = problem.optimality_gap(predicted_obj, batch.targets)
-    return gap
-
-
-def dict_agg(stats, key, value):
-    if key in stats.keys():
-        if "worst" in key:
-            stats[key] = max(stats[key], value)
-        else:
-            stats[key] += value
-    else:
-        stats[key] = value
-
-
-def evaluate_model(args, data, problem):
-    test_stats = {}
-    test_gaps = []
-    model = load_model(args)
-    model = load_weights(model, args)
     model.eval()
-    for i, batch in enumerate(data['test']):
+    total_loss = 0.0
+    total_correct = 0
+    total_samples = 0
+
+    for batch in loader:
+        samples = _to_data_list(batch)
+        for sample in samples:
+            logits, target = _forward_sample(model, sample, device)
+            sample_loss = F.cross_entropy(
+                logits.unsqueeze(0),
+                target.view(1),
+            )
+            total_loss += sample_loss.item()
+            pred = logits.argmax(dim=-1)
+            total_correct += int((pred == target).item())
+        total_samples += len(samples)
+
+    avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+    accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+    return {"loss": avg_loss, "accuracy": accuracy}
+
+
+def run_training(args, data: Dict[str, Optional[DataLoader]]):
+    device = torch.device(getattr(args, "device", "cpu"))
+    model = load_model(args)
+    optimizer = get_optimizer(args, model)
+
+    train_loader = data.get("train")
+    val_loader = data.get("val")
+    test_loader = data.get("test")
+
+    num_epochs = getattr(args, "n_epochs", getattr(args, "epochs", 1))
+    best_val_acc = float("-inf")
+    best_state = None
+    metrics_history = []
+    print_freq = getattr(args, "resultPrintFreq", 1)
+
+    for epoch in range(1, num_epochs + 1):
         start_time = time.time()
-        gap = get_gap(model, batch, problem, args, is_loss_batched=True)
-        test_time = time.time() - start_time
+        train_metrics = train_one_epoch(model, train_loader, optimizer, device)
+        elapsed = time.time() - start_time
 
-        gap_mean = float(gap.mean().detach().cpu())
-        gap_worst = float(torch.norm(gap, float('inf')).detach().cpu())  # max of samples
+        val_metrics = evaluate(model, val_loader, device) if val_loader else None
+        if val_metrics:
+            val_acc = val_metrics["accuracy"]
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                best_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in model.state_dict().items()
+                }
 
-        dict_agg(test_stats, 'test_time', test_time)
-        dict_agg(test_stats, 'test_gap', gap_mean)
-        dict_agg(test_stats, 'test_gap_worst', gap_worst)
-        dict_agg(test_stats, 'test_agg', 1.)
-        test_gaps.append(gap_mean)
-    test_stats['test_gaps'] = np.array(test_gaps)
+        metrics_history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_metrics["loss"],
+                "train_acc": train_metrics["accuracy"],
+                "val_loss": val_metrics["loss"] if val_metrics else None,
+                "val_acc": val_metrics["accuracy"] if val_metrics else None,
+                "time": elapsed,
+            }
+        )
 
-    with open(f'./logs/run_training/{args.model_id}_TestStats.dict', 'wb') as f:
-        pickle.dump(test_stats, f)
+        if epoch % max(1, print_freq) == 0 or epoch == num_epochs:
+            log = [
+                f"Epoch {epoch:03d}/{num_epochs}",
+                f"train_loss={train_metrics['loss']:.4f}",
+                f"train_acc={train_metrics['accuracy']:.4f}",
+                f"time={elapsed:.2f}s",
+            ]
+            if val_metrics:
+                log.extend(
+                    [
+                        f"val_loss={val_metrics['loss']:.4f}",
+                        f"val_acc={val_metrics['accuracy']:.4f}",
+                    ]
+                )
+            print(" | ".join(log))
 
-    calculate_scores(args, data)
+        log_cpu_memory_usage(epoch, step="training")
 
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
-def calculate_scores(args, data):
-    if os.path.exists(f'./logs/run_training/{args.model_id}_TrainingStats.dict'):
-        try:
-            with open(f'./logs/run_training/{args.model_id}_TrainingStats.dict', 'rb') as f:
-                training_stats = pickle.load(f)
-        except:
-            print(f'{args.model_id}_TrainingStats.dict is missing. Load test stats only.')
+    test_metrics = evaluate(model, test_loader, device) if test_loader else None
+    if test_metrics:
+        print(
+            f"Test metrics -> loss: {test_metrics['loss']:.4f}, "
+            f"accuracy: {test_metrics['accuracy']:.4f}"
+        )
 
-    with open(f'./logs/run_training/{args.model_id}_TestStats.dict', 'rb') as f:
-        test_stats = pickle.load(f)
+    model_id = getattr(args, "model_id", None)
+    if metrics_history and model_id:
+        log_dir = Path("./logs/run_training")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        history_path = log_dir / f"{model_id}_TrainingStats.pkl"
+        with history_path.open("wb") as f:
+            pickle.dump(metrics_history, f)
+        if test_metrics:
+            test_path = log_dir / f"{model_id}_TestStats.pkl"
+            with test_path.open("wb") as f:
+                pickle.dump(test_metrics, f)
 
-    # store the test gap
-    np.save(f'./data/results_summary/{args.model_id}_test_gaps.npy', test_stats['test_gaps'])
-
-    scores = {
-              'test_optimality_gap_mean': test_stats['test_gap'] / test_stats['test_agg'],
-              'test_optimality_gap_worst': test_stats['test_gap_worst'],
-              'train_time': training_stats['train_time'],
-              'val_time': training_stats['val_time'] / training_stats['val_agg'],
-              'test_time': test_stats['test_time'] / test_stats['test_agg'],}
-    print(scores)
-    create_report(scores, args)
-
-
-def create_report(scores, args):
-    args_dict = args_to_dict(args)
-    # combine scores and args dict
-    args_scores_dict = args_dict | scores
-    # save dict
-    save_dict(args_scores_dict, args)
-    plot_distribution(args)
-
-
-def args_to_dict(args):
-    return vars(args)
-
-
-def save_dict(dictionary, args):
-    w = csv.writer(open('./data/results_summary/' + args.model_id + '.csv', 'w'))
-    for key, val in dictionary.items():
-        w.writerow([key, val])
-
-
-def plot_distribution(args):
-    """
-    Plot the distribution of test gaps.
-    """
-    test_gaps = np.load(f'./data/results_summary/{args.model_id}_test_gaps.npy')
-    plt.figure()
-    plt.hist(test_gaps, bins=100)
-    plt.xlabel('test gap')
-    plt.savefig(f'./data/results_summary/{args.model_id}_test_gap_hist.pdf', format='pdf')
-
-
-def load_weights(model, args):
-    PATH = './models/' + args.model_id + '.pth'
-    #checkpoint = torch.load(PATH, map_location=args.device, weights_only=False)
-    checkpoint = torch.load(PATH, map_location=args.device)
-    model.load_state_dict(checkpoint['state_dict'])
-    model.to(args.device)
-    return model
+    return {
+        "model": model,
+        "train_metrics": train_metrics,
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+    }

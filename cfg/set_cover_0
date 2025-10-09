@@ -5,10 +5,10 @@ hidden_channels: 64
 lr: 0.01
 model: holo
 n_breakings: 8
-n_epochs: 5
-num_features: 421452352
+n_epochs: 2
 num_layers: 4
-out_dim: 21435262
+out_dim: 64
+max_samples_per_split: 128
 power: 2
 sample_negatives: false
 seed: 42

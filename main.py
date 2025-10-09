@@ -1,9 +1,10 @@
-from train import run_training
-from utils import load_data, load_problem
 import argparse
 import os
 import torch
 import yaml
+
+from train import run_training
+from utils import load_data
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -17,7 +18,7 @@ def add_arguments():
 
     # save related parameters
     parser.add_argument("--resultSaveFreq", type=int, default=1000)
-    parser.add_argument("--resultPrintFreq", type=int, default=2)
+    parser.add_argument("--resultPrintFreq", type=int, default=1)
     parser.add_argument("--float64", type=bool, default=False)
 
     return parser.parse_args()
@@ -32,8 +33,11 @@ def complete_args(cfg_file, init_args):
     args = argparse.Namespace(**args_dict)
 
     # Override
-    if args.epochs < args.resultSaveFreq:
-        args.resultSaveFreq = args.epochs
+    epochs = getattr(args, "n_epochs", None)
+    if epochs is None:
+        epochs = getattr(args, "epochs", None)
+    if epochs is not None and epochs < args.resultSaveFreq:
+        args.resultSaveFreq = epochs
     args.model_id = f"{args.dataset}_cfg{args.cfg_idx}"
     args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -65,8 +69,8 @@ def main(args):
 
 if __name__ == '__main__':
     init_args = add_arguments()
-    cgf_file = f"./cfg/{init_args.dataset}_{init_args.cfg_idx}"
-    args = complete_args(cgf_file, init_args)
+    cfg_file = f"./cfg/{init_args.dataset}_{init_args.cfg_idx}"
+    args = complete_args(cfg_file, init_args)
     for key, value in vars(args).items():
         print(f"{key}: {value}")
     main(args)

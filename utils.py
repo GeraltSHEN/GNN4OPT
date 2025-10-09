@@ -1,18 +1,16 @@
 import gzip
 import pickle
 from pathlib import Path
-from typing import Dict, Sequence, Tuple, Union
+from typing import Dict, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
 
 from models import (
-    Classifier,
-    Holo,
-    GCNDataEncoder,
-    PowerMethod,
-    ProductTupleEncoder,
-    SymmetryBreakingGNN,
+    BipartiteDataEncoder,
+    BipartiteHoloTupleEncoder,
+    GNNPolicy,
+    VariableTupleEncoder,
 )
 
 from torch_geometric.data import HeteroData
@@ -130,6 +128,14 @@ def load_data(args) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Pat
     for split_name, cfg in splits.items():
         split_dir = dataset_root / cfg["subdir"]
         sample_files = sorted(split_dir.glob(file_pattern))
+        max_split_samples = getattr(
+            args,
+            f"max_{split_name}_samples",
+            getattr(args, "max_samples_per_split", None),
+        )
+        if max_split_samples is not None:
+            max_split_samples = int(max_split_samples)
+            sample_files = sample_files[:max_split_samples]
         metadata[f"{split_name}_files"] = sample_files
         if sample_files:
             data[split_name] = make_pyg_dataloader(
@@ -142,83 +148,82 @@ def load_data(args) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Pat
     return data
 
 
-def load_model(args):
-    data_encoder = GCNDataEncoder(
-        in_channels=args.num_features,
-        hidden_channels=args.hidden_channels,
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-    )
-    if args.model == "gcn":
-        tuple_encoder = ProductTupleEncoder()
-        in_dim = args.hidden_channels
-    elif args.model == "holo":
-        in_dim = args.hidden_channels + 1
-        if args.symmetry_breaking_model == "power_method":
-            symmetry_breaking_model = PowerMethod(args.power, in_dim)
-        elif args.symmetry_breaking_model == "gnn":
-            symmetry_breaking_model = SymmetryBreakingGNN(in_dim, in_dim)
-        else:
-            raise ValueError(
-                f"Unkown symmetry breaking model {args.symmetry_breaking_model}"
-            )
-        tuple_encoder = Holo(
-            n_breakings=args.n_breakings,
-            symmetry_breaking_model=symmetry_breaking_model,
-        )
-    else:
-        raise NotImplementedError()
-    out_dim = args.out_dim
-    model = Classifier(
-        data_encoder,
-        tuple_encoder,
-        in_dim=in_dim,
-        out_dim=out_dim,
-        linear_classifier=args.linear_classifier,
-        train_head_only=args.pretrained_path is not None,
-    )
-
-    print(f"Model Architecture: \n{model}")
-    model = model.to(args.device)
-    return model
-
-
-class CooSampler:
-    def __init__(self, coos, values, batch_size: int, shuffle: bool = False):
-        assert coos.size(1) == values.size(0)
-        self.coos = coos
-        self.values = values
-        self.shuffle = shuffle
-        n_groups, rem = divmod(self.values.size(0), batch_size)
-
-        self.batch_sizes = [batch_size] * n_groups
-        if rem > 0:
-            self.batch_sizes.append(rem)
-
-    def __len__(self):
-        return len(self.batch_sizes)
-
-    def __iter__(self):
-        size = self.values.size(0)
-        perm_coos = self.coos
-        perm_values = self.values
-        if self.shuffle:
-            perm = torch.randperm(size)
-            perm_coos = self.coos[:, perm]
-            perm_values = self.values[perm]
-
-        return iter(
-            [
-                (coos, values)
-                for (coos, values) in zip(
-                    torch.split(perm_coos, self.batch_sizes, dim=1),
-                    torch.split(perm_values, self.batch_sizes, dim=0),
-                )
-            ]
-        )
-
-
 def get_optimizer(args, model):
     params = model.parameters()
     optimizer = torch.optim.Adam(params, lr=args.lr, weight_decay=args.weight_decay)
     return optimizer
+
+
+def _infer_feature_dims(sample: HeteroData) -> Tuple[int, int, int]:
+    cons_dim = sample["constraint"].x.size(-1)
+    var_dim = sample["variable"].x.size(-1)
+    edge_attr = getattr(sample["constraint", "to", "variable"], "edge_attr", None)
+    if edge_attr is None:
+        edge_dim = 1
+    else:
+        edge_dim = edge_attr.size(-1)
+    return cons_dim, var_dim, edge_dim
+
+
+def _get_reference_sample(args) -> Optional[HeteroData]:
+    dataset_root = Path(f"{args.dataset_path}")
+    file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
+    splits = [
+        getattr(args, "train_split", "train"),
+        getattr(args, "val_split", "valid"),
+        getattr(args, "test_split", "test"),
+    ]
+    for split in splits:
+        split_dir = dataset_root / split
+        sample_files = sorted(split_dir.glob(file_pattern))
+        if sample_files:
+            return _load_single_pyg_sample(sample_files[0])
+    return None
+
+
+def load_model(args) -> torch.nn.Module:
+    torch.manual_seed(getattr(args, "seed", 42))
+    device = getattr(args, "device", "cpu")
+
+    reference_sample = _get_reference_sample(args)
+    if reference_sample is None:
+        raise FileNotFoundError(
+            "Unable to locate any samples to infer feature dimensions. "
+            "Please check dataset_path and file_pattern."
+        )
+
+    cons_dim, var_dim, edge_dim = _infer_feature_dims(reference_sample)
+
+    emb_size = getattr(args, "hidden_channels", 64)
+    encoder_kwargs = dict(
+        emb_size=emb_size,
+        cons_nfeats=cons_dim,
+        var_nfeats=var_dim,
+        edge_nfeats=edge_dim,
+        num_layers=getattr(args, "num_layers", 2),
+        conv_type=getattr(args, "conv_type", "sage"),
+    )
+
+    data_encoder = BipartiteDataEncoder(**encoder_kwargs)
+
+    model_name = getattr(args, "model", "gnn_policy").lower()
+    if model_name in {"holo", "bipartite_holo", "holo_tuple"}:
+        tuple_encoder = BipartiteHoloTupleEncoder(
+            n_breakings=getattr(args, "n_breakings", 8),
+            encoder_kwargs=encoder_kwargs,
+            reduce=getattr(args, "holo_reduce", "mean"),
+        )
+    elif model_name in {"variable", "baseline", "gnn_policy"}:
+        tuple_encoder = VariableTupleEncoder()
+    else:
+        raise ValueError(f"Unknown model '{model_name}'.")
+
+    model = GNNPolicy(
+        data_encoder=data_encoder,
+        tuple_encoder=tuple_encoder,
+        emb_size=emb_size,
+        linear_classifier=getattr(args, "linear_classifier", False),
+        projection_dim=getattr(args, "out_dim", None),
+    )
+    model.to(device)
+    return model

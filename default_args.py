@@ -10,7 +10,8 @@ def get_default_args(dataset):
     # dataset related parameters
     # layers related parameters
     defaults["model"] = "holo" # gcn; holo
-    defaults["hidden_channels"] = 64
+    hidden_channels = 64
+    defaults["hidden_channels"] = hidden_channels
     defaults["num_layers"] = 4
     defaults["dropout"] = 0.0
     defaults["n_breakings"] = 8  # for holo
@@ -19,16 +20,17 @@ def get_default_args(dataset):
     defaults["power"] = 2
     # training related parameters
     defaults["seed"] = 42
-    defaults["n_epochs"] = 5
+    defaults["n_epochs"] = 2
     defaults["lr"] = 0.01
     defaults["batch_size"] = 32
     defaults["weight_decay"] = 5e-4
+    defaults["out_dim"] = hidden_channels
+    defaults["max_samples_per_split"] = 128
 
     if dataset == "set_cover":
         # dataset related parameters
         defaults["dataset_path"] = "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d"
-        defaults["num_features"] = 421452352
-        defaults["out_dim"] = 21435262
+        # defaults["num_features"] = 421452352
         # layers related parameters
         # training related parameters
         defaults["sample_negatives"] = False
@@ -61,4 +63,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-
