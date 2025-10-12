@@ -43,8 +43,9 @@ class SymmetryBreakingGNN(torch.nn.Module):
 class ProductTupleEncoder(torch.nn.Module):
     """A baseline tuple encoder that takes the element-wise product of node embeddings."""
 
-    def __init__(self):
+    def __init__(self, emb_size):
         super().__init__()
+        self.emb_size = emb_size
 
     def forward(self, X, adj_t, tuples_coo, **kwargs):
         return X[tuples_coo].prod(dim=0)
@@ -57,9 +58,10 @@ class Holo(torch.nn.Module):
         super().__init__()
         self.n_breakings = n_breakings
         self.symmetry_breaking_model = symmetry_breaking_model
+        self.emb_size = self.symmetry_breaking_model.out_dim
 
         self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
-    
+
     def tied_topk_indices(self, values, k, expansion=2):
         """
         >>> tied_topk_indices(torch.tensor([4,4,4,5,5]), 2, 2).sort()[0]
@@ -221,7 +223,7 @@ class GNNPolicy(nn.Module):
 
         # FINAL MLP
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(emb_size, emb_size),
+            torch.nn.Linear(self.tuple_encoder.emb_size, emb_size),
             torch.nn.ReLU(),
             torch.nn.Linear(emb_size, output_size, bias=False),
         )

@@ -1,10 +1,12 @@
 import gzip
 import pickle
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Tuple, Union
+from typing import Dict, Sequence, Union
 
 import numpy as np
 import torch
+from torch_geometric.data import Data, Dataset
+from torch_geometric.loader import DataLoader
 
 from models import (
     GNNPolicy,
@@ -14,22 +16,12 @@ from models import (
     SymmetryBreakingGNN,
 )
 
-from torch_geometric.data import HeteroData
-from torch_geometric.loader import DataLoader as PyGDataLoader
 
-
-TensorTuple = Tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]
+def load_gzip(path: Union[str, Path]):
+    """Load a gzip-compressed pickle file"""
+    path = Path(path)
+    with gzip.open(path, "rb") as fh:
+        return pickle.load(fh)
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
@@ -40,71 +32,100 @@ def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]])
     return [str(x) for x in sample_files]
 
 
-def _load_single_pyg_sample(sample_file: Union[str, Path]):
-    """Load a single sample file and convert it into a torch_geometric HeteroData object."""
-    with gzip.open(sample_file, "rb") as f:
-        sample = pickle.load(f)
+class BipartiteNodeData(Data):
+    """
+    This class encode a node bipartite graph observation as returned by the `ecole.observation.NodeBipartite`
+    observation function in a format understood by the pytorch geometric data handlers.
+    """
+    def __init__(
+        self,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+        candidates: torch.Tensor,
+        nb_candidates: int,
+        candidate_choice: int,
+        candidate_scores: torch.Tensor,
+    ):
+        super().__init__()
+        self.constraint_features = constraint_features
+        self.edge_index = edge_indices
+        self.edge_attr = edge_features
+        self.variable_features = variable_features
+        self.candidates = candidates
+        self.nb_candidates = nb_candidates
+        self.candidate_choice = candidate_choice
+        self.candidate_scores = candidate_scores
 
-    sample_state, _, sample_action, sample_cands, cand_scores = sample["data"]
-
-    sample_cands = np.asarray(sample_cands)
-    cand_choice = int(np.where(sample_cands == sample_action)[0][0])
-
-    c, e, v = sample_state
-
-    data = HeteroData()
-    data["constraint"].x = torch.as_tensor(c["values"], dtype=torch.float32)
-    data["variable"].x = torch.as_tensor(v["values"], dtype=torch.float32)
-
-    edge_index = torch.as_tensor(e["indices"], dtype=torch.int64)
-    if edge_index.numel() > 0:
-        data["constraint", "to", "variable"].edge_index = edge_index
-        data["constraint", "to", "variable"].edge_attr = torch.as_tensor(e["values"], dtype=torch.float32)
-
-    data.num_constraints = torch.tensor(c["values"].shape[0], dtype=torch.int32)
-    data.num_variables = torch.tensor(v["values"].shape[0], dtype=torch.int32)
-    data.candidate_indices = torch.as_tensor(sample_cands, dtype=torch.int64)
-    data.candidate_scores = torch.as_tensor(cand_scores, dtype=torch.float32)
-    data.candidate_choice = torch.tensor(cand_choice, dtype=torch.int64)
-
-    return data
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "edge_index":
+            return torch.tensor(
+                [[self.constraint_features.size(0)], [self.variable_features.size(0)]]
+            )
+        elif key == "candidates":
+            return self.variable_features.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
 
 
-def load_data_pyg(sample_files: Union[str, Path, Sequence[Union[str, Path]]]):
-    """Load sample files and convert them into a list of torch_geometric HeteroData objects."""
-    sample_files = _ensure_sequence(sample_files)
-    return [_load_single_pyg_sample(sample_file) for sample_file in sample_files]
+class GraphDataset(Dataset):
+    """
+    This class encodes a collection of graphs, as well as a method to load such graphs from the disk.
+    It can be used in turn by the data loaders provided by pytorch geometric.
+    """
+    def __init__(
+        self,
+        sample_files: Sequence[Union[str, Path]],
+        edge_nfeats: int = 2,
+    ):
+        super().__init__(root=None, transform=None, pre_transform=None)
+        self.sample_files = [str(path) for path in _ensure_sequence(sample_files)]
+        self.edge_nfeats = edge_nfeats
 
-
-class PyGSampleDataset(torch.utils.data.Dataset):
-    """Dataset wrapper yielding torch_geometric data objects per sample file."""
-
-    def __init__(self, sample_files: Union[str, Path, Sequence[Union[str, Path]]]):
-        self.sample_files = _ensure_sequence(sample_files)
-
-    def __len__(self):
+    def len(self):
         return len(self.sample_files)
 
-    def __getitem__(self, index: int):
-        return _load_single_pyg_sample(self.sample_files[index])
+    def get(self, index):
+        """
+        This method loads a node bipartite graph observation as saved on the disk during data collection.
+        """
+        sample = load_gzip(self.sample_files[index])
+        sample_state, _, sample_action, sample_action_set, sample_scores = sample["data"]
 
+        constraint_dict, edge_dict, variable_dict = sample_state
+        constraint_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
+        edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
+        edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
+        variable_features = torch.as_tensor(variable_dict["values"], dtype=torch.float32)
 
-def make_pyg_dataloader(
-    sample_files: Union[str, Path, Sequence[Union[str, Path]]],
-    batch_size: int,
-    shuffle: bool = False,
-    **kwargs,
-):
-    """Construct a torch_geometric DataLoader over the provided sample files."""
+        if self.edge_nfeats == 2:
+            norm = torch.linalg.norm(edge_features)
+            ef_norm = torch.where(norm > 0, edge_features / norm, torch.zeros_like(edge_features))
+            edge_features = torch.cat((edge_features, ef_norm), dim=-1)
+        
+        candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
+        candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
+        candidate_choice = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
 
-    dataset = PyGSampleDataset(sample_files)
-    return PyGDataLoader(dataset, batch_size=batch_size, shuffle=shuffle, **kwargs)
+        graph = BipartiteNodeData(
+            constraint_features,
+            edge_indices,
+            edge_features,
+            variable_features,
+            candidates,
+            len(candidates),
+            candidate_choice,
+            candidate_scores,
+        )
+        graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
+        return graph
 
 
 def load_data(args) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
     """Load train/val/test splits as torch_geometric DataLoaders based on CLI args."""
     dataset_root = Path(f"{args.dataset_path}")
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
+    edge_nfeats = getattr(args, "edge_nfeats", 1)
 
     splits = {
         "train": {
@@ -139,12 +160,13 @@ def load_data(args) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Pat
             sample_files = sample_files[:max_split_samples]
         metadata[f"{split_name}_files"] = sample_files
         if sample_files:
-            data[split_name] = make_pyg_dataloader(
-                sample_files, batch_size=cfg["batch_size"], shuffle=cfg["shuffle"]
-            )
+            dataset = GraphDataset(sample_files, edge_nfeats=edge_nfeats)
+            data[split_name] = DataLoader(dataset, 
+                                          batch_size=cfg["batch_size"], 
+                                          shuffle=cfg["shuffle"], 
+                                          num_workers=0, pin_memory=False)
         else:
             data[split_name] = None
-
     data.update(metadata)
     return data
 
@@ -155,97 +177,41 @@ def get_optimizer(args, model):
     return optimizer
 
 
-def _infer_feature_dims(sample: HeteroData) -> Tuple[int, int, int]:
-    cons_dim = sample["constraint"].x.size(-1)
-    var_dim = sample["variable"].x.size(-1)
-    edge_attr = getattr(sample["constraint", "to", "variable"], "edge_attr", None)
-    if edge_attr is None:
-        edge_dim = 1
+def load_model(args, example_input: Data) -> torch.nn.Module:
+    if example_input is None:
+        raise ValueError("load_model requires a sample graph to infer feature dimensions.")
+
+    emb_size = args.hidden_channels
+    n_layers = args.num_layers
+    r = args.r
+    if args.r == 1:
+         output_size = 1
     else:
-        edge_dim = edge_attr.size(-1)
-    return cons_dim, var_dim, edge_dim
+        raise NotImplementedError("Only r=1 is supported for now.")
 
+    cons_nfeats = example_input.constraint_features.size(-1)
+    edge_nfeats = example_input.edge_attr.size(-1)
+    var_nfeats = example_input.variable_features.size(-1)
 
-def _get_reference_sample(args) -> Optional[HeteroData]:
-    dataset_root = Path(f"{args.dataset_path}")
-    file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
-    splits = [
-        getattr(args, "train_split", "train"),
-        getattr(args, "val_split", "valid"),
-        getattr(args, "test_split", "test"),
-    ]
-    for split in splits:
-        split_dir = dataset_root / split
-        sample_files = sorted(split_dir.glob(file_pattern))
-        if sample_files:
-            return _load_single_pyg_sample(sample_files[0])
-    return None
-
-
-def load_model(args) -> torch.nn.Module:
-    torch.manual_seed(getattr(args, "seed", 42))
-    device = getattr(args, "device", "cpu")
-
-    reference_sample = _get_reference_sample(args)
-    if reference_sample is None:
-        raise FileNotFoundError(
-            "Unable to locate any samples to infer feature dimensions. "
-            "Please check dataset_path and file_pattern."
-        )
-
-    cons_dim, var_dim, edge_dim = _infer_feature_dims(reference_sample)
-
-    emb_size = getattr(args, "hidden_channels", 64)
-    encoder_kwargs = dict(
-        emb_size=emb_size,
-        cons_nfeats=cons_dim,
-        var_nfeats=var_dim,
-        edge_nfeats=edge_dim,
-        num_layers=getattr(args, "num_layers", 2),
-        conv_type=getattr(args, "conv_type", "sage"),
-    )
-
-    data_encoder = MILPEncoder(**encoder_kwargs)
-
-    model_name = getattr(args, "model", "gnn_policy").lower()
-    holo_aliases = {"holo", "bipartite_holo", "holo_tuple", "holo_power"}
-    baseline_aliases = {"variable", "baseline", "gnn_policy"}
-
-    if model_name in holo_aliases:
-        breaker_choice = getattr(args, "holo_breaker", "gnn").lower()
-        if model_name == "holo_power":
-            breaker_choice = "power"
-        if breaker_choice == "power":
-            breaker = PowerMethod(
-                k=getattr(args, "power_iterations", 2),
-                out_dim=emb_size + 1,
-            )
+    if args.model == "raw":
+        tuple_encoder = ProductTupleEncoder(emb_size)
+    elif args.model == "holo":
+        if args.symmetry_breaking_model == "power_method":
+            symmetry_breaking_model = PowerMethod(args.power, emb_size + 1)
+        elif args.symmetry_breaking_model == "gnn":
+            symmetry_breaking_model = SymmetryBreakingGNN(emb_size + 1, emb_size + 1)
         else:
-            breaker = SymmetryBreakingGNN(
-                in_channels=emb_size + 1,
-                hidden_channels=getattr(args, "holo_hidden_channels", emb_size),
+            raise ValueError(
+                f"Unkown symmetry breaking model {args.symmetry_breaking_model}"
             )
         tuple_encoder = Holo(
-            n_breakings=getattr(args, "n_breakings", 8),
-            symmetry_breaking_model=breaker,
+            n_breakings=args.n_breakings,
+            symmetry_breaking_model=symmetry_breaking_model,
         )
-        head_in_dim = tuple_encoder.symmetry_breaking_model.out_dim
-    elif model_name in baseline_aliases:
-        tuple_encoder = ProductTupleEncoder()
-        head_in_dim = emb_size
     else:
-        raise ValueError(f"Unknown model '{model_name}'.")
+        raise NotImplementedError()
 
-    linear_classifier = getattr(args, "linear_classifier", False)
-    train_head_only = getattr(args, "train_head_only", False)
+    model = GNNPolicy(emb_size, cons_nfeats, edge_nfeats, var_nfeats, output_size,
+                      n_layers, tuple_encoder, r=r)
 
-    model = Classifier(
-        data_encoder=data_encoder,
-        tuple_encoder=tuple_encoder,
-        in_dim=head_in_dim,
-        out_dim=1,
-        linear_classifier=linear_classifier,
-        train_head_only=train_head_only,
-    )
-    model.to(device)
-    return model
+    return model.to(args.device)
