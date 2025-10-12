@@ -7,10 +7,11 @@ import numpy as np
 import torch
 
 from models import (
-    BipartiteDataEncoder,
-    BipartiteHoloTupleEncoder,
     GNNPolicy,
-    VariableTupleEncoder,
+    Holo,
+    PowerMethod,
+    ProductTupleEncoder,
+    SymmetryBreakingGNN,
 )
 
 from torch_geometric.data import HeteroData
@@ -204,26 +205,47 @@ def load_model(args) -> torch.nn.Module:
         conv_type=getattr(args, "conv_type", "sage"),
     )
 
-    data_encoder = BipartiteDataEncoder(**encoder_kwargs)
+    data_encoder = MILPEncoder(**encoder_kwargs)
 
     model_name = getattr(args, "model", "gnn_policy").lower()
-    if model_name in {"holo", "bipartite_holo", "holo_tuple"}:
-        tuple_encoder = BipartiteHoloTupleEncoder(
+    holo_aliases = {"holo", "bipartite_holo", "holo_tuple", "holo_power"}
+    baseline_aliases = {"variable", "baseline", "gnn_policy"}
+
+    if model_name in holo_aliases:
+        breaker_choice = getattr(args, "holo_breaker", "gnn").lower()
+        if model_name == "holo_power":
+            breaker_choice = "power"
+        if breaker_choice == "power":
+            breaker = PowerMethod(
+                k=getattr(args, "power_iterations", 2),
+                out_dim=emb_size + 1,
+            )
+        else:
+            breaker = SymmetryBreakingGNN(
+                in_channels=emb_size + 1,
+                hidden_channels=getattr(args, "holo_hidden_channels", emb_size),
+            )
+        tuple_encoder = Holo(
             n_breakings=getattr(args, "n_breakings", 8),
-            encoder_kwargs=encoder_kwargs,
-            reduce=getattr(args, "holo_reduce", "mean"),
+            symmetry_breaking_model=breaker,
         )
-    elif model_name in {"variable", "baseline", "gnn_policy"}:
-        tuple_encoder = VariableTupleEncoder()
+        head_in_dim = tuple_encoder.symmetry_breaking_model.out_dim
+    elif model_name in baseline_aliases:
+        tuple_encoder = ProductTupleEncoder()
+        head_in_dim = emb_size
     else:
         raise ValueError(f"Unknown model '{model_name}'.")
 
-    model = GNNPolicy(
+    linear_classifier = getattr(args, "linear_classifier", False)
+    train_head_only = getattr(args, "train_head_only", False)
+
+    model = Classifier(
         data_encoder=data_encoder,
         tuple_encoder=tuple_encoder,
-        emb_size=emb_size,
-        linear_classifier=getattr(args, "linear_classifier", False),
-        projection_dim=getattr(args, "out_dim", None),
+        in_dim=head_in_dim,
+        out_dim=1,
+        linear_classifier=linear_classifier,
+        train_head_only=train_head_only,
     )
     model.to(device)
     return model
