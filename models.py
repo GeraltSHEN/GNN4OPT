@@ -69,13 +69,27 @@ class Holo(torch.nn.Module):
         >>> tied_topk_indices(torch.tensor([4,1,4,5,5,1]), 3, 2).sort()[0]
         tensor([0, 2, 3, 4])
         """
-        assert len(values) >= k * expansion
+        num_values = values.numel()
+        if num_values < k:
+            raise ValueError("Need at least k values to select from.")
 
-        values, indices = torch.topk(values, k * expansion)
-        assert values[k - 1] != values[-1], (
-            "Cannot break ties within expansion.\nTry a larger expansion value"
-        )
-        return indices[: k + ((values[k - 1] == values[k:]).sum())]
+        expansion = max(1, expansion)
+        max_expansion = max(expansion, (num_values + k - 1) // k)
+        current_expansion = expansion
+
+        while True:
+            top_n = min(num_values, current_expansion * k)
+            top_values, indices = torch.topk(values, top_n)
+            kth_value = top_values[k - 1]
+            extra = int((top_values[k:] == kth_value).sum().item())
+
+            if extra > 0 and top_n < num_values:
+                if current_expansion == max_expansion:
+                    return indices[: k + extra]
+                current_expansion = min(max_expansion, current_expansion * 2)
+                continue
+
+            return indices[: k + extra]
 
     def get_nodes_to_break(self, adj_t, n_breakings=8):
         node_degrees = adj_t.sum(-1)
