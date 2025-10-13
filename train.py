@@ -289,31 +289,14 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train the MILP branching policy.")
     parser.add_argument("--dataset", type=str, default="set_cover", help="Dataset key.")
     parser.add_argument("--cfg_idx", type=int, default=0, help="Configuration index.")
-    parser.add_argument(
-        "--config_root",
-        type=str,
-        default="./cfg",
-        help="Directory containing configuration files.",
-    )
-    parser.add_argument(
-        "--model_suffix",
-        type=str,
-        default="",
-        help="Optional suffix appended to model/log directories.",
-    )
-    parser.add_argument(
-        "--resume", action="store_true", help="Resume training from the latest checkpoint."
-    )
-    parser.add_argument(
-        "--resume_model_dir",
-        type=str,
-        default="",
-        help="Directory containing checkpoints to resume from.",
-    )
+    parser.add_argument("--config_root", type=str, default="./cfg", help="Directory containing configuration files.")
+    parser.add_argument("--model_suffix", type=str, default="", help="Optional suffix appended to model/log directories.")
+    parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.")
+    parser.add_argument("--resume_model_dir", type=str, default="", help="Directory containing checkpoints to resume from.")
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=1,
+        default=100,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
@@ -325,7 +308,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--print_every",
         type=int,
-        default=1,
+        default=100,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     return parser.parse_args(argv)
@@ -341,7 +324,7 @@ def _load_config(config_root: Path, dataset: str, cfg_idx: int) -> Dict[str, Any
 
 
 def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
-    args_dict = {**vars(init_args), **cfg}
+    args_dict = {**cfg, **vars(init_args)}
     args = argparse.Namespace(**args_dict)
 
     args.model_id = f"{args.dataset}_cfg{args.cfg_idx}"
