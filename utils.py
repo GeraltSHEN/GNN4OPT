@@ -1,4 +1,6 @@
 import gzip
+import os
+import random
 import pickle
 from pathlib import Path
 from typing import Dict, Sequence, Union
@@ -45,7 +47,7 @@ class BipartiteNodeData(Data):
         variable_features: torch.Tensor,
         candidates: torch.Tensor,
         nb_candidates: int,
-        candidate_choice: int,
+        candidate_choices: int,
         candidate_scores: torch.Tensor,
     ):
         super().__init__()
@@ -55,7 +57,7 @@ class BipartiteNodeData(Data):
         self.variable_features = variable_features
         self.candidates = candidates
         self.nb_candidates = nb_candidates
-        self.candidate_choice = candidate_choice
+        self.candidate_choices = candidate_choices
         self.candidate_scores = candidate_scores
 
     def __inc__(self, key, value, *args, **kwargs):
@@ -105,7 +107,7 @@ class GraphDataset(Dataset):
         
         candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
         candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
-        candidate_choice = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
+        candidate_choices = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
 
         graph = BipartiteNodeData(
             constraint_features,
@@ -114,7 +116,7 @@ class GraphDataset(Dataset):
             variable_features,
             candidates,
             len(candidates),
-            candidate_choice,
+            candidate_choices,
             candidate_scores,
         )
         graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
@@ -177,10 +179,7 @@ def get_optimizer(args, model):
     return optimizer
 
 
-def load_model(args, example_input: Data) -> torch.nn.Module:
-    if example_input is None:
-        raise ValueError("load_model requires a sample graph to infer feature dimensions.")
-
+def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     emb_size = args.hidden_channels
     n_layers = args.num_layers
     r = args.r
@@ -188,10 +187,6 @@ def load_model(args, example_input: Data) -> torch.nn.Module:
          output_size = 1
     else:
         raise NotImplementedError("Only r=1 is supported for now.")
-
-    cons_nfeats = example_input.constraint_features.size(-1)
-    edge_nfeats = example_input.edge_attr.size(-1)
-    var_nfeats = example_input.variable_features.size(-1)
 
     if args.model == "raw":
         tuple_encoder = ProductTupleEncoder(emb_size)
@@ -215,3 +210,75 @@ def load_model(args, example_input: Data) -> torch.nn.Module:
                       n_layers, tuple_encoder, r=r)
 
     return model.to(args.device)
+
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+
+"""
+Utility functions to load and save torch model checkpoints 
+"""
+def load_checkpoint(model, optimizer=None, step='max', save_dir='checkpoints', device='cpu', exclude_keys=[]):
+    os.makedirs(save_dir, exist_ok=True)
+
+    checkpoints = [x for x in os.listdir(save_dir) if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
+
+    if step == 'max':
+        step = 0
+        if checkpoints:
+            step, last_checkpoint = max([(int(x.split('.')[0]), x) for x in checkpoints])
+    else:
+        last_checkpoint = str(step) + '.pth'
+    
+    if step:
+        save_path = os.path.join(save_dir, last_checkpoint)
+        state = torch.load(save_path, map_location=device)
+
+        if len(exclude_keys) > 0:
+            model_state = state['model'] if 'model' in state else state
+            model_state = {k: v for k, v in model_state.items() if not any(k.startswith(exclude_key) for exclude_key in exclude_keys)}
+            model.load_state_dict(model_state, strict=False)
+            
+            if optimizer and 'optimizer' in state:
+                optimizer_state_dict = state['optimizer']
+                excluded_param_ids = {
+                    id(param) for name, param in model.named_parameters() if any(name.startswith(exclude_key) for exclude_key in exclude_keys)
+                }
+                optimizer_state_dict['state'] = {k: v for k, v in optimizer_state_dict['state'].items() if k not in excluded_param_ids}
+                optimizer.load_state_dict(optimizer_state_dict)
+        else:
+            model_state = state['model'] if 'model' in state else state
+            model.load_state_dict(model_state)
+            if optimizer and 'optimizer' in state:
+                optimizer.load_state_dict(state['optimizer'])
+        
+        print('Loaded checkpoint %s' % save_path)
+    
+    return step
+
+def save_checkpoint(model, step, optimizer=None, save_dir='checkpoints'):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(save_dir, str(step) + '.pth')
+
+    if optimizer is None:
+        torch.save(dict(model=model.state_dict()), save_path)
+    else:
+        torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict()), save_path)
+    print('Saved checkpoint %s' % save_path)
+
+
+def print_dash_str(message: str = "", width: int = 120) -> None:
+    if not message:
+        print("-" * width)
+        return
+    if len(message) + 2 >= width:
+        print(message)
+        return
+    pad_total = width - len(message) - 2
+    left_pad = pad_total // 2
+    right_pad = pad_total - left_pad
+    print(f"{'-' * left_pad} {message} {'-' * right_pad}")

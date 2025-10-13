@@ -62,7 +62,7 @@ class Holo(torch.nn.Module):
 
         self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
 
-    def tied_topk_indices(self, values, k, expansion=2):
+    def tied_topk_indices(self, values, k, expansion=5):
         """
         >>> tied_topk_indices(torch.tensor([4,4,4,5,5]), 2, 2).sort()[0]
         tensor([3, 4])
@@ -222,7 +222,7 @@ class GNNPolicy(nn.Module):
         self.tuple_encoder = tuple_encoder
 
         # FINAL MLP
-        self.mlp = torch.nn.Sequential(
+        self.output_module = torch.nn.Sequential(
             torch.nn.Linear(self.tuple_encoder.emb_size, emb_size),
             torch.nn.ReLU(),
             torch.nn.Linear(emb_size, output_size, bias=False),
@@ -282,11 +282,7 @@ class GNNPolicy(nn.Module):
     def forward(
         self, constraint_features, edge_indices, edge_features, variable_features
     ):
-        n_constraints = constraint_features.size(0)
-        n_variables = variable_features.size(0)
         reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
-        adj_t = self.get_adj_t(edge_indices, reversed_edge_indices, edge_features,
-                               n_constraints, n_variables)
 
         # 1. raw features to embeddings in common dimension
         constraint_features = self.cons_embedding(constraint_features)

@@ -20,17 +20,27 @@ def get_default_args(dataset):
     defaults["power"] = 2
     # training related parameters
     defaults["seed"] = 42
-    defaults["n_epochs"] = 2
+    defaults["epochs"] = 2
     defaults["lr"] = 0.01
     defaults["batch_size"] = 32
     defaults["weight_decay"] = 5e-4
     defaults["out_dim"] = hidden_channels
     defaults["max_samples_per_split"] = 128
+    defaults["loss_option"] = "classification"
+    defaults["score_threshold"] = float("inf")
+    defaults["eval_every"] = 1
+    defaults["save_every"] = 100
+    defaults["print_every"] = 1
+    defaults["model_suffix"] = ""
+    defaults["resume"] = False
+    defaults["resume_model_dir"] = ""
+    defaults["model_dir"] = "./models"
+    defaults["log_dir"] = "./logs"
 
     if dataset == "set_cover":
         # dataset related parameters
         defaults["dataset_path"] = "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d"
-        # defaults["num_features"] = 421452352
+        defaults["r"] = 1
         # layers related parameters
         # training related parameters
         defaults["sample_negatives"] = False

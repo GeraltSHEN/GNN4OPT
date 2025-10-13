@@ -1,16 +1,25 @@
+import argparse
 import os
-import pickle
-import time
 from pathlib import Path
-from typing import Dict, Optional
+import pdb
+from typing import Any, Dict, Optional
 
 import psutil
 import torch
 import torch.nn.functional as F
-from torch_geometric.data import HeteroData
-from torch_geometric.loader import DataLoader
+import tqdm
+import yaml
+from torch.utils.tensorboard import SummaryWriter
 
-from utils import get_optimizer, load_model
+from utils import (
+    get_optimizer,
+    load_model,
+    load_data,
+    set_seed,
+    save_checkpoint,
+    load_checkpoint,
+    print_dash_str
+)
 
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
@@ -24,188 +33,377 @@ def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
         )
 
 
-def _to_data_list(batch) -> list[HeteroData]:
-    if hasattr(batch, "to_data_list"):
-        return batch.to_data_list()
-    return [batch]
+def _infer_feature_dimensions(train_loader):
+    """Infer feature dimensions from a single sample in the training dataset."""
+    dataset = getattr(train_loader, "dataset", None)
+    if dataset is None or len(dataset) == 0:
+        raise ValueError("Training dataset is empty; cannot infer feature dimensions.")
+    sample = dataset[0]
+    cons_nfeats = sample.constraint_features.shape[-1]
+    edge_nfeats = sample.edge_attr.shape[-1]
+    var_nfeats = sample.variable_features.shape[-1]
+    return cons_nfeats, edge_nfeats, var_nfeats
 
 
-def _forward_sample(
-    model: torch.nn.Module,
-    sample: HeteroData,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    sample = sample.to(device)
-    candidate_indices = sample.candidate_indices.to(device)
-    logits = model(sample, candidate_indices)
-    target = sample.candidate_choice.to(device)
-    return logits, target
+def train(
+    args,
+    policy,
+    optimizer,
+    train_dataloader,
+    *,
+    start_step: int = 0,
+    model_dir: Path,
+    log_dir: Path,
+    val_dataloader=None,
+):
+    policy.train()
+    device = args.device
+    epochs = args.epochs
+    eval_every = args.eval_every
+    save_every = args.save_every
+    print_every = args.print_every
+    loss_option = args.loss_option
+    score_th = float('inf')
 
+    model_dir = Path(model_dir)
+    log_dir = Path(log_dir)
+    writer = SummaryWriter(log_dir=str(log_dir))
 
-def train_one_epoch(
-    model: torch.nn.Module,
-    loader: Optional[DataLoader],
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-) -> Dict[str, float]:
-    if loader is None:
-        return {"loss": 0.0, "accuracy": 0.0}
+    num_gradient_steps = start_step
+    for epoch in range(epochs):
+        log_cpu_memory_usage(epoch + 1)
+        mean_loss = 0
+        mean_acc = 0
+        mean_top5_acc = 0
+        mean_score_diff = 0
+        mean_normalized_score_diff = 0
 
-    model.train()
-    total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
+        n_samples_processed = 0
+        for batch in train_dataloader:
+            if (val_dataloader is not None
+                and eval_every
+                and num_gradient_steps % eval_every == 0
+            ):
+                print_dash_str(
+                    f"Evaluating at epoch {epoch + 1}, step {num_gradient_steps}"
+                )
+                (
+                    valid_loss,
+                    valid_acc,
+                    valid_top5_acc,
+                    valid_score_diff,
+                    valid_normalized_score_diff,
+                ) = evaluate(
+                    policy,
+                    val_dataloader,
+                    device,
+                    writer,
+                    num_gradient_steps
+                )
+                print_dash_str(
+                    (
+                        f"Valid loss: {valid_loss:.3f}, accuracy {valid_acc:.3f}, "
+                        f"top 5 accuracy {valid_top5_acc:.3f}, score difference [abs] {valid_score_diff:.3f} "
+                        f"[relative] {valid_normalized_score_diff:.3f}"
+                    )
+                )
 
-    for batch in loader:
-        samples = _to_data_list(batch)
-        if not samples:
+            if save_every and num_gradient_steps % save_every == 0:
+                save_checkpoint(
+                    policy, num_gradient_steps, optimizer, save_dir=str(model_dir)
+                )
+
+            if (
+                print_every
+                and num_gradient_steps % print_every == 0
+                and n_samples_processed > 0
+            ):
+                print(
+                    f"Step {num_gradient_steps}: Train loss {mean_loss / n_samples_processed:.3f}, "
+                    f"accuracy {mean_acc / n_samples_processed:.3f}, "
+                    f"Top-5 accuracy {mean_top5_acc / n_samples_processed:.3f}, "
+                    f"[absolute] {mean_score_diff / n_samples_processed:.3f} "
+                    f"[relative] {mean_normalized_score_diff / n_samples_processed:.3f}"
+                )
+
+            batch = batch.to(device)
+            # Compute the logits (i.e. pre-softmax activations) according to the policy on the concatenated graphs
+            logits = policy(
+                batch.constraint_features,
+                batch.edge_index,
+                batch.edge_attr,
+                batch.variable_features,
+            )
+
+            if score_th < float("inf"):
+                select_indices = (
+                    batch.candidate_scores.max(axis=-1).values < score_th
+                )
+                logits = logits[select_indices]
+                batch = batch[select_indices]
+                if len(logits) == 0:
+                    continue
+            else:
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
+
+            if loss_option == "classification":
+                loss = F.cross_entropy(logits, batch.candidate_choices)
+            elif loss_option == "regression":
+                loss = F.mse_loss(logits, batch.candidate_scores)
+            else:
+                raise ValueError(f"Unsupported loss option: {loss_option}")
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            num_gradient_steps += 1
+
+            true_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates).clip(0)
+            true_bestscore = true_scores.max(dim=-1, keepdims=True).values
+
+            predicted_bestindex = logits.max(dim=-1, keepdims=True).indices
+            accuracy = (true_scores.gather(-1, predicted_bestindex) == true_bestscore).float().mean().item()
+            top5_acc = (true_scores.gather(-1, logits.topk(min(5, logits.size(-1))).indices) == true_bestscore).float().max(dim=-1).values.mean().item()
+            mean_loss += loss.item() * batch.num_graphs
+            mean_acc += accuracy * batch.num_graphs
+            mean_top5_acc += top5_acc * batch.num_graphs
+            n_samples_processed += batch.num_graphs
+
+            # torch.save(policy.state_dict(), "trained_params.pkl")
+            writer.add_scalar("Loss/train", loss.item(), num_gradient_steps)
+            writer.add_scalar("Accuracy/train", accuracy, num_gradient_steps)
+            writer.add_scalar("Top5_Accuracy/train", top5_acc, num_gradient_steps)
+            # New stats
+            score_diff = (true_bestscore - true_scores.gather(-1, predicted_bestindex).clip(0)).mean().item()
+            normalized_score_diff = ((true_bestscore - true_scores.gather(-1, predicted_bestindex).clip(0)) / true_bestscore).mean().item()
+            mean_score_diff += score_diff * batch.num_graphs
+            mean_normalized_score_diff += normalized_score_diff * batch.num_graphs
+
+            writer.add_scalar("Score_diff/train", score_diff, num_gradient_steps)
+            writer.add_scalar("Normalized_score_diff/train", normalized_score_diff, num_gradient_steps)
+
+        if n_samples_processed == 0:
+            print_dash_str(f"No samples processed in epoch {epoch + 1}.")
             continue
 
-        optimizer.zero_grad()
-        batch_loss = torch.tensor(0.0, device=device)
-        batch_correct = 0
+        mean_loss /= n_samples_processed
+        mean_acc /= n_samples_processed
+        mean_top5_acc /= n_samples_processed
+        mean_score_diff /= n_samples_processed
+        mean_normalized_score_diff /= n_samples_processed
+        print(
+            f"Epoch {epoch + 1}: Train loss {mean_loss:.3f}, accuracy {mean_acc:.3f}, "
+            f"top 5 accuracy {mean_top5_acc:.3f}, [absolute] {mean_score_diff:.3f} "
+            f"[relative] {mean_normalized_score_diff:.3f}"
+        )
 
-        for sample in samples:
-            logits, target = _forward_sample(model, sample, device)
-            sample_loss = F.cross_entropy(
-                logits.unsqueeze(0),
-                target.view(1),
+        writer.add_scalar("Loss/Epoch_train", mean_loss, epoch)
+        writer.add_scalar("Accuracy/Epoch_train", mean_acc, epoch)
+        writer.add_scalar("Top5_Accuracy/Epoch_train", mean_top5_acc, epoch)
+        writer.add_scalar("Score_diff/Epoch_train", mean_score_diff, epoch)
+        writer.add_scalar("Normalized_score_diff/Epoch_train", mean_normalized_score_diff, epoch)
+
+    save_checkpoint(policy, num_gradient_steps, optimizer, save_dir=str(model_dir))
+    writer.close()
+
+
+def evaluate(policy, data_loader, device, writer, num_gradient_steps):
+    mean_loss = 0
+    mean_acc = 0
+    mean_top5_acc = 0
+    mean_score_diff = 0
+    mean_normalized_score_diff = 0
+
+    policy.eval()
+
+    n_samples_processed = 0
+    with torch.no_grad():
+        for batch in tqdm.tqdm(data_loader):
+            batch = batch.to(device)
+            logits = policy(
+                batch.constraint_features,
+                batch.edge_index,
+                batch.edge_attr,
+                batch.variable_features,
             )
-            batch_loss = batch_loss + sample_loss
+            # Index the results by the candidates, and split and pad them
+            logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
+            # Compute the usual cross-entropy classification loss
+            loss = F.cross_entropy(logits, batch.candidate_choices)
+            # if isnan: pdb
+            if torch.isnan(loss):
+                pdb.set_trace()
 
-            pred = logits.argmax(dim=-1)
-            batch_correct += int((pred == target).item())
+            true_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates).clip(0)
+            true_bestscore = true_scores.max(dim=-1, keepdims=True).values
 
-        batch_size = len(samples)
-        batch_loss = batch_loss / batch_size
-        batch_loss.backward()
-        optimizer.step()
+            predicted_bestindex = logits.max(dim=-1, keepdims=True).indices
+            accuracy = (true_scores.gather(-1, predicted_bestindex) == true_bestscore).float().mean().item()
+            top5_acc = (true_scores.gather(-1, logits.topk(min(5, logits.size(-1))).indices) == true_bestscore).float().max(dim=-1).values.mean().item()
 
-        total_loss += batch_loss.item() * batch_size
-        total_correct += batch_correct
-        total_samples += batch_size
+            score_diff = (true_bestscore - true_scores.gather(-1, predicted_bestindex)).abs().mean().item()
+            normalized_score_diff = ((true_bestscore - true_scores.gather(-1, predicted_bestindex)) / true_bestscore).mean().item()
 
-    avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
-    accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-    return {"loss": avg_loss, "accuracy": accuracy}
+            mean_loss += loss.item() * batch.num_graphs
+            mean_acc += accuracy * batch.num_graphs
+            mean_top5_acc += top5_acc * batch.num_graphs
 
+            mean_score_diff += score_diff * batch.num_graphs
+            mean_normalized_score_diff += normalized_score_diff * batch.num_graphs
+            n_samples_processed += batch.num_graphs
 
-@torch.no_grad()
-def evaluate(
-    model: torch.nn.Module,
-    loader: Optional[DataLoader],
-    device: torch.device,
-) -> Dict[str, float]:
-    if loader is None:
-        return {"loss": 0.0, "accuracy": 0.0}
+    if n_samples_processed > 0:
+        mean_loss /= n_samples_processed
+        mean_acc /= n_samples_processed
+        mean_top5_acc /= n_samples_processed
+        mean_score_diff /= n_samples_processed
+        mean_normalized_score_diff /= n_samples_processed
 
-    model.eval()
-    total_loss = 0.0
-    total_correct = 0
-    total_samples = 0
+    writer.add_scalar("Loss/val", mean_loss, num_gradient_steps)
+    writer.add_scalar("Accuracy/val", mean_acc, num_gradient_steps)
+    writer.add_scalar("Top5_Accuracy/val", mean_top5_acc, num_gradient_steps)
+    writer.add_scalar("Score_diff/val", mean_score_diff, num_gradient_steps)
+    writer.add_scalar("Normalized_score_diff/val", mean_normalized_score_diff, num_gradient_steps)
 
-    for batch in loader:
-        samples = _to_data_list(batch)
-        for sample in samples:
-            logits, target = _forward_sample(model, sample, device)
-            sample_loss = F.cross_entropy(
-                logits.unsqueeze(0),
-                target.view(1),
-            )
-            total_loss += sample_loss.item()
-            pred = logits.argmax(dim=-1)
-            total_correct += int((pred == target).item())
-        total_samples += len(samples)
-
-    avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
-    accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-    return {"loss": avg_loss, "accuracy": accuracy}
+    return mean_loss, mean_acc, mean_top5_acc, mean_score_diff, mean_normalized_score_diff
 
 
-def run_training(args, data: Dict[str, Optional[DataLoader]]):
-    device = torch.device(getattr(args, "device", "cpu"))
-    model = load_model(args)
-    optimizer = get_optimizer(args, model)
+def pad_tensor(input_, pad_sizes, pad_value=-1e8):
+    """
+    This utility function splits a tensor and pads each split to make them all the same size, then stacks them.
+    """
+    max_pad_size = pad_sizes.max()
+    output = input_.split(pad_sizes.cpu().numpy().tolist())
+    output = torch.stack(
+        [
+            F.pad(slice_, (0, max_pad_size - slice_.size(0)), "constant", pad_value)
+            for slice_ in output
+        ],
+        dim=0,
+    )
+    return output
 
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Train the MILP branching policy.")
+    parser.add_argument("--dataset", type=str, default="set_cover", help="Dataset key.")
+    parser.add_argument("--cfg_idx", type=int, default=0, help="Configuration index.")
+    parser.add_argument(
+        "--config_root",
+        type=str,
+        default="./cfg",
+        help="Directory containing configuration files.",
+    )
+    parser.add_argument(
+        "--model_suffix",
+        type=str,
+        default="",
+        help="Optional suffix appended to model/log directories.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Resume training from the latest checkpoint."
+    )
+    parser.add_argument(
+        "--resume_model_dir",
+        type=str,
+        default="",
+        help="Directory containing checkpoints to resume from.",
+    )
+    parser.add_argument(
+        "--eval_every",
+        type=int,
+        default=1,
+        help="Evaluation frequency in gradient steps. Disabled if <= 0.",
+    )
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=100,
+        help="Checkpoint frequency in gradient steps. Disabled if <= 0.",
+    )
+    parser.add_argument(
+        "--print_every",
+        type=int,
+        default=1,
+        help="Logging frequency in gradient steps. Disabled if <= 0.",
+    )
+    return parser.parse_args(argv)
+
+
+def _load_config(config_root: Path, dataset: str, cfg_idx: int) -> Dict[str, Any]:
+    cfg_path = config_root / f"{dataset}_{cfg_idx}"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {cfg_path}")
+    with open(cfg_path, "r") as fh:
+        cfg = yaml.safe_load(fh) or {}
+    return cfg
+
+
+def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
+    args_dict = {**vars(init_args), **cfg}
+    args = argparse.Namespace(**args_dict)
+
+    args.model_id = f"{args.dataset}_cfg{args.cfg_idx}"
+    args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    return args
+
+
+def main(argv=None):
+    init_args = parse_args(argv)
+    cfg = _load_config(Path(init_args.config_root), init_args.dataset, init_args.cfg_idx)
+    args = _merge_args_with_config(init_args, cfg)
+
+    for key, value in vars(args).items():
+        print(f"{key}: {value}")
+
+    data = load_data(args)
+    set_seed(args.seed)
     train_loader = data.get("train")
     val_loader = data.get("val")
-    test_loader = data.get("test")
+    cons_nfeats, edge_nfeats, var_nfeats = _infer_feature_dimensions(train_loader)
 
-    num_epochs = getattr(args, "n_epochs", getattr(args, "epochs", 1))
-    best_val_acc = float("-inf")
-    best_state = None
-    metrics_history = []
-    print_freq = getattr(args, "resultPrintFreq", 1)
+    policy = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
+    optimizer = get_optimizer(args, policy)
 
-    for epoch in range(1, num_epochs + 1):
-        start_time = time.time()
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device)
-        elapsed = time.time() - start_time
-
-        val_metrics = evaluate(model, val_loader, device) if val_loader else None
-        if val_metrics:
-            val_acc = val_metrics["accuracy"]
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in model.state_dict().items()
-                }
-
-        metrics_history.append(
-            {
-                "epoch": epoch,
-                "train_loss": train_metrics["loss"],
-                "train_acc": train_metrics["accuracy"],
-                "val_loss": val_metrics["loss"] if val_metrics else None,
-                "val_acc": val_metrics["accuracy"] if val_metrics else None,
-                "time": elapsed,
-            }
-        )
-
-        if epoch % max(1, print_freq) == 0 or epoch == num_epochs:
-            log = [
-                f"Epoch {epoch:03d}/{num_epochs}",
-                f"train_loss={train_metrics['loss']:.4f}",
-                f"train_acc={train_metrics['accuracy']:.4f}",
-                f"time={elapsed:.2f}s",
-            ]
-            if val_metrics:
-                log.extend(
-                    [
-                        f"val_loss={val_metrics['loss']:.4f}",
-                        f"val_acc={val_metrics['accuracy']:.4f}",
-                    ]
-                )
-            print(" | ".join(log))
-
-        log_cpu_memory_usage(epoch, step="training")
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-
-    test_metrics = evaluate(model, test_loader, device) if test_loader else None
-    if test_metrics:
-        print(
-            f"Test metrics -> loss: {test_metrics['loss']:.4f}, "
-            f"accuracy: {test_metrics['accuracy']:.4f}"
-        )
-
+    base_model_dir = Path(getattr(args, "model_dir", "./models"))
+    base_log_dir = Path(getattr(args, "log_dir", "./logs"))
     model_id = getattr(args, "model_id", None)
-    if metrics_history and model_id:
-        log_dir = Path("./logs/run_training")
-        log_dir.mkdir(parents=True, exist_ok=True)
-        history_path = log_dir / f"{model_id}_TrainingStats.pkl"
-        with history_path.open("wb") as f:
-            pickle.dump(metrics_history, f)
-        if test_metrics:
-            test_path = log_dir / f"{model_id}_TestStats.pkl"
-            with test_path.open("wb") as f:
-                pickle.dump(test_metrics, f)
+    if model_id:
+        base_model_dir = base_model_dir / model_id
+        base_log_dir = base_log_dir / model_id
+    model_suffix = getattr(args, "model_suffix", "")
+    if model_suffix:
+        base_model_dir = Path(f"{base_model_dir}_{model_suffix}")
+        base_log_dir = Path(f"{base_log_dir}_{model_suffix}")
 
-    return {
-        "model": model,
-        "train_metrics": train_metrics,
-        "val_metrics": val_metrics,
-        "test_metrics": test_metrics,
-    }
+    resume_model_dir_value = getattr(args, "resume_model_dir", "")
+    resume_dir = Path(resume_model_dir_value) if resume_model_dir_value else None
+    load_model_dir = resume_dir if (resume_dir and resume_dir.exists()) else base_model_dir
+    start_step = 0
+    if getattr(args, "resume", False):
+        print("Resuming training...")
+        start_step = load_checkpoint(policy, optimizer, step="max", save_dir=str(load_model_dir), device=args.device)
+        resume_tag = load_model_dir.name
+        base_model_dir = Path(f"{base_model_dir}_resume_from_{resume_tag}")
+        base_log_dir = Path(f"{base_log_dir}_resume_from_{resume_tag}")
+        policy = policy.to(args.device)
+
+    base_model_dir.mkdir(parents=True, exist_ok=True)
+    base_log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Model is saved to {base_model_dir}, logs are saved to {base_log_dir}.")
+    
+    train(
+        args,
+        policy,
+        optimizer,
+        train_loader,
+        start_step=start_step,
+        model_dir=base_model_dir,
+        log_dir=base_log_dir,
+        val_dataloader=val_loader,
+    )
+
+
+if __name__ == "__main__":
+    main()
