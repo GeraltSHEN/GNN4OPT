@@ -25,7 +25,6 @@ def get_default_args(dataset):
     defaults["batch_size"] = 32
     defaults["weight_decay"] = 5e-4
     defaults["out_dim"] = hidden_channels
-    defaults["max_samples_per_split"] = 128
     defaults["loss_option"] = "classification"
     defaults["score_threshold"] = float("inf")
     defaults["eval_every"] = 1
