@@ -7,9 +7,6 @@ import yaml
 def get_default_args(dataset):
     defaults = {}
     # logging related parameters
-    defaults["eval_every"] = 1000
-    defaults["save_every"] = 10000
-    defaults["print_every"] = 1000
     defaults["config_root"] = "./cfg"
     defaults["resume_model_dir"] = ""
     defaults["model_suffix"] = ""
@@ -20,7 +17,7 @@ def get_default_args(dataset):
     defaults["model"] = "holo" # gcn; holo
     hidden_channels = 64
     defaults["hidden_channels"] = hidden_channels
-    defaults["num_layers"] = 4
+    defaults["num_layers"] = 2
     defaults["dropout"] = 0.0
     defaults["n_breakings"] = 8  # for holo
     """This corresponds to the f_t in the paper"""
@@ -29,7 +26,7 @@ def get_default_args(dataset):
     # training related parameters
     defaults["seed"] = 42
     defaults["epochs"] = 2
-    defaults["lr"] = 0.01
+    defaults["lr"] = 1e-3
     defaults["batch_size"] = 32
     defaults["weight_decay"] = 5e-4
     defaults["out_dim"] = hidden_channels
@@ -37,6 +34,10 @@ def get_default_args(dataset):
     defaults["resume"] = False
 
     if dataset == "set_cover":
+        # logging related parameters
+        defaults["eval_every"] = 1000
+        defaults["save_every"] = 10000
+        defaults["print_every"] = 1000
         # dataset related parameters
         defaults["dataset_path"] = "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d"
         defaults["r"] = 1

@@ -2,13 +2,13 @@ batch_size: 32
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dropout: 0.0
-epochs: 2
+epochs: 10
 eval_every: 1000
 hidden_channels: 64
 log_dir: ./logs
 loss_option: classification
 lr: 0.001
-model: holo
+model: raw
 model_dir: ./models
 model_suffix: ''
 n_breakings: 8
