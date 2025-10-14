@@ -1,0 +1,48 @@
+batch_size: 32
+max_samples_per_split: 128
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dropout: 0.0
+epochs: 2
+eval_every: 100
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.01
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 4
+out_dim: 64
+power: 2
+print_every: 100
+r: 1
+resume: False
+resume_model_dir: 
+sample_negatives: False
+save_every: 100
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: set_cover
+cfg_idx: 0
+parent_test_stats_dir: data/results_summary/
+eval_split: all
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: set_cover_cfg0
+device: cuda
+Number of parameters: 215668
+Loaded checkpoint models/set_cover_cfg0/8.pth
+--------------------------- [train] Save stats to: data/results_summary/set_cover_cfg0/train ---------------------------
+[train] loss 4.7324, acc 0.1016, top5 0.3281, score_diff 5.6337, normalized 0.8104
+----------------------------- [val] Save stats to: data/results_summary/set_cover_cfg0/val -----------------------------
+[val] loss 4.7522, acc 0.1016, top5 0.2891, score_diff 4.9443, normalized 0.7756
+---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg0/test ----------------------------
+[test] loss 4.7593, acc 0.0625, top5 0.2734, score_diff 5.8688, normalized 0.8266
+----------------------------------------- Aggregated results across all splits -----------------------------------------
+[all] loss 4.7480, acc 0.0885, top5 0.2969, score_diff 5.4822, normalized 0.8042, samples 384
+Total eval time: 0.18 minutes

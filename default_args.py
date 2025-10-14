@@ -6,7 +6,15 @@ import yaml
 
 def get_default_args(dataset):
     defaults = {}
-
+    # logging related parameters
+    defaults["eval_every"] = 1000
+    defaults["save_every"] = 10000
+    defaults["print_every"] = 1000
+    defaults["config_root"] = "./cfg"
+    defaults["resume_model_dir"] = ""
+    defaults["model_suffix"] = ""
+    defaults["model_dir"] = "./models"
+    defaults["log_dir"] = "./logs"
     # dataset related parameters
     # layers related parameters
     defaults["model"] = "holo" # gcn; holo
@@ -26,15 +34,7 @@ def get_default_args(dataset):
     defaults["weight_decay"] = 5e-4
     defaults["out_dim"] = hidden_channels
     defaults["loss_option"] = "classification"
-    defaults["score_threshold"] = float("inf")
-    defaults["eval_every"] = 1
-    defaults["save_every"] = 100
-    defaults["print_every"] = 1
-    defaults["model_suffix"] = ""
     defaults["resume"] = False
-    defaults["resume_model_dir"] = ""
-    defaults["model_dir"] = "./models"
-    defaults["log_dir"] = "./logs"
 
     if dataset == "set_cover":
         # dataset related parameters

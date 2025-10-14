@@ -1,4 +1,5 @@
 import gzip
+import json
 import os
 import random
 import pickle
@@ -17,13 +18,6 @@ from models import (
     ProductTupleEncoder,
     SymmetryBreakingGNN,
 )
-
-
-def load_gzip(path: Union[str, Path]):
-    """Load a gzip-compressed pickle file"""
-    path = Path(path)
-    with gzip.open(path, "rb") as fh:
-        return pickle.load(fh)
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
@@ -123,29 +117,49 @@ class GraphDataset(Dataset):
         return graph
 
 
-def load_data(args) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
+def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
     """Load train/val/test splits as torch_geometric DataLoaders based on CLI args."""
     dataset_root = Path(f"{args.dataset_path}")
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
     edge_nfeats = getattr(args, "edge_nfeats", 1)
 
-    splits = {
-        "train": {
-            "subdir": getattr(args, "train_split", "train"),
-            "batch_size": getattr(args, "train_batch_size", getattr(args, "batch_size", 32)),
-            "shuffle": getattr(args, "train_shuffle", True),
-        },
-        "val": {
-            "subdir": getattr(args, "val_split", "valid"),
-            "batch_size": getattr(args, "val_batch_size", getattr(args, "eval_batch_size", getattr(args, "batch_size", 32))),
-            "shuffle": getattr(args, "val_shuffle", False),
-        },
-        "test": {
-            "subdir": getattr(args, "test_split", "test"),
-            "batch_size": getattr(args, "test_batch_size", getattr(args, "eval_batch_size", getattr(args, "batch_size", 32))),
-            "shuffle": getattr(args, "test_shuffle", False),
-        },
-    }
+    if for_training:
+        splits = {
+            "train": {
+                "subdir": getattr(args, "train_split", "train"),
+                "batch_size": getattr(args, "train_batch_size", getattr(args, "batch_size", 32)),
+                "shuffle": getattr(args, "train_shuffle", True),
+            },
+            "val": {
+                "subdir": getattr(args, "val_split", "valid"),
+                "batch_size": getattr(args, "val_batch_size", getattr(args, "batch_size", 32)),
+                "shuffle": getattr(args, "val_shuffle", False),
+            },
+            "test": {
+                "subdir": getattr(args, "test_split", "test"),
+                "batch_size": getattr(args, "test_batch_size", getattr(args, "batch_size", 32)),
+                "shuffle": getattr(args, "test_shuffle", False),
+            },
+        }
+    else:
+        splits = {
+            "train": {
+                "subdir": getattr(args, "train_split", "train"),
+                "batch_size": getattr(args, "eval_batch_size"),
+                "shuffle": False,
+            },
+            "val": {
+                "subdir": getattr(args, "val_split", "valid"),
+                "batch_size": getattr(args, "eval_batch_size"),
+                "shuffle": False,
+            },
+            "test": {
+                "subdir": getattr(args, "test_split", "test"),
+                "batch_size": getattr(args, "eval_batch_size"),
+                "shuffle": False,
+            },
+        }
+
 
     data: Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]] = {}
     metadata: Dict[str, Sequence[Path]] = {}
@@ -216,6 +230,29 @@ def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+"""
+Utility functions to load and save files
+"""
+def load_gzip(path: Union[str, Path]):
+    """Load a gzip-compressed pickle file"""
+    path = Path(path)
+    with gzip.open(path, "rb") as fh:
+        return pickle.load(fh)
+
+def save_json(path, d):
+    dir_path, file_name = os.path.split(path)
+    os.makedirs(dir_path, exist_ok=True)
+    
+    with open(path, 'w') as file:
+        json.dump(d, file, indent=4)
+
+def load_json(path, default=[]):
+    if not os.path.exists(path):
+        return default
+    with open(path, 'r') as f:
+        d = json.load(f)
+    return d
 
 
 """

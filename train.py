@@ -1,3 +1,4 @@
+import time
 import argparse
 import os
 from pathlib import Path
@@ -219,7 +220,7 @@ def evaluate(policy, data_loader, device, writer, num_gradient_steps):
 
     n_samples_processed = 0
     with torch.no_grad():
-        for batch in tqdm.tqdm(data_loader):
+        for batch in tqdm.tqdm(data_loader, disable=True):
             batch = batch.to(device)
             logits = policy(
                 batch.constraint_features,
@@ -389,4 +390,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    print(f"Training completed in {(time.time() - start_time)/60:.2f} minutes.")
