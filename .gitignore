@@ -3,7 +3,6 @@ __pycache__/
 quick_test.ipynb
 models/
 logs/run_training/
-data/results_summary/
 legacy_code_generator/__pycache__/
 legacy_code_generator/data/
 holognn/
