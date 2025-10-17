@@ -43,8 +43,36 @@ def get_default_args(dataset):
         defaults["r"] = 1
         # layers related parameters
         # training related parameters
-        defaults["sample_negatives"] = False
-        pass
+    elif dataset == "cauctions":
+        # logging related parameters
+        defaults["eval_every"] = 1000
+        defaults["save_every"] = 10000
+        defaults["print_every"] = 1000
+        # dataset related parameters
+        defaults["dataset_path"] = "legacy_code_generator/data/samples/cauctions/100_500"
+        defaults["r"] = 1
+        # layers related parameters
+        # training related parameters
+    elif dataset == "facilities":
+        # logging related parameters
+        defaults["eval_every"] = 1000
+        defaults["save_every"] = 10000
+        defaults["print_every"] = 1000
+        # dataset related parameters
+        defaults["dataset_path"] = "legacy_code_generator/data/samples/facilities/100_100_5"
+        defaults["r"] = 1
+        # layers related parameters
+        # training related parameters
+    elif dataset == "indset":
+        # logging related parameters
+        defaults["eval_every"] = 1000
+        defaults["save_every"] = 10000
+        defaults["print_every"] = 1000
+        # dataset related parameters
+        defaults["dataset_path"] = "legacy_code_generator/data/samples/indset/500_4"
+        defaults["r"] = 1
+        # layers related parameters
+        # training related parameters
     else:
         raise NotImplementedError
 
@@ -60,7 +88,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--dataset",
         required=True,
-        choices=["set_cover"],
+        choices=["set_cover", "cauctions", "facilities", "indset"],
         help="Dataset name for which to generate defaults."
     )
     return parser.parse_args(argv)

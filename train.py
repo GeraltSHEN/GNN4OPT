@@ -297,19 +297,19 @@ def parse_args(argv=None):
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=100,
+        default=1000,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--save_every",
         type=int,
-        default=100,
+        default=10000,
         help="Checkpoint frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--print_every",
         type=int,
-        default=100,
+        default=1000,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     return parser.parse_args(argv)

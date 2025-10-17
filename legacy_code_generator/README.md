@@ -77,3 +77,28 @@ python 01_generate_instances.py setcover
 # Generate supervised learning datasets
 python 02_generate_samples.py setcover -j 4  # number of available CPUs
 ```
+
+
+### Combinatorial Auction
+```
+# Generate MILP instances
+python 01_generate_instances.py cauctions
+# Generate supervised learning datasets
+python 02_generate_samples.py cauctions -j 4  # number of available CPUs
+```
+
+### Capacitated Facility Location
+```
+# Generate MILP instances
+python 01_generate_instances.py facilities
+# Generate supervised learning datasets
+python 02_generate_samples.py facilities -j 4  # number of available CPUs
+```
+
+### Maximum Independent Set
+```
+# Generate MILP instances
+python 01_generate_instances.py indset
+# Generate supervised learning datasets
+python 02_generate_samples.py indset -j 4  # number of available CPUs
+```

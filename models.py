@@ -10,6 +10,7 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
 from torch_sparse import SparseTensor
 
+# TODO: add dropout option to models
 
 class PowerMethod(nn.Module):
     """Symmetry breaking model using the power method."""

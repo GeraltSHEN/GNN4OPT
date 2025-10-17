@@ -2,8 +2,8 @@ batch_size: 32
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dropout: 0.0
-epochs: 10
-eval_every: 1000
+epochs: 3
+eval_every: 10000
 hidden_channels: 64
 log_dir: ./logs
 loss_option: classification
@@ -15,11 +15,10 @@ n_breakings: 8
 num_layers: 2
 out_dim: 64
 power: 2
-print_every: 1000
+print_every: 10000
 r: 1
 resume: false
 resume_model_dir: ''
-sample_negatives: false
 save_every: 10000
 seed: 42
 symmetry_breaking_model: power_method

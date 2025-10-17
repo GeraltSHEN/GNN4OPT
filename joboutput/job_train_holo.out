@@ -1,0 +1,279 @@
+** cauctions dataset **
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/cauctions/100_500
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: cauctions
+cfg_idx: 2
+model_id: cauctions_cfg2
+device: cuda
+Model is saved to models/cauctions_cfg2, logs are saved to logs/cauctions_cfg2.
+[Epoch 1] CPU Memory - RSS: 0.92 GB
+-------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
+------ Valid loss: 4.831, accuracy 0.043, top 5 accuracy 0.157, score difference [abs] 1273.830 [relative] 0.924 -------
+Saved checkpoint models/cauctions_cfg2/0.pth
+------------------------------------------- Evaluating at epoch 1, step 1000 -------------------------------------------
+------- Valid loss: 2.797, accuracy 0.554, top 5 accuracy 0.854, score difference [abs] 299.839 [relative] 0.173 -------
+Step 1000: Train loss 3.112, accuracy 0.504, Top-5 accuracy 0.798, [absolute] 387.790 [relative] 0.229
+------------------------------------------- Evaluating at epoch 1, step 2000 -------------------------------------------
+------- Valid loss: 2.795, accuracy 0.557, top 5 accuracy 0.863, score difference [abs] 288.462 [relative] 0.172 -------
+Step 2000: Train loss 2.951, accuracy 0.528, Top-5 accuracy 0.831, [absolute] 345.070 [relative] 0.203
+------------------------------------------- Evaluating at epoch 1, step 3000 -------------------------------------------
+------- Valid loss: 2.712, accuracy 0.567, top 5 accuracy 0.871, score difference [abs] 270.752 [relative] 0.163 -------
+Step 3000: Train loss 2.886, accuracy 0.538, Top-5 accuracy 0.843, [absolute] 327.528 [relative] 0.192
+Epoch 1: Train loss 2.880, accuracy 0.539, top 5 accuracy 0.844, [absolute] 326.299 [relative] 0.191
+Saved checkpoint models/cauctions_cfg2/3125.pth
+Training completed in 58.84 minutes.
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/cauctions/100_500
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: cauctions
+cfg_idx: 2
+parent_test_stats_dir: data/results_summary/
+eval_split: all
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: cauctions_cfg2
+device: cuda
+Number of parameters: 115060
+Loaded checkpoint models/cauctions_cfg2/3125.pth
+--------------------------- [train] Save stats to: data/results_summary/cauctions_cfg2/train ---------------------------
+[train] loss 2.7348, acc 0.5462, top5 0.8690, score_diff 289.2866, normalized 0.1764
+----------------------------- [val] Save stats to: data/results_summary/cauctions_cfg2/val -----------------------------
+[val] loss 2.7328, acc 0.5432, top5 0.8652, score_diff 282.2410, normalized 0.1764
+---------------------------- [test] Save stats to: data/results_summary/cauctions_cfg2/test ----------------------------
+[test] loss 2.7443, acc 0.5474, top5 0.8698, score_diff 288.0535, normalized 0.1737
+----------------------------------------- Aggregated results across all splits -----------------------------------------
+[all] loss 2.7359, acc 0.5460, top5 0.8686, score_diff 288.1039, normalized 0.1760, samples 140000
+Total eval time: 44.47 minutes
+** facilities dataset **
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: facilities
+cfg_idx: 2
+model_id: facilities_cfg2
+device: cuda
+Model is saved to models/facilities_cfg2, logs are saved to logs/facilities_cfg2.
+[Epoch 1] CPU Memory - RSS: 0.91 GB
+-------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
+------- Valid loss: 3.673, accuracy 0.000, top 5 accuracy 0.008, score difference [abs] 194.263 [relative] 1.000 -------
+Saved checkpoint models/facilities_cfg2/0.pth
+------------------------------------------- Evaluating at epoch 1, step 1000 -------------------------------------------
+------- Valid loss: 1.000, accuracy 0.659, top 5 accuracy 0.978, score difference [abs] 53.046 [relative] 0.193 --------
+Step 1000: Train loss 1.015, accuracy 0.651, Top-5 accuracy 0.971, [absolute] 55.672 [relative] 0.203
+------------------------------------------- Evaluating at epoch 1, step 2000 -------------------------------------------
+------- Valid loss: 0.930, accuracy 0.679, top 5 accuracy 0.982, score difference [abs] 46.938 [relative] 0.178 --------
+Step 2000: Train loss 0.982, accuracy 0.661, Top-5 accuracy 0.976, [absolute] 51.425 [relative] 0.192
+------------------------------------------- Evaluating at epoch 1, step 3000 -------------------------------------------
+------- Valid loss: 0.940, accuracy 0.676, top 5 accuracy 0.982, score difference [abs] 48.240 [relative] 0.180 --------
+Step 3000: Train loss 0.968, accuracy 0.668, Top-5 accuracy 0.977, [absolute] 49.377 [relative] 0.187
+Epoch 1: Train loss 0.967, accuracy 0.669, top 5 accuracy 0.977, [absolute] 49.281 [relative] 0.186
+Saved checkpoint models/facilities_cfg2/3125.pth
+Training completed in 128.70 minutes.
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: facilities
+cfg_idx: 2
+parent_test_stats_dir: data/results_summary/
+eval_split: all
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: facilities_cfg2
+device: cuda
+Number of parameters: 115060
+Loaded checkpoint models/facilities_cfg2/3125.pth
+-------------------------- [train] Save stats to: data/results_summary/facilities_cfg2/train ---------------------------
+[train] loss 0.9215, acc 0.6879, top5 0.9807, score_diff 44.2518, normalized 0.1700
+---------------------------- [val] Save stats to: data/results_summary/facilities_cfg2/val -----------------------------
+[val] loss 0.9130, acc 0.6867, top5 0.9827, score_diff 45.7302, normalized 0.1718
+--------------------------- [test] Save stats to: data/results_summary/facilities_cfg2/test ----------------------------
+[test] loss 0.9576, acc 0.6785, top5 0.9798, score_diff 44.9979, normalized 0.1719
+----------------------------------------- Aggregated results across all splits -----------------------------------------
+[all] loss 0.9255, acc 0.6864, top5 0.9809, score_diff 44.5696, normalized 0.1706, samples 140000
+Total eval time: 153.31 minutes
+** indset dataset **
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/indset/500_4
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: indset
+cfg_idx: 2
+model_id: indset_cfg2
+device: cuda
+Model is saved to models/indset_cfg2, logs are saved to logs/indset_cfg2.
+[Epoch 1] CPU Memory - RSS: 0.89 GB
+-------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
+-------- Valid loss: 6.176, accuracy 0.001, top 5 accuracy 0.006, score difference [abs] 0.496 [relative] 0.998 --------
+Saved checkpoint models/indset_cfg2/0.pth
+------------------------------------------- Evaluating at epoch 1, step 1000 -------------------------------------------
+-------- Valid loss: 5.149, accuracy 0.440, top 5 accuracy 0.653, score difference [abs] 0.166 [relative] 0.220 --------
+Step 1000: Train loss 5.370, accuracy 0.412, Top-5 accuracy 0.614, [absolute] 0.195 [relative] 0.252
+------------------------------------------- Evaluating at epoch 1, step 2000 -------------------------------------------
+-------- Valid loss: 5.133, accuracy 0.429, top 5 accuracy 0.659, score difference [abs] 0.148 [relative] 0.214 --------
+Step 2000: Train loss 5.261, accuracy 0.432, Top-5 accuracy 0.644, [absolute] 0.174 [relative] 0.227
+------------------------------------------- Evaluating at epoch 1, step 3000 -------------------------------------------
+-------- Valid loss: 4.974, accuracy 0.485, top 5 accuracy 0.715, score difference [abs] 0.133 [relative] 0.171 --------
+Step 3000: Train loss 5.190, accuracy 0.446, Top-5 accuracy 0.663, [absolute] 0.163 [relative] 0.212
+Epoch 1: Train loss 5.184, accuracy 0.448, top 5 accuracy 0.665, [absolute] 0.162 [relative] 0.211
+Saved checkpoint models/indset_cfg2/3125.pth
+Training completed in 57.42 minutes.
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/indset/500_4
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: indset
+cfg_idx: 2
+parent_test_stats_dir: data/results_summary/
+eval_split: all
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: indset_cfg2
+device: cuda
+Number of parameters: 115060
+Loaded checkpoint models/indset_cfg2/3125.pth
+---------------------------- [train] Save stats to: data/results_summary/indset_cfg2/train -----------------------------
+[train] loss 4.9159, acc 0.5075, top5 0.7329, score_diff 0.1218, normalized 0.1458
+------------------------------ [val] Save stats to: data/results_summary/indset_cfg2/val -------------------------------
+[val] loss 4.9009, acc 0.5047, top5 0.7268, score_diff 0.1249, normalized 0.1505
+----------------------------- [test] Save stats to: data/results_summary/indset_cfg2/test ------------------------------
+[test] loss 4.9120, acc 0.5095, top5 0.7396, score_diff 0.1203, normalized 0.1452
+----------------------------------------- Aggregated results across all splits -----------------------------------------
+[all] loss 4.9132, acc 0.5073, top5 0.7330, score_diff 0.1220, normalized 0.1464, samples 140000
+Total eval time: 43.21 minutes

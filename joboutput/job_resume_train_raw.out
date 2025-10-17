@@ -1,0 +1,108 @@
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dropout: 0.0
+epochs: 3
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: raw
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: True
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: set_cover
+cfg_idx: 1
+model_id: set_cover_cfg1
+device: cuda
+Resuming training...
+Loaded checkpoint models/set_cover_cfg1/3125.pth
+Model is saved to models/set_cover_cfg1_resume_from_set_cover_cfg1, logs are saved to logs/set_cover_cfg1_resume_from_set_cover_cfg1.
+[Epoch 1] CPU Memory - RSS: 0.93 GB
+------------------------------------------- Evaluating at epoch 1, step 4000 -------------------------------------------
+-------- Valid loss: 3.098, accuracy 0.521, top 5 accuracy 0.810, score difference [abs] 1.712 [relative] 0.186 --------
+Step 4000: Train loss 3.108, accuracy 0.528, Top-5 accuracy 0.807, [absolute] 1.602 [relative] 0.174
+------------------------------------------- Evaluating at epoch 1, step 5000 -------------------------------------------
+-------- Valid loss: 3.032, accuracy 0.537, top 5 accuracy 0.823, score difference [abs] 1.531 [relative] 0.167 --------
+Step 5000: Train loss 3.084, accuracy 0.535, Top-5 accuracy 0.812, [absolute] 1.556 [relative] 0.169
+------------------------------------------- Evaluating at epoch 1, step 6000 -------------------------------------------
+-------- Valid loss: 3.023, accuracy 0.543, top 5 accuracy 0.823, score difference [abs] 1.491 [relative] 0.162 --------
+Step 6000: Train loss 3.069, accuracy 0.538, Top-5 accuracy 0.816, [absolute] 1.532 [relative] 0.167
+Epoch 1: Train loss 3.066, accuracy 0.539, top 5 accuracy 0.817, [absolute] 1.527 [relative] 0.166
+[Epoch 2] CPU Memory - RSS: 1.70 GB
+------------------------------------------- Evaluating at epoch 2, step 7000 -------------------------------------------
+-------- Valid loss: 3.016, accuracy 0.545, top 5 accuracy 0.826, score difference [abs] 1.459 [relative] 0.161 --------
+Step 7000: Train loss 3.028, accuracy 0.558, Top-5 accuracy 0.832, [absolute] 1.417 [relative] 0.155
+------------------------------------------- Evaluating at epoch 2, step 8000 -------------------------------------------
+-------- Valid loss: 2.986, accuracy 0.559, top 5 accuracy 0.834, score difference [abs] 1.342 [relative] 0.149 --------
+Step 8000: Train loss 3.008, accuracy 0.552, Top-5 accuracy 0.832, [absolute] 1.411 [relative] 0.155
+------------------------------------------- Evaluating at epoch 2, step 9000 -------------------------------------------
+-------- Valid loss: 2.945, accuracy 0.558, top 5 accuracy 0.850, score difference [abs] 1.328 [relative] 0.149 --------
+Step 9000: Train loss 2.991, accuracy 0.556, Top-5 accuracy 0.837, [absolute] 1.370 [relative] 0.152
+Epoch 2: Train loss 2.987, accuracy 0.557, top 5 accuracy 0.838, [absolute] 1.359 [relative] 0.152
+[Epoch 3] CPU Memory - RSS: 1.70 GB
+------------------------------------------ Evaluating at epoch 3, step 10000 -------------------------------------------
+-------- Valid loss: 2.923, accuracy 0.564, top 5 accuracy 0.850, score difference [abs] 1.250 [relative] 0.141 --------
+Saved checkpoint models/set_cover_cfg1_resume_from_set_cover_cfg1/10000.pth
+Step 10000: Train loss 2.946, accuracy 0.562, Top-5 accuracy 0.848, [absolute] 1.275 [relative] 0.145
+------------------------------------------ Evaluating at epoch 3, step 11000 -------------------------------------------
+-------- Valid loss: 2.921, accuracy 0.568, top 5 accuracy 0.848, score difference [abs] 1.288 [relative] 0.143 --------
+Step 11000: Train loss 2.935, accuracy 0.568, Top-5 accuracy 0.852, [absolute] 1.258 [relative] 0.143
+------------------------------------------ Evaluating at epoch 3, step 12000 -------------------------------------------
+-------- Valid loss: 2.973, accuracy 0.542, top 5 accuracy 0.842, score difference [abs] 1.311 [relative] 0.153 --------
+Step 12000: Train loss 2.923, accuracy 0.570, Top-5 accuracy 0.855, [absolute] 1.259 [relative] 0.142
+Epoch 3: Train loss 2.920, accuracy 0.571, top 5 accuracy 0.855, [absolute] 1.250 [relative] 0.142
+Saved checkpoint models/set_cover_cfg1_resume_from_set_cover_cfg1/12500.pth
+Training completed in 87.06 minutes.
+batch_size: 32
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dropout: 0.0
+epochs: 3
+eval_every: 10000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: raw
+model_dir: ./models
+model_suffix: resume_from_set_cover_cfg1
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 10000
+r: 1
+resume: False
+resume_model_dir: 
+save_every: 10000
+seed: 42
+symmetry_breaking_model: power_method
+weight_decay: 0.0005
+dataset: set_cover
+cfg_idx: 1
+parent_test_stats_dir: data/results_summary/
+eval_split: test
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: set_cover_cfg1
+device: cuda
+Number of parameters: 114866
+Loaded checkpoint models/set_cover_cfg1_resume_from_set_cover_cfg1/12500.pth
+-------------- [test] Save stats to: data/results_summary/set_cover_cfg1_resume_from_set_cover_cfg1/test ---------------
+[test] loss 3.0028, acc 0.5626, top5 0.8385, score_diff 1.2925, normalized 0.1485
+Total eval time: 8.35 minutes

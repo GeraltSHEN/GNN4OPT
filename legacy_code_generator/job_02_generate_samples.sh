@@ -13,4 +13,14 @@
 module load anaconda
 conda activate opt-ml-env
 
-python 02_generate_samples.py setcover -j 8  # number of available CPUs
+# python 02_generate_samples.py setcover -j 8  # number of available CPUs
+# echo "setcover Samples Generated"
+
+python 02_generate_samples.py cauctions -j 8
+echo "cauctions Samples Generated"
+
+python 02_generate_samples.py facilities -j 8
+echo "facilities Samples Generated"
+
+python 02_generate_samples.py indset -j 8
+echo "indset Samples Generated"
