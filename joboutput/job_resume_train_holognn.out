@@ -8,9 +8,9 @@ hidden_channels: 64
 log_dir: ./logs
 loss_option: classification
 lr: 0.001
-model: raw
+model: holo
 model_dir: ./models
-model_suffix: resume_from_set_cover_cfg1
+model_suffix: resume_from_set_cover_cfg3
 n_breakings: 8
 num_layers: 2
 out_dim: 64
@@ -21,140 +21,140 @@ resume: False
 resume_model_dir: 
 save_every: 10000
 seed: 42
-symmetry_breaking_model: power_method
+symmetry_breaking_model: gnn
 weight_decay: 0.0005
 dataset: set_cover
-cfg_idx: 1
+cfg_idx: 3
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: set_cover_cfg1
+model_id: set_cover_cfg3
 device: cuda
-Number of parameters: 114866
-Loaded checkpoint models/set_cover_cfg1_resume_from_set_cover_cfg1/31250.pth
--------------- [test] Save stats to: data/results_summary/set_cover_cfg1_resume_from_set_cover_cfg1/test ---------------
-[test] loss 2.7944, acc 0.5907, top5 0.8733, score_diff 1.0665, normalized 0.1285
-Total eval time: 8.87 minutes
+Number of parameters: 123640
+Loaded checkpoint models/set_cover_cfg3_resume_from_set_cover_cfg3/31250.pth
+-------------- [test] Save stats to: data/results_summary/set_cover_cfg3_resume_from_set_cover_cfg3/test ---------------
+[test] loss 2.7479, acc 0.6163, top5 0.8854, score_diff 0.9577, normalized 0.1118
+Total eval time: 8.68 minutes
 batch_size: 32
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/cauctions/100_500
 dropout: 0.0
 epochs: 9
-eval_every: 1000
+eval_every: 10000
 hidden_channels: 64
 log_dir: ./logs
 loss_option: classification
 lr: 0.001
-model: raw
+model: holo
 model_dir: ./models
-model_suffix: resume_from_cauctions_cfg1
+model_suffix: resume_from_cauctions_cfg3
 n_breakings: 8
 num_layers: 2
 out_dim: 64
 power: 2
-print_every: 1000
+print_every: 10000
 r: 1
 resume: False
 resume_model_dir: 
 save_every: 10000
 seed: 42
-symmetry_breaking_model: power_method
+symmetry_breaking_model: gnn
 weight_decay: 0.0005
 dataset: cauctions
-cfg_idx: 1
+cfg_idx: 3
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: cauctions_cfg1
+model_id: cauctions_cfg3
 device: cuda
-Number of parameters: 114866
-Loaded checkpoint models/cauctions_cfg1_resume_from_cauctions_cfg1/31250.pth
--------------- [test] Save stats to: data/results_summary/cauctions_cfg1_resume_from_cauctions_cfg1/test ---------------
-[test] loss 2.5585, acc 0.5924, top5 0.8870, score_diff 261.6330, normalized 0.1484
-Total eval time: 6.74 minutes
+Number of parameters: 123640
+Loaded checkpoint models/cauctions_cfg3_resume_from_cauctions_cfg3/31250.pth
+-------------- [test] Save stats to: data/results_summary/cauctions_cfg3_resume_from_cauctions_cfg3/test ---------------
+[test] loss 2.5440, acc 0.5729, top5 0.8943, score_diff 262.2176, normalized 0.1547
+Total eval time: 7.12 minutes
 batch_size: 32
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
 dropout: 0.0
 epochs: 9
-eval_every: 1000
+eval_every: 10000
 hidden_channels: 64
 log_dir: ./logs
 loss_option: classification
 lr: 0.001
-model: raw
+model: holo
 model_dir: ./models
-model_suffix: resume_from_facilities_cfg1
+model_suffix: resume_from_facilities_cfg3
 n_breakings: 8
 num_layers: 2
 out_dim: 64
 power: 2
-print_every: 1000
+print_every: 10000
 r: 1
 resume: False
 resume_model_dir: 
 save_every: 10000
 seed: 42
-symmetry_breaking_model: power_method
+symmetry_breaking_model: gnn
 weight_decay: 0.0005
 dataset: facilities
-cfg_idx: 1
+cfg_idx: 3
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: facilities_cfg1
+model_id: facilities_cfg3
 device: cuda
-Number of parameters: 114866
-Loaded checkpoint models/facilities_cfg1_resume_from_facilities_cfg1/31250.pth
-------------- [test] Save stats to: data/results_summary/facilities_cfg1_resume_from_facilities_cfg1/test --------------
-[test] loss 0.9455, acc 0.6855, top5 0.9811, score_diff 42.1803, normalized 0.1659
-Total eval time: 17.36 minutes
+Number of parameters: 123640
+Loaded checkpoint models/facilities_cfg3_resume_from_facilities_cfg3/31250.pth
+------------- [test] Save stats to: data/results_summary/facilities_cfg3_resume_from_facilities_cfg3/test --------------
+[test] loss 0.9553, acc 0.6786, top5 0.9808, score_diff 43.8831, normalized 0.1713
+Total eval time: 17.18 minutes
 batch_size: 32
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/indset/500_4
 dropout: 0.0
 epochs: 9
-eval_every: 1000
+eval_every: 10000
 hidden_channels: 64
 log_dir: ./logs
 loss_option: classification
 lr: 0.001
-model: raw
+model: holo
 model_dir: ./models
-model_suffix: resume_from_indset_cfg1
+model_suffix: resume_from_indset_cfg3
 n_breakings: 8
 num_layers: 2
 out_dim: 64
 power: 2
-print_every: 1000
+print_every: 10000
 r: 1
 resume: False
 resume_model_dir: 
 save_every: 10000
 seed: 42
-symmetry_breaking_model: power_method
+symmetry_breaking_model: gnn
 weight_decay: 0.0005
 dataset: indset
-cfg_idx: 1
+cfg_idx: 3
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: indset_cfg1
+model_id: indset_cfg3
 device: cuda
-Number of parameters: 114866
-Loaded checkpoint models/indset_cfg1_resume_from_indset_cfg1/31250.pth
------------------ [test] Save stats to: data/results_summary/indset_cfg1_resume_from_indset_cfg1/test ------------------
-[test] loss 4.7020, acc 0.5502, top5 0.7715, score_diff 0.0995, normalized 0.1168
-Total eval time: 9.46 minutes
+Number of parameters: 123640
+Loaded checkpoint models/indset_cfg3_resume_from_indset_cfg3/31250.pth
+----------------- [test] Save stats to: data/results_summary/indset_cfg3_resume_from_indset_cfg3/test ------------------
+[test] loss 4.5761, acc 0.5739, top5 0.8025, score_diff 0.0893, normalized 0.1058
+Total eval time: 8.07 minutes

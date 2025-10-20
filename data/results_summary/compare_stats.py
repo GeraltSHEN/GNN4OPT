@@ -41,14 +41,16 @@ def parse_args() -> argparse.Namespace:
 
 def discover_config_dirs(base_dir: Path, dataset: str) -> List[ConfigInfo]:
     """Return ordered config directories for the dataset (skipping cfg0)."""
-    pattern = re.compile(
-        rf"^{re.escape(dataset)}_cfg_?(\d+)$", flags=re.IGNORECASE
-    )
+    prefix = f"{dataset.lower()}_cfg"
     configs: List[ConfigInfo] = []
     for candidate in base_dir.iterdir():
         if not candidate.is_dir():
             continue
-        match = pattern.match(candidate.name)
+        name_lower = candidate.name.lower()
+        if not name_lower.startswith(prefix):
+            continue
+        suffix = candidate.name[len(prefix):]
+        match = re.search(r"(\d+)", suffix)
         if not match:
             continue
         index = int(match.group(1))
@@ -129,7 +131,8 @@ def locate_param_file(cfg_root: Path, dataset: str, cfg_index: int, cfg_name: st
                     return maybe
 
     pattern = re.compile(
-        rf"^{re.escape(dataset)}.*{cfg_index}(?:\.[A-Za-z0-9]+)?$", re.IGNORECASE
+        rf"^{re.escape(dataset)}.*{cfg_index}(?:[_-][A-Za-z0-9]+|[A-Za-z][A-Za-z0-9_-]*)*(?:\.[A-Za-z0-9]+)?$",
+        re.IGNORECASE,
     )
     matches = [
         path for path in cfg_root.iterdir()

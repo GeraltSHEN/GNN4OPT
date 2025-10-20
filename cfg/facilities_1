@@ -2,7 +2,7 @@ batch_size: 32
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
 dropout: 0.0
-epochs: 1
+epochs: 9
 eval_every: 1000
 hidden_channels: 64
 log_dir: ./logs
