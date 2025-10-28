@@ -44,9 +44,10 @@ class SymmetryBreakingGNN(torch.nn.Module):
 class ProductTupleEncoder(torch.nn.Module):
     """A baseline tuple encoder that takes the element-wise product of node embeddings."""
 
-    def __init__(self, emb_size):
+    def __init__(self, emb_size, r):
         super().__init__()
         self.emb_size = emb_size
+        self.r = r
     
     def stack_var_and_con_features(self, variable_features, constraint_features):
         """
@@ -123,13 +124,14 @@ class ProductTupleEncoder(torch.nn.Module):
 class Holo(torch.nn.Module):
     """The Holo-GNN tuple encoder using symmetry breaking."""
 
-    def __init__(self, *, n_breakings: int, symmetry_breaking_model):
+    def __init__(self, *, n_breakings: int, symmetry_breaking_model, r):
         super().__init__()
         self.n_breakings = n_breakings
         self.symmetry_breaking_model = symmetry_breaking_model
         self.emb_size = self.symmetry_breaking_model.out_dim
 
         self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
+        self.r = r
     
     def stack_var_and_con_features(self, variable_features, constraint_features):
         """
@@ -176,7 +178,8 @@ class Holo(torch.nn.Module):
         reversed_edge_indices,
     ):
         """
-        adj_t: homogeneous and unweighted adjacency matrix of the bipartite graph
+        adj_t: homogeneous and unweighted adjacency matrix of the bipartite graph 
+        (diagonally stacked adjacency matrices of all graphs in the batch)
             make it symmetric to allow power method, i.e., adj_t^k X
         """
         n_variables = variable_features.size(0)
@@ -225,9 +228,61 @@ class Holo(torch.nn.Module):
 
             return indices[: k + extra]
 
-    def get_nodes_to_break(self, adj_t, n_breakings=8):
-        node_degrees = adj_t.sum(-1)
-        return self.tied_topk_indices(values=node_degrees, k=n_breakings)
+    def get_nodes_to_break(
+        self,
+        adj_t,
+        n_breakings=8,
+        n_variables_per_graph: Optional[torch.Tensor] = None,
+        n_constraints_per_graph: Optional[torch.Tensor] = None,
+    ):
+        node_degrees = adj_t.sum(-1).view(-1)
+
+        if n_variables_per_graph is None or n_constraints_per_graph is None:
+            return self.tied_topk_indices(values=node_degrees, k=n_breakings)
+
+        total_variables = int(n_variables_per_graph.sum().item())
+
+        # Offsets locate each sample inside the stacked variable/constraint tensors.
+        var_offsets = torch.zeros_like(n_variables_per_graph)
+        con_offsets = torch.zeros_like(n_constraints_per_graph)
+        if var_offsets.numel() > 1:
+            var_offsets[1:] = torch.cumsum(n_variables_per_graph[:-1], dim=0)
+        if con_offsets.numel() > 1:
+            con_offsets[1:] = torch.cumsum(n_constraints_per_graph[:-1], dim=0)
+
+        selected_indices = []
+        for sample_idx in range(n_variables_per_graph.numel()):
+            var_count = n_variables_per_graph[sample_idx]
+            con_count = n_constraints_per_graph[sample_idx]
+
+            var_start = var_offsets[sample_idx]
+            con_start = con_offsets[sample_idx]
+
+            sample_var_indices = torch.arange(
+                var_start,
+                var_start + var_count,
+                device=node_degrees.device,
+            )
+            sample_con_indices = torch.arange(
+                total_variables + con_start,
+                total_variables + con_start + con_count,
+                device=node_degrees.device,
+            )
+            sample_nodes = torch.cat((sample_var_indices, sample_con_indices), dim=0)
+
+            if sample_nodes.numel() == 0:
+                continue
+
+            sample_k = min(n_breakings, sample_nodes.numel())
+            local_top = self.tied_topk_indices(
+                values=node_degrees[sample_nodes], k=sample_k
+            )
+            selected_indices.append(sample_nodes[local_top])
+
+        if not selected_indices:
+            return torch.empty(0, dtype=torch.long, device=node_degrees.device)
+
+        return torch.cat(selected_indices, dim=0)
 
     def forward(self, variable_features, constraint_features,
                 edge_indices, reversed_edge_indices, 
@@ -240,9 +295,13 @@ class Holo(torch.nn.Module):
         
         # X: (n, d)
         break_node_indices = self.get_nodes_to_break(
-            adj_t, n_breakings=self.n_breakings
+            adj_t,
+            n_breakings=self.n_breakings,
+            n_variables_per_graph=n_variables_per_graph,
+            n_constraints_per_graph=n_constraints_per_graph,
         )
 
+        # TODO: accomodate different number of tied nodes to break per graph in the batch
         # break_node_indices: (t,)
         one_hot_breakings = F.one_hot(break_node_indices, X.size(0)).unsqueeze(-1)
         # one_hot_breakings: (t, n, 1)
@@ -466,12 +525,6 @@ class GNNPolicy(nn.Module):
                 )
         
         # 3. break symmetry
-        # X, adj_t, tuples_coo = self.get_holo_input(
-        #     variable_features,
-        #     constraint_features,
-        #     edge_indices,
-        #     reversed_edge_indices,
-        # )
         variable_features = self.tuple_encoder(variable_features, constraint_features,
                                                edge_indices, reversed_edge_indices,
                                                n_variables_per_graph=n_variables_per_graph, 

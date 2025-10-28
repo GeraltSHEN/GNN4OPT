@@ -209,7 +209,7 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
         raise NotImplementedError("Only r=1 is supported for now.")
 
     if args.model == "raw":
-        tuple_encoder = ProductTupleEncoder(emb_size)
+        tuple_encoder = ProductTupleEncoder(emb_size, r)
     elif args.model == "holo":
         if args.symmetry_breaking_model == "power_method":
             symmetry_breaking_model = PowerMethod(args.power, emb_size + 1)
@@ -222,6 +222,7 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
         tuple_encoder = Holo(
             n_breakings=args.n_breakings,
             symmetry_breaking_model=symmetry_breaking_model,
+            r=r
         )
     else:
         raise NotImplementedError()
