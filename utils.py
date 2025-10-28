@@ -43,6 +43,8 @@ class BipartiteNodeData(Data):
         nb_candidates: int,
         candidate_choices: int,
         candidate_scores: torch.Tensor,
+        n_variables_per_graph: int,
+        n_constraints_per_graph: int,
     ):
         super().__init__()
         self.constraint_features = constraint_features
@@ -53,6 +55,8 @@ class BipartiteNodeData(Data):
         self.nb_candidates = nb_candidates
         self.candidate_choices = candidate_choices
         self.candidate_scores = candidate_scores
+        self.n_variables_per_graph = n_variables_per_graph
+        self.n_constraints_per_graph = n_constraints_per_graph
 
     def __inc__(self, key, value, *args, **kwargs):
         if key == "edge_index":
@@ -112,6 +116,8 @@ class GraphDataset(Dataset):
             len(candidates),
             candidate_choices,
             candidate_scores,
+            variable_features.size(0),
+            constraint_features.size(0),
         )
         graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
         return graph
