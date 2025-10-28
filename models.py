@@ -47,8 +47,76 @@ class ProductTupleEncoder(torch.nn.Module):
     def __init__(self, emb_size):
         super().__init__()
         self.emb_size = emb_size
+    
+    def stack_var_and_con_features(self, variable_features, constraint_features):
+        """
+        X: stacked node features (variable + constraint)
+        """
+        return torch.vstack((variable_features, constraint_features))
 
-    def forward(self, X, adj_t, tuples_coo, **kwargs):
+    def get_tuples_coo(self, 
+                       variable_features, 
+                       constraint_features, 
+                       edge_indices, 
+                       reversed_edge_indices):
+        """
+        tuples_coo: batched indices (r=1: node, r=2: edge, r=3: triplet, etc.) for the task
+            as the task's dataset is multi-graphs rather than a single graph, 
+            no CooSampler was used to sample sub-graphs to produce batches. 
+            Instead, PyG default data and loader produces batches.
+        """
+        n_variables = variable_features.size(0)
+        n_constraints = constraint_features.size(0)
+        if self.r == 1:
+            # tuples_coo is the variable indices, i.e., the first n_variables rows of X
+            tuples_coo = torch.arange(n_variables).unsqueeze(0)
+            # tuples_coo: (r=1, k=n_variables)
+        elif self.r == 2:
+            # tuples_coo is the reversed_edge_indices with offset
+            new_entity_index = []
+            reversed_relation_schema = ("variable", "constraint")
+            for entity, entity_index in zip(reversed_relation_schema, reversed_edge_indices):
+                offset = 0 if entity == "variable" else n_variables
+                new_entity_index.append(entity_index + offset)
+            tuples_coo = torch.vstack(new_entity_index)
+            # tuples_coo: (r=2, k=n_edges)
+            raise ValueError(f"r should be 1 for branching task")
+        else:
+            raise NotImplementedError(f"get_tuples_coo for `r={self.r}` not implemented yet.")
+        return tuples_coo
+    
+    def get_adj_t(
+        self,
+        variable_features,
+        constraint_features,
+        edge_indices,
+        reversed_edge_indices,
+    ):
+        """
+        adj_t: homogeneous and unweighted adjacency matrix of the bipartite graph
+            make it symmetric to allow power method, i.e., adj_t^k X
+        """
+        n_variables = variable_features.size(0)
+        n_constraints = constraint_features.size(0)
+
+        var_to_cons = reversed_edge_indices.clone()
+        var_to_cons[1] = var_to_cons[1] + n_variables
+        cons_to_var = edge_indices.clone()
+        cons_to_var[0] = cons_to_var[0] + n_variables
+        homogeneous_edge_index = torch.hstack((var_to_cons, cons_to_var))
+        adj_t = SparseTensor(
+                row=homogeneous_edge_index[0],
+                col=homogeneous_edge_index[1],
+                sparse_sizes=(n_variables + n_constraints, n_variables + n_constraints),
+            )
+        adj_t = gcn_norm(adj_t, add_self_loops=True)
+        return adj_t
+
+    def forward(self, variable_features, constraint_features,
+                edge_indices, reversed_edge_indices, **kwargs):
+        X = self.stack_var_and_con_features(variable_features, constraint_features)
+        tuples_coo = self.get_tuples_coo(variable_features, constraint_features,
+                                         edge_indices, reversed_edge_indices)
         return X[tuples_coo].prod(dim=0)
 
 
@@ -62,6 +130,71 @@ class Holo(torch.nn.Module):
         self.emb_size = self.symmetry_breaking_model.out_dim
 
         self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
+    
+    def stack_var_and_con_features(self, variable_features, constraint_features):
+        """
+        X: stacked node features (variable + constraint)
+        """
+        return torch.vstack((variable_features, constraint_features))
+
+    def get_tuples_coo(self, 
+                       variable_features, 
+                       constraint_features, 
+                       edge_indices, 
+                       reversed_edge_indices):
+        """
+        tuples_coo: batched indices (r=1: node, r=2: edge, r=3: triplet, etc.) for the task
+            as the task's dataset is multi-graphs rather than a single graph, 
+            no CooSampler was used to sample sub-graphs to produce batches. 
+            Instead, PyG default data and loader produces batches.
+        """
+        n_variables = variable_features.size(0)
+        n_constraints = constraint_features.size(0)
+        if self.r == 1:
+            # tuples_coo is the variable indices, i.e., the first n_variables rows of X
+            tuples_coo = torch.arange(n_variables).unsqueeze(0)
+            # tuples_coo: (r=1, k=n_variables)
+        elif self.r == 2:
+            # tuples_coo is the reversed_edge_indices with offset
+            new_entity_index = []
+            reversed_relation_schema = ("variable", "constraint")
+            for entity, entity_index in zip(reversed_relation_schema, reversed_edge_indices):
+                offset = 0 if entity == "variable" else n_variables
+                new_entity_index.append(entity_index + offset)
+            tuples_coo = torch.vstack(new_entity_index)
+            # tuples_coo: (r=2, k=n_edges)
+            raise ValueError(f"r should be 1 for branching task")
+        else:
+            raise NotImplementedError(f"get_tuples_coo for `r={self.r}` not implemented yet.")
+        return tuples_coo
+    
+    def get_adj_t(
+        self,
+        variable_features,
+        constraint_features,
+        edge_indices,
+        reversed_edge_indices,
+    ):
+        """
+        adj_t: homogeneous and unweighted adjacency matrix of the bipartite graph
+            make it symmetric to allow power method, i.e., adj_t^k X
+        """
+        n_variables = variable_features.size(0)
+        n_constraints = constraint_features.size(0)
+
+        var_to_cons = reversed_edge_indices.clone()
+        var_to_cons[1] = var_to_cons[1] + n_variables
+        cons_to_var = edge_indices.clone()
+        cons_to_var[0] = cons_to_var[0] + n_variables
+        homogeneous_edge_index = torch.hstack((var_to_cons, cons_to_var))
+        adj_t = SparseTensor(
+                row=homogeneous_edge_index[0],
+                col=homogeneous_edge_index[1],
+                sparse_sizes=(n_variables + n_constraints, n_variables + n_constraints),
+            )
+        adj_t = gcn_norm(adj_t, add_self_loops=True)
+        return adj_t
+
 
     def tied_topk_indices(self, values, k, expansion=5):
         """
@@ -96,7 +229,15 @@ class Holo(torch.nn.Module):
         node_degrees = adj_t.sum(-1)
         return self.tied_topk_indices(values=node_degrees, k=n_breakings)
 
-    def forward(self, X, adj_t, tuples_coo, group_idx=None):
+    def forward(self, variable_features, constraint_features,
+                edge_indices, reversed_edge_indices, 
+                n_variables_per_graph, n_constraints_per_graph, group_idx=None):
+        X = self.stack_var_and_con_features(variable_features, constraint_features)
+        tuples_coo = self.get_tuples_coo(variable_features, constraint_features,
+                                         edge_indices, reversed_edge_indices)
+        adj_t = self.get_adj_t(variable_features, constraint_features,
+                              edge_indices, reversed_edge_indices)
+        
         # X: (n, d)
         break_node_indices = self.get_nodes_to_break(
             adj_t, n_breakings=self.n_breakings
@@ -295,7 +436,8 @@ class GNNPolicy(nn.Module):
         return X, adj_t, tuples_coo
 
     def forward(
-        self, constraint_features, edge_indices, edge_features, variable_features
+        self, constraint_features, edge_indices, edge_features, variable_features, 
+        n_variables_per_graph, n_constraints_per_graph
     ):
         reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
 
@@ -324,13 +466,17 @@ class GNNPolicy(nn.Module):
                 )
         
         # 3. break symmetry
-        X, adj_t, tuples_coo = self.get_holo_input(
-            variable_features,
-            constraint_features,
-            edge_indices,
-            reversed_edge_indices,
-        )
-        variable_features = self.tuple_encoder(X, adj_t, tuples_coo, group_idx=None)
+        # X, adj_t, tuples_coo = self.get_holo_input(
+        #     variable_features,
+        #     constraint_features,
+        #     edge_indices,
+        #     reversed_edge_indices,
+        # )
+        variable_features = self.tuple_encoder(variable_features, constraint_features,
+                                               edge_indices, reversed_edge_indices,
+                                               n_variables_per_graph=n_variables_per_graph, 
+                                               n_constraints_per_graph=n_constraints_per_graph, 
+                                               group_idx=None)
 
         # 4. transform variable features to strong branching decision
         output = self.output_module(variable_features).squeeze(-1)
