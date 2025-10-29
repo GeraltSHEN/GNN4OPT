@@ -1,5 +1,4 @@
 batch_size: 32
-max_samples_per_split: 128
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dropout: 0.0
@@ -29,15 +28,23 @@ cfg_idx: 100
 model_id: set_cover_cfg100
 device: cuda
 Model is saved to models/set_cover_cfg100, logs are saved to logs/set_cover_cfg100.
-[Epoch 1] CPU Memory - RSS: 0.88 GB
+[Epoch 1] CPU Memory - RSS: 0.92 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.770, accuracy 0.109, top 5 accuracy 0.297, score difference [abs] 4.874 [relative] 0.773 --------
+-------- Valid loss: 4.798, accuracy 0.083, top 5 accuracy 0.233, score difference [abs] 5.698 [relative] 0.798 --------
 Saved checkpoint models/set_cover_cfg100/0.pth
-Epoch 1: Train loss 4.765, accuracy 0.141, top 5 accuracy 0.367, [absolute] 4.794 [relative] 0.724
-Saved checkpoint models/set_cover_cfg100/4.pth
-Training completed in 0.21 minutes.
+------------------------------------------- Evaluating at epoch 1, step 1000 -------------------------------------------
+-------- Valid loss: 3.132, accuracy 0.536, top 5 accuracy 0.814, score difference [abs] 1.504 [relative] 0.163 --------
+Step 1000: Train loss 3.466, accuracy 0.495, Top-5 accuracy 0.757, [absolute] 1.922 [relative] 0.219
+------------------------------------------- Evaluating at epoch 1, step 2000 -------------------------------------------
+-------- Valid loss: 3.045, accuracy 0.544, top 5 accuracy 0.821, score difference [abs] 1.455 [relative] 0.159 --------
+Step 2000: Train loss 3.267, accuracy 0.523, Top-5 accuracy 0.791, [absolute] 1.678 [relative] 0.187
+------------------------------------------- Evaluating at epoch 1, step 3000 -------------------------------------------
+-------- Valid loss: 3.029, accuracy 0.548, top 5 accuracy 0.829, score difference [abs] 1.410 [relative] 0.155 --------
+Step 3000: Train loss 3.190, accuracy 0.534, Top-5 accuracy 0.803, [absolute] 1.589 [relative] 0.176
+Epoch 1: Train loss 3.183, accuracy 0.534, top 5 accuracy 0.804, [absolute] 1.584 [relative] 0.175
+Saved checkpoint models/set_cover_cfg100/3125.pth
+Training completed in 166.52 minutes.
 batch_size: 32
-max_samples_per_split: 128
 config_root: ./cfg
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dropout: 0.0
@@ -73,7 +80,7 @@ eval_test_batch_size: None
 model_id: set_cover_cfg100
 device: cuda
 Number of parameters: 123640
-Loaded checkpoint models/set_cover_cfg100/4.pth
+Loaded checkpoint models/set_cover_cfg100/3125.pth
 --------------------------- [test] Save stats to: data/results_summary/set_cover_cfg100/test ---------------------------
-[test] loss 4.7856, acc 0.1016, top5 0.2969, score_diff 5.5348, normalized 0.7571
-Total eval time: 0.10 minutes
+[test] loss 2.9983, acc 0.5535, top5 0.8295, score_diff 1.3507, normalized 0.1514
+Total eval time: 19.49 minutes

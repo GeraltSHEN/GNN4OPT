@@ -4,7 +4,6 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
 from torch_geometric.nn import GCNConv
 from torch_geometric.nn import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
@@ -238,7 +237,8 @@ class Holo(torch.nn.Module):
         node_degrees = adj_t.sum(-1).view(-1)
 
         if n_variables_per_graph is None or n_constraints_per_graph is None:
-            return self.tied_topk_indices(values=node_degrees, k=n_breakings)
+            indices = self.tied_topk_indices(values=node_degrees, k=n_breakings)
+            return indices, None
 
         total_variables = int(n_variables_per_graph.sum().item())
 
@@ -251,6 +251,7 @@ class Holo(torch.nn.Module):
             con_offsets[1:] = torch.cumsum(n_constraints_per_graph[:-1], dim=0)
 
         selected_indices = []
+        group_assignments = []
         for sample_idx in range(n_variables_per_graph.numel()):
             var_count = n_variables_per_graph[sample_idx]
             con_count = n_constraints_per_graph[sample_idx]
@@ -278,15 +279,28 @@ class Holo(torch.nn.Module):
                 values=node_degrees[sample_nodes], k=sample_k
             )
             selected_indices.append(sample_nodes[local_top])
+            group_assignments.append(
+                torch.full(
+                    (local_top.numel(),),
+                    sample_idx,
+                    dtype=torch.long,
+                    device=node_degrees.device,
+                )
+            )
 
         if not selected_indices:
-            return torch.empty(0, dtype=torch.long, device=node_degrees.device)
+            empty = torch.empty(0, dtype=torch.long, device=node_degrees.device)
+            return empty, empty
 
-        return torch.cat(selected_indices, dim=0)
+        return (
+            torch.cat(selected_indices, dim=0),
+            torch.cat(group_assignments, dim=0),
+        )
 
     def forward(self, variable_features, constraint_features,
                 edge_indices, reversed_edge_indices, 
-                n_variables_per_graph, n_constraints_per_graph, group_idx=None):
+                n_variables_per_graph, n_constraints_per_graph,
+                group_idx=None):
         X = self.stack_var_and_con_features(variable_features, constraint_features)
         tuples_coo = self.get_tuples_coo(variable_features, constraint_features,
                                          edge_indices, reversed_edge_indices)
@@ -294,7 +308,7 @@ class Holo(torch.nn.Module):
                               edge_indices, reversed_edge_indices)
         
         # X: (n, d)
-        break_node_indices = self.get_nodes_to_break(
+        break_node_indices, break_group_idx = self.get_nodes_to_break(
             adj_t,
             n_breakings=self.n_breakings,
             n_variables_per_graph=n_variables_per_graph,
@@ -323,15 +337,27 @@ class Holo(torch.nn.Module):
         set_of_link_repr = holo_repr[:, tuples_coo].prod(dim=1)  # (t, r, k, d+1) -> (t, k, d+1)
         # set_of_link_repr: (t, k=n_tuples, d+1)
 
-        # aggregate (average over) all views, t
-        if group_idx is not None:
-            link_repr = torch_scatter.scatter(
-                set_of_link_repr, group_idx, 0, reduce="mean"
-            )
-        else:
-            link_repr = set_of_link_repr.mean(0, keepdim=True)  # (l=1, k, d+1)
-        # flatten to a list if multiple symmetry breakings groups are used
-        return link_repr.transpose(0, 1).flatten(1, 2)  # (k, (d+1)*l)
+        # aggregate (average over) all views, t, while keeping per-graph averages separate
+        global_mean = set_of_link_repr.mean(0)  # (k, d+1)
+        if break_group_idx is None or break_group_idx.numel() == 0:
+            return global_mean
+        # keeping per-graph averages separate
+        device = set_of_link_repr.device
+        tuple_group_idx = torch.repeat_interleave(
+            torch.arange(n_variables_per_graph.size(0), device=device),
+            n_variables_per_graph.to(device=device, dtype=torch.long),
+        )
+        group_match = break_group_idx.unsqueeze(1) == tuple_group_idx.unsqueeze(0)
+
+        sum_repr = (set_of_link_repr * group_match.unsqueeze(-1)).sum(dim=0)
+        counts = group_match.sum(dim=0)
+
+        link_repr = global_mean.clone()
+        mask = counts > 0
+        if mask.any():
+            link_repr[mask] = sum_repr[mask] / counts[mask].unsqueeze(-1).to(sum_repr.dtype)
+
+        return link_repr  # (k, d+1)
 
 
 class BipartiteGraphConvolution(MessagePassing):
@@ -528,8 +554,7 @@ class GNNPolicy(nn.Module):
         variable_features = self.tuple_encoder(variable_features, constraint_features,
                                                edge_indices, reversed_edge_indices,
                                                n_variables_per_graph=n_variables_per_graph, 
-                                               n_constraints_per_graph=n_constraints_per_graph, 
-                                               group_idx=None)
+                                               n_constraints_per_graph=n_constraints_per_graph)
 
         # 4. transform variable features to strong branching decision
         output = self.output_module(variable_features).squeeze(-1)
