@@ -23,6 +23,8 @@ def get_default_args(dataset):
     """This corresponds to the f_t in the paper"""
     defaults["symmetry_breaking_model"] = "power_method"  # power_method; gnn
     defaults["power"] = 2
+    defaults["num_heads"] = 1
+    defaults["isab_num_inds"] = 8
     # training related parameters
     defaults["seed"] = 42
     defaults["epochs"] = 2

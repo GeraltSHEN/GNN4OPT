@@ -219,10 +219,14 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             raise ValueError(
                 f"Unkown symmetry breaking model {args.symmetry_breaking_model}"
             )
+        num_heads = args.num_heads
+        isab_num_inds = args.isab_num_inds
         tuple_encoder = Holo(
             n_breakings=args.n_breakings,
             symmetry_breaking_model=symmetry_breaking_model,
-            r=r
+            r=r,
+            num_heads=num_heads,
+            isab_num_inds=isab_num_inds,
         )
     else:
         raise NotImplementedError()

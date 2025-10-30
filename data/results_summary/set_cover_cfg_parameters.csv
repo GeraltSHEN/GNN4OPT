@@ -1,8 +1,10 @@
 parameter,set_cover_cfg1,set_cover_cfg100,set_cover_cfg1_resume_from_set_cover_cfg1,set_cover_cfg2,set_cover_cfg3,set_cover_cfg3_resume_from_set_cover_cfg3,set_cover_cfg99,variation
 epochs,9,1,9,1,9,9,1,different
 eval_every,10000,10000,10000,1000,10000,10000,10000,different
+isab_num_inds,,8,,,,,,different
 max_samples_per_split,,,,,,,128,different
 model,raw,holo,raw,holo,holo,holo,raw,different
+num_heads,,1,,,,,,different
 print_every,10000,10000,10000,1000,10000,10000,10000,different
 symmetry_breaking_model,power_method,gnn,power_method,power_method,gnn,gnn,power_method,different
 batch_size,32,32,32,32,32,32,32,persistent

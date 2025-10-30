@@ -12,6 +12,8 @@ model: holo
 model_dir: ./models
 model_suffix: ''
 n_breakings: 8
+num_heads: 1
+isab_num_inds: 8
 num_layers: 2
 out_dim: 64
 power: 2
