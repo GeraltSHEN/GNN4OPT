@@ -12,6 +12,55 @@ from torch_sparse import SparseTensor
 
 # TODO: add dropout option to models
 
+class MultiheadAttentionBlock(nn.Module):
+    """Multihead attention block mirroring Set Transformer MAB."""
+
+    def __init__(self, dim_Q, dim_K, dim_V, num_heads, ln=False):
+        super().__init__()
+        self.dim_V = dim_V
+        self.fc_q = nn.Linear(dim_Q, dim_V)
+        self.fc_k = nn.Linear(dim_K, dim_V)
+        self.fc_v = nn.Linear(dim_K, dim_V)
+        if ln:
+            self.ln0 = nn.LayerNorm(dim_V)
+            self.ln1 = nn.LayerNorm(dim_V)
+        self.fc_o = nn.Linear(dim_V, dim_V)
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim_V, num_heads=num_heads, batch_first=True
+        )
+
+    def forward(self, Q, K):
+        Q = self.fc_q(Q)
+        K_proj = self.fc_k(K)
+        V = self.fc_v(K)
+        attn_out, _ = self.attn(Q, K_proj, V, need_weights=False)
+        O = Q + attn_out
+        O = O if getattr(self, "ln0", None) is None else self.ln0(O)
+        O = O + F.relu(self.fc_o(O))
+        O = O if getattr(self, "ln1", None) is None else self.ln1(O)
+        return O
+
+
+class InducedSetAttentionBlock(nn.Module):
+    """Set Transformer ISAB block implemented with torch MultiheadAttention."""
+
+    def __init__(self, dim_in, dim_out, num_heads, num_inds, ln=False):
+        super().__init__()
+        if num_inds <= 0:
+            raise ValueError("num_inds must be >= 1.")
+        self.inducing_points = nn.Parameter(torch.Tensor(1, num_inds, dim_out))
+        nn.init.xavier_uniform_(self.inducing_points)
+        self.mab0 = MultiheadAttentionBlock(dim_out, dim_in, dim_out, num_heads, ln=ln)
+        self.mab1 = MultiheadAttentionBlock(dim_in, dim_out, dim_out, num_heads, ln=ln)
+
+    def forward(self, X):
+        # X: (batch, n, dim_in)
+        batch_size = X.size(0)
+        inducing = self.inducing_points.repeat(batch_size, 1, 1)
+        H = self.mab0(inducing, X)
+        return self.mab1(X, H)
+
+
 class PowerMethod(nn.Module):
     """Symmetry breaking model using the power method."""
 
@@ -55,13 +104,39 @@ class ProductTupleEncoder(torch.nn.Module):
 class Holo(torch.nn.Module):
     """The Holo-GNN tuple encoder using symmetry breaking."""
 
-    def __init__(self, *, n_breakings: int, symmetry_breaking_model):
+    def __init__(self, *, n_breakings: int, symmetry_breaking_model, 
+                 num_heads: int = 0, isab_num_inds: Optional[int] = None):
         super().__init__()
         self.n_breakings = n_breakings
         self.symmetry_breaking_model = symmetry_breaking_model
         self.emb_size = self.symmetry_breaking_model.out_dim
+        if num_heads < 0:
+            raise ValueError("num_heads must be >= 0.")
+        self.num_heads = num_heads
 
         self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
+
+        if num_heads > 0:
+            if self.emb_size % num_heads != 0:
+                raise ValueError(
+                    f"symmetry_breaking_model.out_dim ({self.emb_size}) must be divisible by num_heads ({num_heads})."
+                )
+            num_inds = (
+                isab_num_inds if isab_num_inds is not None else max(1, n_breakings)
+            )
+            if num_inds <= 0:
+                raise ValueError("isab_num_inds must be >= 1 when attention is enabled.")
+            self.cross_tuple_block = InducedSetAttentionBlock(
+                dim_in=self.emb_size,
+                dim_out=self.emb_size,
+                num_heads=num_heads,
+                num_inds=num_inds,
+                ln=True,
+            )
+        else:
+            print("num_heads <= 0.")
+            print("Warning: Holo instantiated without attention module.")
+            self.cross_tuple_block = None
 
     def tied_topk_indices(self, values, k, expansion=5):
         """
@@ -122,6 +197,9 @@ class Holo(torch.nn.Module):
         # aggregate (elementwise multiplication) orders, r
         set_of_link_repr = holo_repr[:, tuples_coo].prod(dim=1)  # (t, r, k, d+1) -> (t, k, d+1)
         # set_of_link_repr: (t, k=n_tuples, d+1)
+
+        if self.cross_tuple_block is not None and set_of_link_repr.size(1) > 0:
+            set_of_link_repr = self.cross_tuple_block(set_of_link_repr)
 
         # aggregate (average over) all views, t
         if group_idx is not None:

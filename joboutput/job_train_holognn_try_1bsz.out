@@ -1,0 +1,389 @@
+batch_size: 1
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dropout: 0.0
+epochs: 1
+eval_every: 1000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 1000
+r: 1
+resume: False
+resume_model_dir: 
+sample_negatives: False
+save_every: 10000
+seed: 42
+symmetry_breaking_model: gnn
+weight_decay: 0.0005
+num_heads: 1
+isab_num_inds: 100
+dataset: set_cover
+cfg_idx: 99
+model_id: set_cover_cfg99
+device: cuda
+Model is saved to models/set_cover_cfg99, logs are saved to logs/set_cover_cfg99.
+[Epoch 1] CPU Memory - RSS: 0.92 GB
+-------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
+-------- Valid loss: 4.798, accuracy 0.043, top 5 accuracy 0.172, score difference [abs] 6.129 [relative] 0.943 --------
+Saved checkpoint models/set_cover_cfg99/0.pth
+------------------------------------------- Evaluating at epoch 1, step 1000 -------------------------------------------
+-------- Valid loss: 4.772, accuracy 0.097, top 5 accuracy 0.295, score difference [abs] 5.603 [relative] 0.807 --------
+Step 1000: Train loss 4.767, accuracy 0.129, Top-5 accuracy 0.350, [absolute] 5.503 [relative] 0.762
+------------------------------------------- Evaluating at epoch 1, step 2000 -------------------------------------------
+-------- Valid loss: 4.798, accuracy 0.085, top 5 accuracy 0.193, score difference [abs] 5.754 [relative] 0.807 --------
+Step 2000: Train loss 4.774, accuracy 0.112, Top-5 accuracy 0.312, [absolute] 5.453 [relative] 0.772
+------------------------------------------- Evaluating at epoch 1, step 3000 -------------------------------------------
+-------- Valid loss: 4.797, accuracy 0.123, top 5 accuracy 0.338, score difference [abs] 5.471 [relative] 0.775 --------
+Step 3000: Train loss 4.779, accuracy 0.107, Top-5 accuracy 0.301, [absolute] 5.523 [relative] 0.792
+------------------------------------------- Evaluating at epoch 1, step 4000 -------------------------------------------
+-------- Valid loss: 4.722, accuracy 0.098, top 5 accuracy 0.300, score difference [abs] 5.600 [relative] 0.811 --------
+Step 4000: Train loss 4.785, accuracy 0.106, Top-5 accuracy 0.297, [absolute] 5.560 [relative] 0.793
+------------------------------------------- Evaluating at epoch 1, step 5000 -------------------------------------------
+-------- Valid loss: 4.796, accuracy 0.194, top 5 accuracy 0.405, score difference [abs] 4.575 [relative] 0.602 --------
+Step 5000: Train loss 4.777, accuracy 0.111, Top-5 accuracy 0.301, [absolute] 5.538 [relative] 0.784
+------------------------------------------- Evaluating at epoch 1, step 6000 -------------------------------------------
+-------- Valid loss: 4.798, accuracy 0.068, top 5 accuracy 0.246, score difference [abs] 5.776 [relative] 0.856 --------
+Step 6000: Train loss 4.777, accuracy 0.111, Top-5 accuracy 0.300, [absolute] 5.450 [relative] 0.776
+------------------------------------------- Evaluating at epoch 1, step 7000 -------------------------------------------
+-------- Valid loss: 4.797, accuracy 0.101, top 5 accuracy 0.308, score difference [abs] 5.598 [relative] 0.807 --------
+Step 7000: Train loss 4.781, accuracy 0.107, Top-5 accuracy 0.299, [absolute] 5.472 [relative] 0.782
+------------------------------------------- Evaluating at epoch 1, step 8000 -------------------------------------------
+-------- Valid loss: 3.938, accuracy 0.427, top 5 accuracy 0.685, score difference [abs] 2.269 [relative] 0.271 --------
+Step 8000: Train loss 4.764, accuracy 0.117, Top-5 accuracy 0.312, [absolute] 5.384 [relative] 0.766
+------------------------------------------- Evaluating at epoch 1, step 9000 -------------------------------------------
+-------- Valid loss: 3.579, accuracy 0.471, top 5 accuracy 0.739, score difference [abs] 1.896 [relative] 0.215 --------
+Step 9000: Train loss 4.643, accuracy 0.154, Top-5 accuracy 0.356, [absolute] 5.043 [relative] 0.708
+------------------------------------------ Evaluating at epoch 1, step 10000 -------------------------------------------
+-------- Valid loss: 3.476, accuracy 0.519, top 5 accuracy 0.776, score difference [abs] 1.741 [relative] 0.184 --------
+Saved checkpoint models/set_cover_cfg99/10000.pth
+Step 10000: Train loss 4.540, accuracy 0.189, Top-5 accuracy 0.396, [absolute] 4.741 [relative] 0.658
+------------------------------------------ Evaluating at epoch 1, step 11000 -------------------------------------------
+-------- Valid loss: 3.419, accuracy 0.521, top 5 accuracy 0.782, score difference [abs] 1.701 [relative] 0.181 --------
+Step 11000: Train loss 4.448, accuracy 0.219, Top-5 accuracy 0.430, [absolute] 4.459 [relative] 0.615
+------------------------------------------ Evaluating at epoch 1, step 12000 -------------------------------------------
+-------- Valid loss: 3.427, accuracy 0.534, top 5 accuracy 0.797, score difference [abs] 1.576 [relative] 0.169 --------
+Step 12000: Train loss 4.368, accuracy 0.244, Top-5 accuracy 0.460, [absolute] 4.221 [relative] 0.578
+------------------------------------------ Evaluating at epoch 1, step 13000 -------------------------------------------
+-------- Valid loss: 3.459, accuracy 0.532, top 5 accuracy 0.800, score difference [abs] 1.584 [relative] 0.169 --------
+Step 13000: Train loss 4.298, accuracy 0.266, Top-5 accuracy 0.484, [absolute] 4.033 [relative] 0.549
+------------------------------------------ Evaluating at epoch 1, step 14000 -------------------------------------------
+-------- Valid loss: 3.413, accuracy 0.533, top 5 accuracy 0.788, score difference [abs] 1.606 [relative] 0.170 --------
+Step 14000: Train loss 4.236, accuracy 0.285, Top-5 accuracy 0.508, [absolute] 3.868 [relative] 0.523
+------------------------------------------ Evaluating at epoch 1, step 15000 -------------------------------------------
+-------- Valid loss: 3.367, accuracy 0.534, top 5 accuracy 0.796, score difference [abs] 1.597 [relative] 0.170 --------
+Step 15000: Train loss 4.184, accuracy 0.301, Top-5 accuracy 0.527, [absolute] 3.711 [relative] 0.499
+------------------------------------------ Evaluating at epoch 1, step 16000 -------------------------------------------
+-------- Valid loss: 3.360, accuracy 0.527, top 5 accuracy 0.796, score difference [abs] 1.608 [relative] 0.174 --------
+Step 16000: Train loss 4.136, accuracy 0.313, Top-5 accuracy 0.542, [absolute] 3.590 [relative] 0.480
+------------------------------------------ Evaluating at epoch 1, step 17000 -------------------------------------------
+-------- Valid loss: 3.395, accuracy 0.533, top 5 accuracy 0.802, score difference [abs] 1.543 [relative] 0.167 --------
+Step 17000: Train loss 4.095, accuracy 0.326, Top-5 accuracy 0.557, [absolute] 3.471 [relative] 0.462
+------------------------------------------ Evaluating at epoch 1, step 18000 -------------------------------------------
+-------- Valid loss: 3.551, accuracy 0.502, top 5 accuracy 0.780, score difference [abs] 1.694 [relative] 0.191 --------
+Step 18000: Train loss 4.059, accuracy 0.338, Top-5 accuracy 0.571, [absolute] 3.368 [relative] 0.446
+------------------------------------------ Evaluating at epoch 1, step 19000 -------------------------------------------
+-------- Valid loss: 3.375, accuracy 0.530, top 5 accuracy 0.805, score difference [abs] 1.559 [relative] 0.169 --------
+Step 19000: Train loss 4.023, accuracy 0.348, Top-5 accuracy 0.584, [absolute] 3.274 [relative] 0.432
+------------------------------------------ Evaluating at epoch 1, step 20000 -------------------------------------------
+-------- Valid loss: 3.349, accuracy 0.522, top 5 accuracy 0.797, score difference [abs] 1.634 [relative] 0.178 --------
+Saved checkpoint models/set_cover_cfg99/20000.pth
+Step 20000: Train loss 3.995, accuracy 0.357, Top-5 accuracy 0.593, [absolute] 3.199 [relative] 0.420
+------------------------------------------ Evaluating at epoch 1, step 21000 -------------------------------------------
+-------- Valid loss: 3.407, accuracy 0.528, top 5 accuracy 0.787, score difference [abs] 1.639 [relative] 0.174 --------
+Step 21000: Train loss 3.968, accuracy 0.366, Top-5 accuracy 0.604, [absolute] 3.115 [relative] 0.407
+------------------------------------------ Evaluating at epoch 1, step 22000 -------------------------------------------
+-------- Valid loss: 3.397, accuracy 0.522, top 5 accuracy 0.785, score difference [abs] 1.670 [relative] 0.178 --------
+Step 22000: Train loss 3.943, accuracy 0.374, Top-5 accuracy 0.613, [absolute] 3.047 [relative] 0.397
+------------------------------------------ Evaluating at epoch 1, step 23000 -------------------------------------------
+-------- Valid loss: 3.343, accuracy 0.527, top 5 accuracy 0.798, score difference [abs] 1.595 [relative] 0.174 --------
+Step 23000: Train loss 3.917, accuracy 0.380, Top-5 accuracy 0.621, [absolute] 2.987 [relative] 0.387
+------------------------------------------ Evaluating at epoch 1, step 24000 -------------------------------------------
+-------- Valid loss: 3.386, accuracy 0.522, top 5 accuracy 0.795, score difference [abs] 1.636 [relative] 0.178 --------
+Step 24000: Train loss 3.896, accuracy 0.386, Top-5 accuracy 0.627, [absolute] 2.932 [relative] 0.379
+------------------------------------------ Evaluating at epoch 1, step 25000 -------------------------------------------
+-------- Valid loss: 3.437, accuracy 0.512, top 5 accuracy 0.782, score difference [abs] 1.665 [relative] 0.184 --------
+Step 25000: Train loss 3.874, accuracy 0.390, Top-5 accuracy 0.633, [absolute] 2.877 [relative] 0.370
+------------------------------------------ Evaluating at epoch 1, step 26000 -------------------------------------------
+-------- Valid loss: 3.515, accuracy 0.501, top 5 accuracy 0.771, score difference [abs] 1.800 [relative] 0.195 --------
+Step 26000: Train loss 3.855, accuracy 0.395, Top-5 accuracy 0.639, [absolute] 2.826 [relative] 0.363
+------------------------------------------ Evaluating at epoch 1, step 27000 -------------------------------------------
+-------- Valid loss: 3.436, accuracy 0.535, top 5 accuracy 0.801, score difference [abs] 1.550 [relative] 0.167 --------
+Step 27000: Train loss 3.839, accuracy 0.400, Top-5 accuracy 0.644, [absolute] 2.783 [relative] 0.356
+------------------------------------------ Evaluating at epoch 1, step 28000 -------------------------------------------
+-------- Valid loss: 3.340, accuracy 0.531, top 5 accuracy 0.803, score difference [abs] 1.576 [relative] 0.170 --------
+Step 28000: Train loss 3.824, accuracy 0.405, Top-5 accuracy 0.650, [absolute] 2.742 [relative] 0.350
+------------------------------------------ Evaluating at epoch 1, step 29000 -------------------------------------------
+-------- Valid loss: 3.396, accuracy 0.527, top 5 accuracy 0.799, score difference [abs] 1.568 [relative] 0.169 --------
+Step 29000: Train loss 3.810, accuracy 0.409, Top-5 accuracy 0.655, [absolute] 2.701 [relative] 0.343
+------------------------------------------ Evaluating at epoch 1, step 30000 -------------------------------------------
+-------- Valid loss: 3.413, accuracy 0.517, top 5 accuracy 0.777, score difference [abs] 1.728 [relative] 0.186 --------
+Saved checkpoint models/set_cover_cfg99/30000.pth
+Step 30000: Train loss 3.800, accuracy 0.412, Top-5 accuracy 0.658, [absolute] 2.678 [relative] 0.339
+------------------------------------------ Evaluating at epoch 1, step 31000 -------------------------------------------
+-------- Valid loss: 3.375, accuracy 0.526, top 5 accuracy 0.797, score difference [abs] 1.596 [relative] 0.173 --------
+Step 31000: Train loss 3.788, accuracy 0.416, Top-5 accuracy 0.662, [absolute] 2.642 [relative] 0.334
+------------------------------------------ Evaluating at epoch 1, step 32000 -------------------------------------------
+-------- Valid loss: 3.447, accuracy 0.493, top 5 accuracy 0.769, score difference [abs] 1.760 [relative] 0.198 --------
+Step 32000: Train loss 3.779, accuracy 0.419, Top-5 accuracy 0.666, [absolute] 2.609 [relative] 0.329
+------------------------------------------ Evaluating at epoch 1, step 33000 -------------------------------------------
+-------- Valid loss: 3.455, accuracy 0.501, top 5 accuracy 0.768, score difference [abs] 1.743 [relative] 0.192 --------
+Step 33000: Train loss 3.767, accuracy 0.423, Top-5 accuracy 0.671, [absolute] 2.575 [relative] 0.324
+------------------------------------------ Evaluating at epoch 1, step 34000 -------------------------------------------
+-------- Valid loss: 3.392, accuracy 0.524, top 5 accuracy 0.796, score difference [abs] 1.583 [relative] 0.175 --------
+Step 34000: Train loss 3.757, accuracy 0.426, Top-5 accuracy 0.674, [absolute] 2.551 [relative] 0.320
+------------------------------------------ Evaluating at epoch 1, step 35000 -------------------------------------------
+-------- Valid loss: 3.357, accuracy 0.523, top 5 accuracy 0.803, score difference [abs] 1.570 [relative] 0.174 --------
+Step 35000: Train loss 3.746, accuracy 0.429, Top-5 accuracy 0.678, [absolute] 2.524 [relative] 0.315
+------------------------------------------ Evaluating at epoch 1, step 36000 -------------------------------------------
+-------- Valid loss: 3.344, accuracy 0.533, top 5 accuracy 0.806, score difference [abs] 1.547 [relative] 0.169 --------
+Step 36000: Train loss 3.738, accuracy 0.431, Top-5 accuracy 0.682, [absolute] 2.499 [relative] 0.312
+------------------------------------------ Evaluating at epoch 1, step 37000 -------------------------------------------
+-------- Valid loss: 3.367, accuracy 0.533, top 5 accuracy 0.804, score difference [abs] 1.551 [relative] 0.167 --------
+Step 37000: Train loss 3.730, accuracy 0.435, Top-5 accuracy 0.685, [absolute] 2.469 [relative] 0.307
+------------------------------------------ Evaluating at epoch 1, step 38000 -------------------------------------------
+-------- Valid loss: 3.407, accuracy 0.533, top 5 accuracy 0.798, score difference [abs] 1.631 [relative] 0.171 --------
+Step 38000: Train loss 3.721, accuracy 0.438, Top-5 accuracy 0.688, [absolute] 2.446 [relative] 0.304
+------------------------------------------ Evaluating at epoch 1, step 39000 -------------------------------------------
+-------- Valid loss: 3.374, accuracy 0.522, top 5 accuracy 0.794, score difference [abs] 1.640 [relative] 0.178 --------
+Step 39000: Train loss 3.713, accuracy 0.440, Top-5 accuracy 0.691, [absolute] 2.423 [relative] 0.301
+------------------------------------------ Evaluating at epoch 1, step 40000 -------------------------------------------
+-------- Valid loss: 3.430, accuracy 0.504, top 5 accuracy 0.783, score difference [abs] 1.669 [relative] 0.189 --------
+Saved checkpoint models/set_cover_cfg99/40000.pth
+Step 40000: Train loss 3.705, accuracy 0.442, Top-5 accuracy 0.693, [absolute] 2.402 [relative] 0.297
+------------------------------------------ Evaluating at epoch 1, step 41000 -------------------------------------------
+-------- Valid loss: 3.341, accuracy 0.537, top 5 accuracy 0.811, score difference [abs] 1.511 [relative] 0.164 --------
+Step 41000: Train loss 3.698, accuracy 0.443, Top-5 accuracy 0.695, [absolute] 2.384 [relative] 0.294
+------------------------------------------ Evaluating at epoch 1, step 42000 -------------------------------------------
+-------- Valid loss: 3.373, accuracy 0.509, top 5 accuracy 0.792, score difference [abs] 1.660 [relative] 0.186 --------
+Step 42000: Train loss 3.689, accuracy 0.446, Top-5 accuracy 0.698, [absolute] 2.365 [relative] 0.291
+------------------------------------------ Evaluating at epoch 1, step 43000 -------------------------------------------
+-------- Valid loss: 3.344, accuracy 0.532, top 5 accuracy 0.796, score difference [abs] 1.590 [relative] 0.170 --------
+Step 43000: Train loss 3.680, accuracy 0.448, Top-5 accuracy 0.701, [absolute] 2.346 [relative] 0.288
+------------------------------------------ Evaluating at epoch 1, step 44000 -------------------------------------------
+-------- Valid loss: 3.335, accuracy 0.528, top 5 accuracy 0.798, score difference [abs] 1.598 [relative] 0.173 --------
+Step 44000: Train loss 3.674, accuracy 0.449, Top-5 accuracy 0.702, [absolute] 2.330 [relative] 0.286
+------------------------------------------ Evaluating at epoch 1, step 45000 -------------------------------------------
+-------- Valid loss: 3.361, accuracy 0.528, top 5 accuracy 0.794, score difference [abs] 1.640 [relative] 0.173 --------
+Step 45000: Train loss 3.667, accuracy 0.451, Top-5 accuracy 0.705, [absolute] 2.316 [relative] 0.283
+------------------------------------------ Evaluating at epoch 1, step 46000 -------------------------------------------
+-------- Valid loss: 3.347, accuracy 0.520, top 5 accuracy 0.798, score difference [abs] 1.593 [relative] 0.178 --------
+Step 46000: Train loss 3.659, accuracy 0.453, Top-5 accuracy 0.707, [absolute] 2.299 [relative] 0.281
+------------------------------------------ Evaluating at epoch 1, step 47000 -------------------------------------------
+-------- Valid loss: 3.372, accuracy 0.530, top 5 accuracy 0.801, score difference [abs] 1.583 [relative] 0.171 --------
+Step 47000: Train loss 3.653, accuracy 0.455, Top-5 accuracy 0.709, [absolute] 2.284 [relative] 0.278
+------------------------------------------ Evaluating at epoch 1, step 48000 -------------------------------------------
+-------- Valid loss: 3.384, accuracy 0.528, top 5 accuracy 0.801, score difference [abs] 1.539 [relative] 0.170 --------
+Step 48000: Train loss 3.647, accuracy 0.456, Top-5 accuracy 0.711, [absolute] 2.271 [relative] 0.276
+------------------------------------------ Evaluating at epoch 1, step 49000 -------------------------------------------
+-------- Valid loss: 3.377, accuracy 0.516, top 5 accuracy 0.790, score difference [abs] 1.593 [relative] 0.178 --------
+Step 49000: Train loss 3.641, accuracy 0.458, Top-5 accuracy 0.713, [absolute] 2.255 [relative] 0.274
+------------------------------------------ Evaluating at epoch 1, step 50000 -------------------------------------------
+-------- Valid loss: 3.393, accuracy 0.521, top 5 accuracy 0.789, score difference [abs] 1.641 [relative] 0.178 --------
+Saved checkpoint models/set_cover_cfg99/50000.pth
+Step 50000: Train loss 3.636, accuracy 0.460, Top-5 accuracy 0.714, [absolute] 2.239 [relative] 0.272
+------------------------------------------ Evaluating at epoch 1, step 51000 -------------------------------------------
+-------- Valid loss: 3.338, accuracy 0.535, top 5 accuracy 0.804, score difference [abs] 1.548 [relative] 0.166 --------
+Step 51000: Train loss 3.630, accuracy 0.461, Top-5 accuracy 0.716, [absolute] 2.225 [relative] 0.270
+------------------------------------------ Evaluating at epoch 1, step 52000 -------------------------------------------
+-------- Valid loss: 3.382, accuracy 0.533, top 5 accuracy 0.807, score difference [abs] 1.520 [relative] 0.166 --------
+Step 52000: Train loss 3.625, accuracy 0.462, Top-5 accuracy 0.717, [absolute] 2.211 [relative] 0.268
+------------------------------------------ Evaluating at epoch 1, step 53000 -------------------------------------------
+-------- Valid loss: 3.343, accuracy 0.530, top 5 accuracy 0.802, score difference [abs] 1.549 [relative] 0.168 --------
+Step 53000: Train loss 3.621, accuracy 0.463, Top-5 accuracy 0.719, [absolute] 2.199 [relative] 0.266
+------------------------------------------ Evaluating at epoch 1, step 54000 -------------------------------------------
+-------- Valid loss: 3.324, accuracy 0.538, top 5 accuracy 0.808, score difference [abs] 1.528 [relative] 0.164 --------
+Step 54000: Train loss 3.618, accuracy 0.464, Top-5 accuracy 0.720, [absolute] 2.186 [relative] 0.264
+------------------------------------------ Evaluating at epoch 1, step 55000 -------------------------------------------
+-------- Valid loss: 3.351, accuracy 0.537, top 5 accuracy 0.805, score difference [abs] 1.562 [relative] 0.165 --------
+Step 55000: Train loss 3.613, accuracy 0.465, Top-5 accuracy 0.722, [absolute] 2.173 [relative] 0.262
+------------------------------------------ Evaluating at epoch 1, step 56000 -------------------------------------------
+-------- Valid loss: 3.320, accuracy 0.537, top 5 accuracy 0.809, score difference [abs] 1.509 [relative] 0.164 --------
+Step 56000: Train loss 3.608, accuracy 0.467, Top-5 accuracy 0.723, [absolute] 2.162 [relative] 0.261
+------------------------------------------ Evaluating at epoch 1, step 57000 -------------------------------------------
+-------- Valid loss: 3.394, accuracy 0.533, top 5 accuracy 0.793, score difference [abs] 1.610 [relative] 0.168 --------
+Step 57000: Train loss 3.604, accuracy 0.468, Top-5 accuracy 0.725, [absolute] 2.153 [relative] 0.259
+------------------------------------------ Evaluating at epoch 1, step 58000 -------------------------------------------
+-------- Valid loss: 3.323, accuracy 0.534, top 5 accuracy 0.802, score difference [abs] 1.574 [relative] 0.168 --------
+Step 58000: Train loss 3.600, accuracy 0.469, Top-5 accuracy 0.726, [absolute] 2.142 [relative] 0.258
+------------------------------------------ Evaluating at epoch 1, step 59000 -------------------------------------------
+-------- Valid loss: 3.342, accuracy 0.534, top 5 accuracy 0.805, score difference [abs] 1.535 [relative] 0.168 --------
+Step 59000: Train loss 3.597, accuracy 0.470, Top-5 accuracy 0.727, [absolute] 2.130 [relative] 0.256
+------------------------------------------ Evaluating at epoch 1, step 60000 -------------------------------------------
+-------- Valid loss: 3.348, accuracy 0.535, top 5 accuracy 0.797, score difference [abs] 1.584 [relative] 0.168 --------
+Saved checkpoint models/set_cover_cfg99/60000.pth
+Step 60000: Train loss 3.593, accuracy 0.471, Top-5 accuracy 0.729, [absolute] 2.119 [relative] 0.254
+------------------------------------------ Evaluating at epoch 1, step 61000 -------------------------------------------
+-------- Valid loss: 3.340, accuracy 0.538, top 5 accuracy 0.796, score difference [abs] 1.587 [relative] 0.165 --------
+Step 61000: Train loss 3.590, accuracy 0.472, Top-5 accuracy 0.730, [absolute] 2.113 [relative] 0.253
+------------------------------------------ Evaluating at epoch 1, step 62000 -------------------------------------------
+-------- Valid loss: 3.330, accuracy 0.540, top 5 accuracy 0.802, score difference [abs] 1.558 [relative] 0.165 --------
+Step 62000: Train loss 3.586, accuracy 0.473, Top-5 accuracy 0.731, [absolute] 2.102 [relative] 0.252
+------------------------------------------ Evaluating at epoch 1, step 63000 -------------------------------------------
+-------- Valid loss: 3.360, accuracy 0.539, top 5 accuracy 0.803, score difference [abs] 1.525 [relative] 0.162 --------
+Step 63000: Train loss 3.582, accuracy 0.474, Top-5 accuracy 0.733, [absolute] 2.094 [relative] 0.251
+------------------------------------------ Evaluating at epoch 1, step 64000 -------------------------------------------
+-------- Valid loss: 3.325, accuracy 0.536, top 5 accuracy 0.809, score difference [abs] 1.512 [relative] 0.164 --------
+Step 64000: Train loss 3.578, accuracy 0.475, Top-5 accuracy 0.733, [absolute] 2.087 [relative] 0.249
+------------------------------------------ Evaluating at epoch 1, step 65000 -------------------------------------------
+-------- Valid loss: 3.330, accuracy 0.537, top 5 accuracy 0.801, score difference [abs] 1.574 [relative] 0.166 --------
+Step 65000: Train loss 3.576, accuracy 0.476, Top-5 accuracy 0.734, [absolute] 2.077 [relative] 0.248
+------------------------------------------ Evaluating at epoch 1, step 66000 -------------------------------------------
+-------- Valid loss: 3.389, accuracy 0.535, top 5 accuracy 0.798, score difference [abs] 1.599 [relative] 0.168 --------
+Step 66000: Train loss 3.573, accuracy 0.477, Top-5 accuracy 0.735, [absolute] 2.067 [relative] 0.247
+------------------------------------------ Evaluating at epoch 1, step 67000 -------------------------------------------
+-------- Valid loss: 3.322, accuracy 0.539, top 5 accuracy 0.805, score difference [abs] 1.542 [relative] 0.164 --------
+Step 67000: Train loss 3.570, accuracy 0.479, Top-5 accuracy 0.737, [absolute] 2.059 [relative] 0.245
+------------------------------------------ Evaluating at epoch 1, step 68000 -------------------------------------------
+-------- Valid loss: 3.329, accuracy 0.541, top 5 accuracy 0.806, score difference [abs] 1.522 [relative] 0.161 --------
+Step 68000: Train loss 3.566, accuracy 0.479, Top-5 accuracy 0.737, [absolute] 2.053 [relative] 0.245
+------------------------------------------ Evaluating at epoch 1, step 69000 -------------------------------------------
+-------- Valid loss: 3.337, accuracy 0.525, top 5 accuracy 0.801, score difference [abs] 1.544 [relative] 0.172 --------
+Step 69000: Train loss 3.565, accuracy 0.480, Top-5 accuracy 0.738, [absolute] 2.048 [relative] 0.244
+------------------------------------------ Evaluating at epoch 1, step 70000 -------------------------------------------
+-------- Valid loss: 3.340, accuracy 0.532, top 5 accuracy 0.801, score difference [abs] 1.531 [relative] 0.169 --------
+Saved checkpoint models/set_cover_cfg99/70000.pth
+Step 70000: Train loss 3.562, accuracy 0.481, Top-5 accuracy 0.739, [absolute] 2.039 [relative] 0.242
+------------------------------------------ Evaluating at epoch 1, step 71000 -------------------------------------------
+-------- Valid loss: 3.360, accuracy 0.535, top 5 accuracy 0.800, score difference [abs] 1.557 [relative] 0.166 --------
+Step 71000: Train loss 3.559, accuracy 0.482, Top-5 accuracy 0.740, [absolute] 2.031 [relative] 0.241
+------------------------------------------ Evaluating at epoch 1, step 72000 -------------------------------------------
+-------- Valid loss: 3.313, accuracy 0.534, top 5 accuracy 0.803, score difference [abs] 1.529 [relative] 0.167 --------
+Step 72000: Train loss 3.556, accuracy 0.482, Top-5 accuracy 0.741, [absolute] 2.022 [relative] 0.240
+------------------------------------------ Evaluating at epoch 1, step 73000 -------------------------------------------
+-------- Valid loss: 3.422, accuracy 0.524, top 5 accuracy 0.801, score difference [abs] 1.610 [relative] 0.175 --------
+Step 73000: Train loss 3.552, accuracy 0.483, Top-5 accuracy 0.742, [absolute] 2.016 [relative] 0.239
+------------------------------------------ Evaluating at epoch 1, step 74000 -------------------------------------------
+-------- Valid loss: 3.390, accuracy 0.538, top 5 accuracy 0.803, score difference [abs] 1.539 [relative] 0.164 --------
+Step 74000: Train loss 3.548, accuracy 0.484, Top-5 accuracy 0.743, [absolute] 2.010 [relative] 0.238
+------------------------------------------ Evaluating at epoch 1, step 75000 -------------------------------------------
+-------- Valid loss: 3.415, accuracy 0.510, top 5 accuracy 0.783, score difference [abs] 1.643 [relative] 0.181 --------
+Step 75000: Train loss 3.544, accuracy 0.484, Top-5 accuracy 0.743, [absolute] 2.008 [relative] 0.237
+------------------------------------------ Evaluating at epoch 1, step 76000 -------------------------------------------
+-------- Valid loss: 3.393, accuracy 0.527, top 5 accuracy 0.789, score difference [abs] 1.668 [relative] 0.176 --------
+Step 76000: Train loss 3.542, accuracy 0.485, Top-5 accuracy 0.744, [absolute] 2.003 [relative] 0.237
+------------------------------------------ Evaluating at epoch 1, step 77000 -------------------------------------------
+-------- Valid loss: 3.309, accuracy 0.539, top 5 accuracy 0.810, score difference [abs] 1.513 [relative] 0.163 --------
+Step 77000: Train loss 3.540, accuracy 0.485, Top-5 accuracy 0.745, [absolute] 1.997 [relative] 0.236
+------------------------------------------ Evaluating at epoch 1, step 78000 -------------------------------------------
+-------- Valid loss: 3.319, accuracy 0.526, top 5 accuracy 0.799, score difference [abs] 1.606 [relative] 0.174 --------
+Step 78000: Train loss 3.538, accuracy 0.486, Top-5 accuracy 0.746, [absolute] 1.989 [relative] 0.235
+------------------------------------------ Evaluating at epoch 1, step 79000 -------------------------------------------
+-------- Valid loss: 3.362, accuracy 0.522, top 5 accuracy 0.798, score difference [abs] 1.583 [relative] 0.175 --------
+Step 79000: Train loss 3.536, accuracy 0.487, Top-5 accuracy 0.746, [absolute] 1.983 [relative] 0.234
+------------------------------------------ Evaluating at epoch 1, step 80000 -------------------------------------------
+-------- Valid loss: 3.371, accuracy 0.512, top 5 accuracy 0.789, score difference [abs] 1.657 [relative] 0.185 --------
+Saved checkpoint models/set_cover_cfg99/80000.pth
+Step 80000: Train loss 3.533, accuracy 0.488, Top-5 accuracy 0.747, [absolute] 1.976 [relative] 0.233
+------------------------------------------ Evaluating at epoch 1, step 81000 -------------------------------------------
+-------- Valid loss: 3.317, accuracy 0.541, top 5 accuracy 0.805, score difference [abs] 1.550 [relative] 0.163 --------
+Step 81000: Train loss 3.531, accuracy 0.488, Top-5 accuracy 0.748, [absolute] 1.971 [relative] 0.232
+------------------------------------------ Evaluating at epoch 1, step 82000 -------------------------------------------
+-------- Valid loss: 3.356, accuracy 0.522, top 5 accuracy 0.798, score difference [abs] 1.609 [relative] 0.177 --------
+Step 82000: Train loss 3.528, accuracy 0.489, Top-5 accuracy 0.749, [absolute] 1.965 [relative] 0.231
+------------------------------------------ Evaluating at epoch 1, step 83000 -------------------------------------------
+-------- Valid loss: 3.356, accuracy 0.543, top 5 accuracy 0.810, score difference [abs] 1.504 [relative] 0.161 --------
+Step 83000: Train loss 3.527, accuracy 0.490, Top-5 accuracy 0.749, [absolute] 1.958 [relative] 0.230
+------------------------------------------ Evaluating at epoch 1, step 84000 -------------------------------------------
+-------- Valid loss: 3.347, accuracy 0.535, top 5 accuracy 0.800, score difference [abs] 1.575 [relative] 0.166 --------
+Step 84000: Train loss 3.524, accuracy 0.490, Top-5 accuracy 0.750, [absolute] 1.953 [relative] 0.230
+------------------------------------------ Evaluating at epoch 1, step 85000 -------------------------------------------
+-------- Valid loss: 3.315, accuracy 0.527, top 5 accuracy 0.804, score difference [abs] 1.538 [relative] 0.171 --------
+Step 85000: Train loss 3.522, accuracy 0.491, Top-5 accuracy 0.751, [absolute] 1.950 [relative] 0.229
+------------------------------------------ Evaluating at epoch 1, step 86000 -------------------------------------------
+-------- Valid loss: 3.343, accuracy 0.529, top 5 accuracy 0.798, score difference [abs] 1.582 [relative] 0.172 --------
+Step 86000: Train loss 3.520, accuracy 0.491, Top-5 accuracy 0.751, [absolute] 1.945 [relative] 0.228
+------------------------------------------ Evaluating at epoch 1, step 87000 -------------------------------------------
+-------- Valid loss: 3.354, accuracy 0.530, top 5 accuracy 0.798, score difference [abs] 1.532 [relative] 0.168 --------
+Step 87000: Train loss 3.518, accuracy 0.492, Top-5 accuracy 0.752, [absolute] 1.940 [relative] 0.227
+------------------------------------------ Evaluating at epoch 1, step 88000 -------------------------------------------
+-------- Valid loss: 3.313, accuracy 0.533, top 5 accuracy 0.803, score difference [abs] 1.565 [relative] 0.169 --------
+Step 88000: Train loss 3.517, accuracy 0.492, Top-5 accuracy 0.752, [absolute] 1.935 [relative] 0.227
+------------------------------------------ Evaluating at epoch 1, step 89000 -------------------------------------------
+-------- Valid loss: 3.345, accuracy 0.515, top 5 accuracy 0.789, score difference [abs] 1.636 [relative] 0.182 --------
+Step 89000: Train loss 3.515, accuracy 0.492, Top-5 accuracy 0.753, [absolute] 1.931 [relative] 0.226
+------------------------------------------ Evaluating at epoch 1, step 90000 -------------------------------------------
+-------- Valid loss: 3.292, accuracy 0.524, top 5 accuracy 0.804, score difference [abs] 1.557 [relative] 0.173 --------
+Saved checkpoint models/set_cover_cfg99/90000.pth
+Step 90000: Train loss 3.513, accuracy 0.492, Top-5 accuracy 0.753, [absolute] 1.929 [relative] 0.226
+------------------------------------------ Evaluating at epoch 1, step 91000 -------------------------------------------
+-------- Valid loss: 3.243, accuracy 0.527, top 5 accuracy 0.802, score difference [abs] 1.599 [relative] 0.173 --------
+Step 91000: Train loss 3.511, accuracy 0.493, Top-5 accuracy 0.753, [absolute] 1.924 [relative] 0.225
+------------------------------------------ Evaluating at epoch 1, step 92000 -------------------------------------------
+-------- Valid loss: 3.281, accuracy 0.518, top 5 accuracy 0.792, score difference [abs] 1.624 [relative] 0.178 --------
+Step 92000: Train loss 3.509, accuracy 0.493, Top-5 accuracy 0.754, [absolute] 1.920 [relative] 0.224
+------------------------------------------ Evaluating at epoch 1, step 93000 -------------------------------------------
+-------- Valid loss: 3.234, accuracy 0.526, top 5 accuracy 0.799, score difference [abs] 1.561 [relative] 0.171 --------
+Step 93000: Train loss 3.506, accuracy 0.494, Top-5 accuracy 0.754, [absolute] 1.917 [relative] 0.224
+------------------------------------------ Evaluating at epoch 1, step 94000 -------------------------------------------
+-------- Valid loss: 3.298, accuracy 0.532, top 5 accuracy 0.800, score difference [abs] 1.560 [relative] 0.167 --------
+Step 94000: Train loss 3.504, accuracy 0.494, Top-5 accuracy 0.755, [absolute] 1.911 [relative] 0.223
+------------------------------------------ Evaluating at epoch 1, step 95000 -------------------------------------------
+-------- Valid loss: 3.193, accuracy 0.534, top 5 accuracy 0.806, score difference [abs] 1.527 [relative] 0.166 --------
+Step 95000: Train loss 3.500, accuracy 0.495, Top-5 accuracy 0.755, [absolute] 1.907 [relative] 0.223
+------------------------------------------ Evaluating at epoch 1, step 96000 -------------------------------------------
+-------- Valid loss: 3.189, accuracy 0.532, top 5 accuracy 0.807, score difference [abs] 1.531 [relative] 0.167 --------
+Step 96000: Train loss 3.497, accuracy 0.495, Top-5 accuracy 0.756, [absolute] 1.902 [relative] 0.222
+------------------------------------------ Evaluating at epoch 1, step 97000 -------------------------------------------
+-------- Valid loss: 3.281, accuracy 0.525, top 5 accuracy 0.785, score difference [abs] 1.689 [relative] 0.176 --------
+Step 97000: Train loss 3.494, accuracy 0.496, Top-5 accuracy 0.757, [absolute] 1.898 [relative] 0.221
+------------------------------------------ Evaluating at epoch 1, step 98000 -------------------------------------------
+-------- Valid loss: 3.188, accuracy 0.527, top 5 accuracy 0.801, score difference [abs] 1.552 [relative] 0.170 --------
+Step 98000: Train loss 3.491, accuracy 0.496, Top-5 accuracy 0.757, [absolute] 1.895 [relative] 0.221
+------------------------------------------ Evaluating at epoch 1, step 99000 -------------------------------------------
+-------- Valid loss: 3.172, accuracy 0.532, top 5 accuracy 0.808, score difference [abs] 1.531 [relative] 0.166 --------
+Step 99000: Train loss 3.488, accuracy 0.496, Top-5 accuracy 0.758, [absolute] 1.892 [relative] 0.220
+Epoch 1: Train loss 3.485, accuracy 0.496, top 5 accuracy 0.758, [absolute] 1.888 [relative] 0.220
+Saved checkpoint models/set_cover_cfg99/100000.pth
+Training completed in 403.95 minutes.
+batch_size: 1
+config_root: ./cfg
+dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dropout: 0.0
+epochs: 1
+eval_every: 10000
+hidden_channels: 64
+log_dir: ./logs
+loss_option: classification
+lr: 0.001
+model: holo
+model_dir: ./models
+model_suffix: 
+n_breakings: 8
+num_layers: 2
+out_dim: 64
+power: 2
+print_every: 10000
+r: 1
+resume: False
+resume_model_dir: 
+sample_negatives: False
+save_every: 10000
+seed: 42
+symmetry_breaking_model: gnn
+weight_decay: 0.0005
+num_heads: 1
+isab_num_inds: 100
+dataset: set_cover
+cfg_idx: 99
+parent_test_stats_dir: data/results_summary/
+eval_split: test
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: set_cover_cfg99
+device: cuda
+Number of parameters: 199300
+Loaded checkpoint models/set_cover_cfg99/100000.pth
+--------------------------- [test] Save stats to: data/results_summary/set_cover_cfg99/test ----------------------------
+[test] loss 3.2137, acc 0.5176, top5 0.7970, score_diff 1.5074, normalized 0.1752
+Total eval time: 13.59 minutes

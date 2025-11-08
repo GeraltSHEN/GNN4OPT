@@ -203,6 +203,8 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     emb_size = args.hidden_channels
     n_layers = args.num_layers
     r = args.r
+    num_heads = getattr(args, "num_heads", 0)
+    isab_num_inds = getattr(args, "isab_num_inds", None)
     if args.r == 1:
          output_size = 1
     else:
@@ -222,6 +224,8 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
         tuple_encoder = Holo(
             n_breakings=args.n_breakings,
             symmetry_breaking_model=symmetry_breaking_model,
+            num_heads=num_heads,
+            isab_num_inds=isab_num_inds,
         )
     else:
         raise NotImplementedError()

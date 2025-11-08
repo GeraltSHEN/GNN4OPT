@@ -22,6 +22,8 @@ def get_default_args(dataset):
     defaults["n_breakings"] = 8  # for holo
     """This corresponds to the f_t in the paper"""
     defaults["symmetry_breaking_model"] = "power_method"  # power_method; gnn
+    defaults["num_heads"] = 0
+    defaults["isab_num_inds"] = None
     defaults["power"] = 2
     # training related parameters
     defaults["seed"] = 42
