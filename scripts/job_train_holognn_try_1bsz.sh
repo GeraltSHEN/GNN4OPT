@@ -13,5 +13,17 @@
 module load anaconda
 conda activate opt-ml-env
 
+echo "Starting job 98..."
+
+python train.py --dataset set_cover --cfg_idx 98
+python eval.py --dataset set_cover --cfg_idx 98 --eval_split test
+
+echo "Starting next job 99..."
+
 python train.py --dataset set_cover --cfg_idx 99
 python eval.py --dataset set_cover --cfg_idx 99 --eval_split test
+
+echo "Starting next job 100..."
+
+python train.py --dataset set_cover --cfg_idx 100
+python eval.py --dataset set_cover --cfg_idx 100 --eval_split test

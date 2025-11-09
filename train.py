@@ -128,12 +128,14 @@ def train(
                 )
 
             batch = batch.to(device)
+            use_candidate_tuples = score_th == float("inf")
             # Compute the logits (i.e. pre-softmax activations) according to the policy on the concatenated graphs
             logits = policy(
                 batch.constraint_features,
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                tuple_indices=batch.candidates if use_candidate_tuples else None,
             )
 
             if score_th < float("inf"):
@@ -146,7 +148,7 @@ def train(
                     continue
             else:
                 # Index the results by the candidates, and split and pad them
-                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
+                logits = pad_tensor(logits, batch.nb_candidates)
 
             if loss_option == "classification":
                 loss = F.cross_entropy(logits, batch.candidate_choices)
@@ -227,9 +229,10 @@ def evaluate(policy, data_loader, device, writer, num_gradient_steps):
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                tuple_indices=batch.candidates,
             )
-            # Index the results by the candidates, and split and pad them
-            logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
+            # Split and pad candidate logits per graph
+            logits = pad_tensor(logits, batch.nb_candidates)
             # Compute the usual cross-entropy classification loss
             loss = F.cross_entropy(logits, batch.candidate_choices)
             # if isnan: pdb

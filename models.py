@@ -327,6 +327,7 @@ class GNNPolicy(nn.Module):
         constraint_features,
         edge_indices,
         reversed_edge_indices,
+        tuple_indices: Optional[torch.Tensor] = None,
     ):
         """
         X: stacked node features (variable + constraint)
@@ -355,7 +356,10 @@ class GNNPolicy(nn.Module):
 
         if self.r == 1:
             # tuples_coo is the variable indices, i.e., the first n_variables rows of X
-            tuples_coo = torch.arange(n_variables).unsqueeze(0)
+            if tuple_indices is None:
+                tuples_coo = torch.arange(n_variables, device=X.device).unsqueeze(0)
+            else:
+                tuples_coo = tuple_indices.unsqueeze(0)
             # tuples_coo: (r=1, k=n_variables)
         elif self.r == 2:
             # tuples_coo is the reversed_edge_indices with offset
@@ -373,7 +377,12 @@ class GNNPolicy(nn.Module):
         return X, adj_t, tuples_coo
 
     def forward(
-        self, constraint_features, edge_indices, edge_features, variable_features
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        tuple_indices: Optional[torch.Tensor] = None,
     ):
         reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
 
@@ -407,6 +416,7 @@ class GNNPolicy(nn.Module):
             constraint_features,
             edge_indices,
             reversed_edge_indices,
+            tuple_indices=tuple_indices,
         )
         variable_features = self.tuple_encoder(X, adj_t, tuples_coo, group_idx=None)
 

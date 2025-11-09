@@ -44,9 +44,10 @@ def evaluate(policy, data_loader, device, stats_filename):
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                tuple_indices=batch.candidates,
             )
-            # Index the results by the candidates, and split and pad them
-            logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
+            # Split and pad candidate logits per graph
+            logits = pad_tensor(logits, batch.nb_candidates)
             # Compute the usual cross-entropy classification loss
             loss = F.cross_entropy(logits, batch.candidate_choices)
             # if isnan: pdb
