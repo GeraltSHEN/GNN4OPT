@@ -76,11 +76,13 @@ class GraphDataset(Dataset):
     def __init__(
         self,
         sample_files: Sequence[Union[str, Path]],
-        edge_nfeats: int = 2,
+        edge_nfeats: int = 1,
+        binarize_edge_features: bool = True,
     ):
         super().__init__(root=None, transform=None, pre_transform=None)
         self.sample_files = [str(path) for path in _ensure_sequence(sample_files)]
         self.edge_nfeats = edge_nfeats
+        self.binarize_edge_features = binarize_edge_features
 
     def len(self):
         return len(self.sample_files)
@@ -97,6 +99,14 @@ class GraphDataset(Dataset):
         edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
         edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
         variable_features = torch.as_tensor(variable_dict["values"], dtype=torch.float32)
+
+        if self.binarize_edge_features:
+            non_zero_mask = edge_features != 0
+            edge_features = torch.where(
+                non_zero_mask,
+                torch.ones_like(edge_features),
+                torch.zeros_like(edge_features),
+            )
 
         if self.edge_nfeats == 2:
             norm = torch.linalg.norm(edge_features)
@@ -128,6 +138,7 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
     dataset_root = Path(f"{args.dataset_path}")
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
     edge_nfeats = getattr(args, "edge_nfeats", 1)
+    binarize_edge_features = getattr(args, "binarize_edge_features", True)
 
     if for_training:
         splits = {
@@ -182,7 +193,11 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
             sample_files = sample_files[:max_split_samples]
         metadata[f"{split_name}_files"] = sample_files
         if sample_files:
-            dataset = GraphDataset(sample_files, edge_nfeats=edge_nfeats)
+            dataset = GraphDataset(
+                sample_files,
+                edge_nfeats=edge_nfeats,
+                binarize_edge_features=binarize_edge_features,
+            )
             data[split_name] = DataLoader(dataset, 
                                           batch_size=cfg["batch_size"], 
                                           shuffle=cfg["shuffle"], 
