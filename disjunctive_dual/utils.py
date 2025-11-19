@@ -98,7 +98,28 @@ class GraphDataset(Dataset):
         constraint_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
         edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
         edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
-        variable_features = torch.as_tensor(variable_dict["values"], dtype=torch.float32)
+        variable_names = variable_dict["names"]
+        variable_values = np.asarray(variable_dict["values"], dtype=np.float32)
+        # pick the relevant variable features
+        feature_indices = {
+            name: variable_names.index(name)
+            for name in ("coef_normalized", "sol_is_at_lb", "sol_is_at_ub", "sol_val")
+        }
+        coef_normalized = variable_values[:, feature_indices["coef_normalized"]]
+        sol_is_at_lb = variable_values[:, feature_indices["sol_is_at_lb"]]
+        sol_is_at_ub = variable_values[:, feature_indices["sol_is_at_ub"]]
+        sol_val = variable_values[:, feature_indices["sol_val"]]
+        fixed_mask = (sol_is_at_lb == 1) & (sol_is_at_ub == 1)
+        is_fixed_to_1 = (fixed_mask & (sol_val == 1)).astype(np.float32)
+        is_fixed_to_0 = (fixed_mask & (sol_val == 0)).astype(np.float32)
+        is_not_fixed = 1.0 - is_fixed_to_1 - is_fixed_to_0
+        variable_features = torch.as_tensor(
+            np.stack(
+                [coef_normalized, is_fixed_to_1, is_fixed_to_0, is_not_fixed],
+                axis=-1,
+            ),
+            dtype=torch.float32,
+        )
 
         if self.binarize_edge_features:
             non_zero_mask = edge_features != 0
