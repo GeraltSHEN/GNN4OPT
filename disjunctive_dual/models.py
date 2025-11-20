@@ -484,56 +484,50 @@ class SetCoverHolo(torch.nn.Module):
                 ), 
                 dim=-1) # (t, n_constraints, d+2)
         # break symmetry
-        formatted_Y_a, formatted_X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+        Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
             self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
-        holo_repr_Y_a, holo_repr_X_a = self.symmetry_breaking_model(
-            formatted_Y_a, formatted_edge_indices, formatted_edge_features, formatted_X_a
+        Y_a, X_a = self.symmetry_breaking_model(
+            Y_a, formatted_edge_indices, formatted_edge_features, X_a
         )
-        holo_repr_Y_a, holo_repr_X_a = self.format_from_stacked_bipartite(
-            holo_repr_Y_a, holo_repr_X_a, shape_info
-        )
+        Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
 
-        formatted_Y_b, formatted_X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+        Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
             self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
-        holo_repr_Y_b, holo_repr_X_b = self.symmetry_breaking_model(
-            formatted_Y_b, formatted_edge_indices, formatted_edge_features, formatted_X_b
+        Y_b, X_b = self.symmetry_breaking_model(
+            Y_b, formatted_edge_indices, formatted_edge_features, X_b
         )
-        holo_repr_Y_b, holo_repr_X_b = self.format_from_stacked_bipartite(
-            holo_repr_Y_b, holo_repr_X_b, shape_info
-        )
+        Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
         # holo_repr: (t, n, d+2)
         # set transformer: constraint talks to constraint
         if self.constraint_set_block is not None:
-            holo_repr_Y_a = self.constraint_set_block(holo_repr_Y_a)
-            holo_repr_Y_b = self.constraint_set_block(holo_repr_Y_b) # (t, n_constraints, d+2)
+            Y_a = self.constraint_set_block(Y_a)
+            Y_b = self.constraint_set_block(Y_b) # (t, n_constraints, d+2)
         
         # Question: apply pooling over Y and use mixed Y to update X_a and X_b? 
-        holo_repr_Y = self.constraint_pma(
-                        torch.stack((holo_repr_Y_a, holo_repr_Y_b), 
-                                    dim=2).reshape(-1, 2, holo_repr_Y_a.size(-1))).reshape(
+        Y = self.constraint_pma(
+                        torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1))).reshape(
                                         one_hot_breakings.size(0), n_constraints, -1
                                     )
-        # holo_repr_Y: (t, n_constraints, d+2)
+        # (t, n_constraints, d+2)
 
         # gnn: constraint talks to variable
         if self.constraint_variable_gnn is not None:
-            formatted_Y, formatted_X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
-                self.format_for_stacked_bipartite(holo_repr_Y, holo_repr_X_a, edge_indices, edge_features)
-            holo_repr_Y_a_updated, holo_repr_X_a = self.constraint_variable_gnn(
-                formatted_Y, formatted_edge_indices, formatted_edge_features, formatted_X_a
+            Y, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(Y, X_a, edge_indices, edge_features)
+            Y_a, X_a = self.constraint_variable_gnn(
+                Y, formatted_edge_indices, formatted_edge_features, X_a
             )
-            _, holo_repr_X_a = self.format_from_stacked_bipartite(holo_repr_Y_a_updated, holo_repr_X_a, shape_info)
+            _, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
 
-            formatted_Y, formatted_X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
-                self.format_for_stacked_bipartite(holo_repr_Y, holo_repr_X_b, edge_indices, edge_features)
-            holo_repr_Y_b_updated, holo_repr_X_b = self.constraint_variable_gnn(
-                formatted_Y, formatted_edge_indices, formatted_edge_features, formatted_X_b
+            Y, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(Y, X_b, edge_indices, edge_features)
+            Y_b, X_b = self.constraint_variable_gnn(
+                Y, formatted_edge_indices, formatted_edge_features, X_b
             )
-            _, holo_repr_X_b = self.format_from_stacked_bipartite(holo_repr_Y_b_updated, holo_repr_X_b, shape_info)
-        holo_repr_X = self.variable_pma(
-                        torch.stack((holo_repr_X_a, holo_repr_X_b), 
-                                    dim=2).reshape(-1, 2, holo_repr_X_a.size(-1))).reshape(
+            _, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
+        X = self.variable_pma(
+                        torch.stack((X_a, X_b), dim=2).reshape(-1, 2, X_a.size(-1))).reshape(
                                         one_hot_breakings.size(0), n_variables, -1
                                     )
-        # holo_repr_X: (t, n_variables, d+2)
-        return holo_repr_Y, holo_repr_X
+        # (t, n_variables, d+2)
+        return Y, X
