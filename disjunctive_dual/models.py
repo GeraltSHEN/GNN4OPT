@@ -189,11 +189,11 @@ class GNNPolicy(nn.Module):
     """A wrapper module combining
     - an initial MLP to convert raw features to embeddings in common dimension,
     - a data encoder (BipartiteGraphConvolution) for MILP bipartite graphs, 
-    - a tuple encoder (Holo, or ProductTupleEncoder),
+    - a set-cover-specific module (SetCoverHolo)
     - a final MLP on the variable features for candidate choice/scoring
     """
     def __init__(self, emb_size, cons_nfeats, edge_nfeats, var_nfeats, output_size,
-                 n_layers, tuple_encoder, r=1):
+                 n_layers, holo):
         super().__init__()
 
         # CONSTRAINT EMBEDDING
@@ -221,122 +221,37 @@ class GNNPolicy(nn.Module):
         
         # DATA ENCODER
         self.n_layers = n_layers
-        if n_layers == 1:
-            self.conv_v_to_c = BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats)
-            self.conv_c_to_v = BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats)
-        else:
-            for i in range(n_layers):
-                setattr(self, f"conv_{i}_v_to_c", BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats))
-                setattr(self, f"conv_{i}_c_to_v", BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats))
+        self.data_encoder = StackedBipartiteGNN(
+            hidden_channels=emb_size, edge_nfeats=edge_nfeats, n_layers=n_layers
+        )
         
         # TUPLE ENCODER
-        self.r = r
-        self.tuple_encoder = tuple_encoder
+        self.holo = holo
 
         # FINAL MLP
         self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(self.tuple_encoder.emb_size, emb_size),
+            torch.nn.Linear(self.holo.emb_size, emb_size),
             torch.nn.ReLU(),
             torch.nn.Linear(emb_size, output_size, bias=False),
         )
 
-    def get_holo_input(
-        self,
-        variable_features,
-        constraint_features,
-        edge_indices,
-        reversed_edge_indices,
-    ):
-        """
-        X: stacked node features (variable + constraint)
-        adj_t: homogeneous and unweighted adjacency matrix of the bipartite graph
-            make it symmetric to allow power method, i.e., adj_t^k X
-        tuples_coo: batched indices (r=1: node, r=2: edge, r=3: triplet, etc.) for the task
-            as the task's dataset is multi-graphs rather than a single graph, 
-            no CooSampler was used to sample sub-graphs to produce batches. 
-            Instead, PyG default data and loader produces batches.
-        """
-        n_variables = variable_features.size(0)
-        n_constraints = constraint_features.size(0)
-        X = torch.vstack((variable_features, constraint_features))
-
-        var_to_cons = reversed_edge_indices.clone()
-        var_to_cons[1] = var_to_cons[1] + n_variables
-        cons_to_var = edge_indices.clone()
-        cons_to_var[0] = cons_to_var[0] + n_variables
-        homogeneous_edge_index = torch.hstack((var_to_cons, cons_to_var))
-        adj_t = SparseTensor(
-                row=homogeneous_edge_index[0],
-                col=homogeneous_edge_index[1],
-                sparse_sizes=(n_variables + n_constraints, n_variables + n_constraints),
-            )
-        adj_t = gcn_norm(adj_t, add_self_loops=True)
-
-        if self.r == 1:
-            # tuples_coo is the variable indices, i.e., the first n_variables rows of X
-            tuples_coo = torch.arange(n_variables).unsqueeze(0)
-            # tuples_coo: (r=1, k=n_variables)
-        elif self.r == 2:
-            # tuples_coo is the reversed_edge_indices with offset
-            new_entity_index = []
-            reversed_relation_schema = ("variable", "constraint")
-            for entity, entity_index in zip(reversed_relation_schema, reversed_edge_indices):
-                offset = 0 if entity == "variable" else n_variables
-                new_entity_index.append(entity_index + offset)
-            tuples_coo = torch.vstack(new_entity_index)
-            # tuples_coo: (r=2, k=n_edges)
-            raise ValueError(f"r should be 1 for branching task")
-        else:
-            raise NotImplementedError(f"get_tuples_coo for `r={self.r}` not implemented yet.")
-
-        return X, adj_t, tuples_coo
-
     def forward(
         self, constraint_features, edge_indices, edge_features, variable_features
     ):
-        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
-
         # 1. raw features to embeddings in common dimension
-        constraint_features = self.cons_embedding(constraint_features)
+        Y = self.cons_embedding(constraint_features)
         edge_features = self.edge_embedding(edge_features)
-        variable_features = self.var_embedding(variable_features)
+        X = self.var_embedding(variable_features)
 
-        # 2. two half convolutions
-        if self.n_layers == 1:
-            constraint_features = self.conv_v_to_c(
-                variable_features, reversed_edge_indices, edge_features, constraint_features
-            )
-            variable_features = self.conv_c_to_v(
-                constraint_features, edge_indices, edge_features, variable_features
-            )
-        else:
-            for i in range(self.n_layers):
-                conv_v_to_c = getattr(self, f"conv_{i}_v_to_c")
-                conv_c_to_v = getattr(self, f"conv_{i}_c_to_v")
-                constraint_features = constraint_features + conv_v_to_c(
-                    variable_features, reversed_edge_indices, edge_features, constraint_features
-                )
-                variable_features = variable_features + conv_c_to_v(
-                    constraint_features, edge_indices, edge_features, variable_features
-                )
+        # 2. constraint-variable message passing
+        Y, X = self.data_encoder(Y, edge_indices, edge_features, X)
         
         # 3. break symmetry
-        X, adj_t, tuples_coo = self.get_holo_input(
-            variable_features,
-            constraint_features,
-            edge_indices,
-            reversed_edge_indices,
-        )
-        variable_features = self.tuple_encoder(X, adj_t, tuples_coo, group_idx=None)
+        Y, X = self.holo(Y, X, constraint_features, edge_indices, edge_features, variable_features)
 
         # 4. transform variable features to strong branching decision
-        output = self.output_module(variable_features).squeeze(-1)
+        output = self.output_module(X).squeeze(-1)
         return output
-
-
-
-
-
 
 
 class SetCoverHolo(torch.nn.Module):
@@ -392,24 +307,24 @@ class SetCoverHolo(torch.nn.Module):
                 param.requires_grad = False
             self.breaking_selector_model.eval()
         self.symmetry_breaking_model = symmetry_breaking_model
-        self.node_emb_dim = self.symmetry_breaking_model.out_dim
+        self.emb_size = self.symmetry_breaking_model.out_dim
         self.edge_nfeats = edge_nfeats
         self.num_heads = num_heads
-        # self.ln = torch.nn.LayerNorm(self.node_emb_dim)
+        # self.ln = torch.nn.LayerNorm(self.emb_size)
 
         # set transformer: constraint talks to constraint
         if num_heads > 0:
-            if self.node_emb_dim % num_heads != 0:
+            if self.emb_size % num_heads != 0:
                 raise ValueError(
-                    f"symmetry_breaking_model.out_dim ({self.node_emb_dim}) "
+                    f"symmetry_breaking_model.out_dim ({self.emb_size}) "
                     f"must be divisible by num_heads ({num_heads})."
                 )
             num_inds = isab_num_inds
             if num_inds <= 0:
                 raise ValueError("isab_num_inds must be >= 1 when attention is enabled.")
             self.constraint_set_block = InducedSetAttentionBlock(
-                dim_in=self.node_emb_dim,
-                dim_out=self.node_emb_dim,
+                dim_in=self.emb_size,
+                dim_out=self.emb_size,
                 num_heads=num_heads,
                 num_inds=num_inds,
                 ln=True,
@@ -421,15 +336,15 @@ class SetCoverHolo(torch.nn.Module):
         self.mp_layers = mp_layers
         if self.mp_layers > 0:
             self.constraint_variable_gnn = StackedBipartiteGNN(
-                hidden_channels=self.node_emb_dim,
+                hidden_channels=self.emb_size,
                 edge_nfeats=self.edge_nfeats,
                 n_layers=self.mp_layers,
             )
         else:
             self.constraint_variable_gnn = None
         
-        self.constraint_pma = PoolingMultiheadAttention(dim=self.node_emb_dim, num_heads=1, num_seeds=1, ln=True)
-        self.variable_pma = PoolingMultiheadAttention(dim=self.node_emb_dim, num_heads=1, num_seeds=1, ln=True)
+        self.constraint_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
+        self.variable_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
 
     def get_nodes_to_break(
         self,
@@ -447,7 +362,7 @@ class SetCoverHolo(torch.nn.Module):
         return torch.topk(scores, k=k).indices
     
     def revise_r(
-            r, edge_indices, branching_variable_indices):
+            self, r, edge_indices, branching_variable_indices):
         """
         r: base r (n_constraints, 1)
         edge_indices: (2, E)
@@ -557,4 +472,3 @@ class SetCoverHolo(torch.nn.Module):
                                     )
         # holo_repr_X: (t, n_variables, d+2)
         return holo_repr_Y, holo_repr_X
-
