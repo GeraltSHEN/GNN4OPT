@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_scatter
-from torch_geometric.nn import GCNConv
 from torch_geometric.nn import MessagePassing
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
 from torch_sparse import SparseTensor
@@ -61,155 +60,75 @@ class InducedSetAttentionBlock(nn.Module):
         return self.mab1(X, H)
 
 
-class PowerMethod(nn.Module):
-    """Symmetry breaking model using the power method."""
+class PoolingMultiheadAttention(nn.Module):
+    """Set Transformer PMA block implemented with torch MultiheadAttention."""
 
-    def __init__(self, k, out_dim):
+    def __init__(self, dim, num_heads, num_seeds, ln=False):
         super().__init__()
-        self.k = k
-        self.out_dim = out_dim
+        self.S = nn.Parameter(torch.Tensor(1, num_seeds, dim))
+        nn.init.xavier_uniform_(self.S)
+        self.mab = MultiheadAttentionBlock(dim, dim, dim, num_heads, ln=ln)
+    
+    def forward(self, X):
+        # X: (batch, n, dim)
+        batch_size = X.size(0)
+        return self.mab(self.S.repeat(batch_size, 1, 1), X)
 
-    def forward(self, v0, adj_t):
-        v = v0
-        for _ in range(self.k):
-            v = adj_t.matmul(v)
-        return v
 
+class StackedBipartiteGNN(torch.nn.Module):
+    """Stack of BipartiteGraphConvolution layers for constraint-variable message passing."""
 
-class SymmetryBreakingGNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels):
+    def __init__(self, hidden_channels, edge_nfeats=1, n_layers=2):
         super().__init__()
-        self.conv1 = GCNConv(
-            in_channels, hidden_channels, normalize=False
-        )  # Note: This assumes the adj matrix is normalized
-        self.conv2 = GCNConv(hidden_channels, hidden_channels, normalize=False)
         self.out_dim = hidden_channels
+        self.edge_nfeats = edge_nfeats
+        self.n_layers = n_layers
 
-    def forward(self, v0, adj_t):
-        x = self.conv1(v0, adj_t).relu()
-        return self.conv2(x, adj_t)
-
-
-class ProductTupleEncoder(torch.nn.Module):
-    """A baseline tuple encoder that takes the element-wise product of node embeddings."""
-
-    def __init__(self, emb_size):
-        super().__init__()
-        self.emb_size = emb_size
-
-    def forward(self, X, adj_t, tuples_coo, **kwargs):
-        return X[tuples_coo].prod(dim=0)
-
-
-class Holo(torch.nn.Module):
-    """The Holo-GNN tuple encoder using symmetry breaking."""
-
-    def __init__(self, *, n_breakings: int, symmetry_breaking_model, 
-                 num_heads: int = 0, isab_num_inds: Optional[int] = None):
-        super().__init__()
-        self.n_breakings = n_breakings
-        self.symmetry_breaking_model = symmetry_breaking_model
-        self.emb_size = self.symmetry_breaking_model.out_dim
-        if num_heads < 0:
-            raise ValueError("num_heads must be >= 0.")
-        self.num_heads = num_heads
-
-        self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
-
-        if num_heads > 0:
-            if self.emb_size % num_heads != 0:
-                raise ValueError(
-                    f"symmetry_breaking_model.out_dim ({self.emb_size}) must be divisible by num_heads ({num_heads})."
+        if n_layers == 1:
+            self.conv_v_to_c = BipartiteGraphConvolution(
+                emb_size=hidden_channels, edge_nfeats=edge_nfeats
+            )
+            self.conv_c_to_v = BipartiteGraphConvolution(
+                emb_size=hidden_channels, edge_nfeats=edge_nfeats
+            )
+        else:
+            for i in range(n_layers):
+                setattr(
+                    self,
+                    f"conv_{i}_v_to_c",
+                    BipartiteGraphConvolution(
+                        emb_size=hidden_channels, edge_nfeats=edge_nfeats
+                    ),
                 )
-            num_inds = (
-                isab_num_inds if isab_num_inds is not None else max(1, n_breakings)
+                setattr(
+                    self,
+                    f"conv_{i}_c_to_v",
+                    BipartiteGraphConvolution(
+                        emb_size=hidden_channels, edge_nfeats=edge_nfeats
+                    ),
+                )
+
+    def forward(self, constraint_features, edge_indices, edge_features, variable_features):
+        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+
+        if self.n_layers == 1:
+            constraint_features = self.conv_v_to_c(
+                variable_features, reversed_edge_indices, edge_features, constraint_features
             )
-            if num_inds <= 0:
-                raise ValueError("isab_num_inds must be >= 1 when attention is enabled.")
-            self.cross_tuple_block = InducedSetAttentionBlock(
-                dim_in=self.emb_size,
-                dim_out=self.emb_size,
-                num_heads=num_heads,
-                num_inds=num_inds,
-                ln=True,
-            )
-        else:
-            print("num_heads <= 0.")
-            print("Warning: Holo instantiated without attention module.")
-            self.cross_tuple_block = None
-
-    def tied_topk_indices(self, values, k, expansion=5):
-        """
-        >>> tied_topk_indices(torch.tensor([4,4,4,5,5]), 2, 2).sort()[0]
-        tensor([3, 4])
-        >>> tied_topk_indices(torch.tensor([4,1,4,5,5,1]), 3, 2).sort()[0]
-        tensor([0, 2, 3, 4])
-        """
-        num_values = values.numel()
-        if num_values < k:
-            raise ValueError("Need at least k values to select from.")
-
-        expansion = max(1, expansion)
-        max_expansion = max(expansion, (num_values + k - 1) // k)
-        current_expansion = expansion
-
-        while True:
-            top_n = min(num_values, current_expansion * k)
-            top_values, indices = torch.topk(values, top_n)
-            kth_value = top_values[k - 1]
-            extra = int((top_values[k:] == kth_value).sum().item())
-
-            if extra > 0 and top_n < num_values:
-                if current_expansion == max_expansion:
-                    return indices[: k + extra]
-                current_expansion = min(max_expansion, current_expansion * 2)
-                continue
-
-            return indices[: k + extra]
-
-    def get_nodes_to_break(self, adj_t, n_breakings=8):
-        node_degrees = adj_t.sum(-1)
-        return self.tied_topk_indices(values=node_degrees, k=n_breakings)
-
-    def forward(self, X, adj_t, tuples_coo, group_idx=None):
-        # X: (n, d)
-        break_node_indices = self.get_nodes_to_break(
-            adj_t, n_breakings=self.n_breakings
-        )
-
-        # break_node_indices: (t,)
-        one_hot_breakings = F.one_hot(break_node_indices, X.size(0)).unsqueeze(-1)
-        # one_hot_breakings: (t, n, 1)
-        # expand to holographic node representations
-        holo_repr = self.symmetry_breaking_model(
-            torch.cat(
-                (
-                    X.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
-                    one_hot_breakings,
-                ),
-                dim=-1,
-            ),  # (t, n, d+1)
-            adj_t,
-        )  # (t, n, d+1), where n includes both movies and users
-        holo_repr = self.ln(holo_repr)
-        # holo_repr: (t, n, d+1=symmetry_breaking_model.out_dim)
-
-        # aggregate (elementwise multiplication) orders, r
-        set_of_link_repr = holo_repr[:, tuples_coo].prod(dim=1)  # (t, r, k, d+1) -> (t, k, d+1)
-        # set_of_link_repr: (t, k=n_tuples, d+1)
-
-        if self.cross_tuple_block is not None and set_of_link_repr.size(1) > 0:
-            set_of_link_repr = self.cross_tuple_block(set_of_link_repr)
-
-        # aggregate (average over) all views, t
-        if group_idx is not None:
-            link_repr = torch_scatter.scatter(
-                set_of_link_repr, group_idx, 0, reduce="mean"
+            variable_features = self.conv_c_to_v(
+                constraint_features, edge_indices, edge_features, variable_features
             )
         else:
-            link_repr = set_of_link_repr.mean(0, keepdim=True)  # (l=1, k, d+1)
-        # flatten to a list if multiple symmetry breakings groups are used
-        return link_repr.transpose(0, 1).flatten(1, 2)  # (k, (d+1)*l)
+            for i in range(self.n_layers):
+                conv_v_to_c = getattr(self, f"conv_{i}_v_to_c")
+                conv_c_to_v = getattr(self, f"conv_{i}_c_to_v")
+                constraint_features = constraint_features + conv_v_to_c(
+                    variable_features, reversed_edge_indices, edge_features, constraint_features
+                )
+                variable_features = variable_features + conv_c_to_v(
+                    constraint_features, edge_indices, edge_features, variable_features
+                )
+        return constraint_features, variable_features
 
 
 class BipartiteGraphConvolution(MessagePassing):
@@ -413,3 +332,229 @@ class GNNPolicy(nn.Module):
         # 4. transform variable features to strong branching decision
         output = self.output_module(variable_features).squeeze(-1)
         return output
+
+
+
+
+
+
+
+class SetCoverHolo(torch.nn.Module):
+    """
+    A Set-Cover-specific Holo-GNN tuple encoder using symmetry breaking.
+    1. oracle or heuristic (customized get_nodes_to_break method) to select n_breakings (n_branching) candidates, say t in total
+    
+    2. add one-hot encodings in the form of 2-element-set to nodes, i.e. 
+    Y:= {[Y, 0, 0], [Y, 0, 0]} \in R^{2t * n_constraints * (d+2)}
+    X:= {[X, 1_v, 0], [X, 0, 1_v]} \in R^{2t * n_variables * (d+2)}
+    
+    3. r-gated constraint embeddings. The forward pass will take the original graph input, constraint_feature:=[r] \in R^{n_constraints * 1},
+    Y:= {[r * Y, 0, 0], [Y, 0, 0]} \in R^{2t * n_constraints * (d+2)}
+    The forward pass will take the original graph input, edge_index:=[constraint_indices, variable_indices] \in R^{2 * n_edges},
+    for each v in n_breaking, find the constraint_indices_connected_to_v, and 
+    get revised r' by setting r[constraint_indices_connected_to_v] = 0
+    Y:= {[r * Y, 0, 0], [r' * Y, 0, 0]} \in R^{2t * n_constraints * (d+2)}
+    
+    4. break symmetry. 
+    Y, X:= symmetry_breaking_model(Y, X, adj_t) 
+
+    5. Y go into set transformer and let constraint nodes talk to each other
+    Y:= InducedSetAttentionBlock(Y) \in R^{2t * n_constraints * (d+2)} where n_constraints get mixed information from each other
+
+    6. X and Y get updated through message passing, i.e. let constraint nodes talk to variable nodes
+    Y or X:= BipartiteGraphConvolution(X, edge_index, Y) \in R^{2t * n_constraints or n_variables * (d+2)} for a few rounds
+    
+    7. X get grouped across breakings for future ranking task, i.e.
+    for each variable node v, get X_v \in R^{2t * (d+2)}, 
+    potentially followed by some reduction to aggregare across views t, across sets 2, across embedding dimension (d+2),
+    end up with X \in R^{n_variables * final_embedding_dimension} (You shouldn't do anything for ranking, I will handle it myself in the future)
+    
+    """
+
+    def __init__(
+        self,
+        *,
+        n_breakings: int,
+        breaking_selector_model,
+        symmetry_breaking_model,
+        num_heads: int = 0,
+        isab_num_inds: int = 0,
+        mp_layers: int = 1,
+        edge_nfeats: int = 1
+    ):
+        super().__init__()
+
+        # select and break
+        self.n_breakings = n_breakings
+        self.breaking_selector_model = breaking_selector_model
+        if self.breaking_selector_model is not None:
+            for param in self.breaking_selector_model.parameters():
+                param.requires_grad = False
+            self.breaking_selector_model.eval()
+        self.symmetry_breaking_model = symmetry_breaking_model
+        self.node_emb_dim = self.symmetry_breaking_model.out_dim
+        self.edge_nfeats = edge_nfeats
+        self.num_heads = num_heads
+        # self.ln = torch.nn.LayerNorm(self.node_emb_dim)
+
+        # set transformer: constraint talks to constraint
+        if num_heads > 0:
+            if self.node_emb_dim % num_heads != 0:
+                raise ValueError(
+                    f"symmetry_breaking_model.out_dim ({self.node_emb_dim}) "
+                    f"must be divisible by num_heads ({num_heads})."
+                )
+            num_inds = isab_num_inds
+            if num_inds <= 0:
+                raise ValueError("isab_num_inds must be >= 1 when attention is enabled.")
+            self.constraint_set_block = InducedSetAttentionBlock(
+                dim_in=self.node_emb_dim,
+                dim_out=self.node_emb_dim,
+                num_heads=num_heads,
+                num_inds=num_inds,
+                ln=True,
+            )
+        else:
+            self.constraint_set_block = None
+
+        # GNN: constraint talks to variable
+        self.mp_layers = mp_layers
+        if self.mp_layers > 0:
+            self.constraint_variable_gnn = StackedBipartiteGNN(
+                hidden_channels=self.node_emb_dim,
+                edge_nfeats=self.edge_nfeats,
+                n_layers=self.mp_layers,
+            )
+        else:
+            self.constraint_variable_gnn = None
+        
+        self.constraint_pma = PoolingMultiheadAttention(dim=self.node_emb_dim, num_heads=1, num_seeds=1, ln=True)
+        self.variable_pma = PoolingMultiheadAttention(dim=self.node_emb_dim, num_heads=1, num_seeds=1, ln=True)
+
+    def get_nodes_to_break(
+        self,
+        constraint_features,
+        variable_features,
+        edge_indices,
+        edge_features
+    ):
+        """Select variable nodes to break using an external selector model."""
+        k = self.n_breakings
+        with torch.no_grad():
+            scores = self.breaking_selector_model(
+                constraint_features, edge_indices, edge_features, variable_features
+            )
+        return torch.topk(scores, k=k).indices
+    
+    def revise_r(
+            r, edge_indices, branching_variable_indices):
+        """
+        r: base r (n_constraints, 1)
+        edge_indices: (2, E)
+        branching_variable_indices: (t,)
+
+        Returns:
+        r_after_branching: (t, n_constraints, 1)
+            where r_after_branching[k] is r updated with branching_variable_indices[k] fixed to 1
+        """
+        constraint_indices, variable_indices = edge_indices
+        n_constraints = r.size(0)
+        device = r.device
+        dtype= r.dtype
+
+        t = branching_variable_indices.size(0)
+        r_after_branching = r.unsqueeze(0).repeat(t, 1, 1) # (t, n_constraints, 1)
+
+        # (t, E) mask indicating the branching variables
+        mask = (variable_indices.unsqueeze(0) == branching_variable_indices.unsqueeze(1)).to(dtype)
+        # Scatter the mask
+        row_idx = constraint_indices.unsqueeze(0).expand_as(mask)
+        connected = torch.zeros((t, n_constraints), dtype=dtype, device=device)
+        connected.scatter_add_(1, row_idx, mask)
+        r_after_branching[connected > 0] = 0.0
+        return r_after_branching
+
+    def forward(
+        self,
+        Y,
+        X,
+        constraint_features, # [r] \in R^{n_constraints * 1}
+        edge_indices,
+        edge_features,
+        variable_features, # [c, is_fixed_to_1, is_fixed_to_0, is_not_fixed]
+    ):
+        device = Y.device
+        dtype = Y.dtype
+        n_constraints = Y.size(0)
+        n_variables = X.size(0)
+
+        # select nodes to break
+        break_node_indices = self.get_nodes_to_break(
+            constraint_features=constraint_features,
+            variable_features=variable_features,
+            edge_indices=edge_indices,
+            edge_features=edge_features,
+        ) # (t,)
+        # add one-hot encodings to X
+        one_hot_breakings = F.one_hot(break_node_indices, n_variables).unsqueeze(-1) # (t, n_variables, 1)
+        all_zeros = torch.zeros((one_hot_breakings.size(0), n_variables, 1), device=device, dtype=dtype)
+        one_hot_breakings_a = torch.cat([one_hot_breakings, all_zeros], dim=-1) # (t, n_variables, 2)
+        one_hot_breakings_b = torch.cat([all_zeros, one_hot_breakings], dim=-1) # (t, n_variables, 2)
+        X_a = torch.cat(
+                (
+                    X.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
+                    one_hot_breakings_a,
+                ),
+                dim=-1) # (t, n_variables, d+2)
+        X_b = torch.cat(
+                (
+                    X.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
+                    one_hot_breakings_b,
+                ),
+                dim=-1) # (t, n_variables, d+2)
+        # add r-gating to Y
+        r = constraint_features
+        r_after_branching = self.revise_r(r=r, 
+                                          edge_indices=edge_indices, 
+                                          branching_variable_indices=break_node_indices) # (t, n_constraints, 1)
+        Y_a = torch.cat(
+                (
+                    r * Y.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
+                    torch.zeros((one_hot_breakings.size(0), n_constraints, 2), device=device, dtype=dtype)
+                ), 
+                dim=-1) # (t, n_constraints, d+2)
+        Y_b = torch.cat(
+                (
+                    r_after_branching * Y.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
+                    torch.zeros((one_hot_breakings.size(0), n_constraints, 2), device=device, dtype=dtype)
+                ), 
+                dim=-1) # (t, n_constraints, d+2)
+        # break symmetry
+        holo_repr_Y_a, holo_repr_X_a = self.symmetry_breaking_model(Y_a, edge_indices, edge_features, X_a)
+        holo_repr_Y_b, holo_repr_X_b = self.symmetry_breaking_model(Y_b, edge_indices, edge_features, X_b)
+        # holo_repr: (t, n, d+2)
+        # set transformer: constraint talks to constraint
+        if self.constraint_set_block is not None:
+            holo_repr_Y_a = self.constraint_set_block(holo_repr_Y_a)
+            holo_repr_Y_b = self.constraint_set_block(holo_repr_Y_b) # (t, n_constraints, d+2)
+        
+        # Question: apply pooling over Y and use mixed Y to update X_a and X_b? 
+        holo_repr_Y = self.constraint_pma(
+                        torch.stack((holo_repr_Y_a, holo_repr_Y_b), 
+                                    dim=2).reshape(-1, 2, holo_repr_Y_a.size(-1))).reshape(
+                                        one_hot_breakings.size(0), n_constraints, -1
+                                    )
+        # holo_repr_Y: (t, n_constraints, d+2)
+
+        # gnn: constraint talks to variable
+        if self.constraint_variable_gnn is not None:
+            _, holo_repr_X_a = self.constraint_variable_gnn(holo_repr_Y, edge_indices, edge_features, holo_repr_X_a)
+            _, holo_repr_X_b = self.constraint_variable_gnn(holo_repr_Y, edge_indices, edge_features, holo_repr_X_b)
+        holo_repr_X = self.variable_pma(
+                        torch.stack((holo_repr_X_a, holo_repr_X_b), 
+                                    dim=2).reshape(-1, 2, holo_repr_X_a.size(-1))).reshape(
+                                        one_hot_breakings.size(0), n_variables, -1
+                                    )
+        # holo_repr_X: (t, n_variables, d+2)
+        return holo_repr_Y, holo_repr_X
+
