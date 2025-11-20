@@ -9,3 +9,4 @@ holognn/
 milp-evolve-multi_class_learning/
 logs/
 joboutputs/
+*.pth
