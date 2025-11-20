@@ -288,7 +288,6 @@ class SetCoverHolo(torch.nn.Module):
 
     def __init__(
         self,
-        *,
         n_breakings: int,
         breaking_selector_model,
         symmetry_breaking_model,
@@ -389,6 +388,46 @@ class SetCoverHolo(torch.nn.Module):
         r_after_branching[connected > 0] = 0.0
         return r_after_branching
 
+    def format_for_stacked_bipartite(self, Y, X, edge_indices, edge_features):
+        """
+        (t, n, d) nodes -> (t * n, d) nodes
+        (n_constraints, n_variables) edges -> (t * n_constraints, t * n_variables) edges
+        """
+        num_views, n_constraints, _ = Y.shape
+        _, n_variables, _ = X.shape
+
+        formatted_Y = Y.reshape(num_views * n_constraints, -1)
+        formatted_X = X.reshape(num_views * n_variables, -1)
+
+        constraint_offsets = torch.arange(num_views, device=Y.device).unsqueeze(1) * n_constraints
+        variable_offsets = torch.arange(num_views, device=Y.device).unsqueeze(1) * n_variables
+        constraint_edges = edge_indices[0].unsqueeze(0) + constraint_offsets
+        variable_edges = edge_indices[1].unsqueeze(0) + variable_offsets
+        formatted_edge_indices = torch.stack(
+            (constraint_edges.reshape(-1), variable_edges.reshape(-1)), dim=0
+        )
+
+        formatted_edge_features = (
+                edge_features.unsqueeze(0)
+                .repeat(num_views, 1, 1)
+                .reshape(num_views * edge_features.size(0), -1)
+            )
+        shape_info = {"num_views": num_views, "n_constraints": n_constraints, "n_variables": n_variables}
+
+        return formatted_Y, formatted_X, formatted_edge_indices, formatted_edge_features, shape_info
+
+    def format_from_stacked_bipartite(self, Y, X, shape_info):
+        """
+        (t * n, d) nodes -> (t, n, d) nodes
+        edges are not changing over time so no need to format them back
+        """
+        num_views = shape_info["num_views"]
+        n_constraints = shape_info["n_constraints"]
+        n_variables = shape_info["n_variables"]
+        Y = Y.reshape(num_views, n_constraints, -1)
+        X = X.reshape(num_views, n_variables, -1)
+        return Y, X
+
     def forward(
         self,
         Y,
@@ -436,7 +475,7 @@ class SetCoverHolo(torch.nn.Module):
                 (
                     r * Y.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
                     torch.zeros((one_hot_breakings.size(0), n_constraints, 2), device=device, dtype=dtype)
-                ), 
+                ),
                 dim=-1) # (t, n_constraints, d+2)
         Y_b = torch.cat(
                 (
@@ -445,8 +484,23 @@ class SetCoverHolo(torch.nn.Module):
                 ), 
                 dim=-1) # (t, n_constraints, d+2)
         # break symmetry
-        holo_repr_Y_a, holo_repr_X_a = self.symmetry_breaking_model(Y_a, edge_indices, edge_features, X_a)
-        holo_repr_Y_b, holo_repr_X_b = self.symmetry_breaking_model(Y_b, edge_indices, edge_features, X_b)
+        formatted_Y_a, formatted_X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+            self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
+        holo_repr_Y_a, holo_repr_X_a = self.symmetry_breaking_model(
+            formatted_Y_a, formatted_edge_indices, formatted_edge_features, formatted_X_a
+        )
+        holo_repr_Y_a, holo_repr_X_a = self.format_from_stacked_bipartite(
+            holo_repr_Y_a, holo_repr_X_a, shape_info
+        )
+
+        formatted_Y_b, formatted_X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+            self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
+        holo_repr_Y_b, holo_repr_X_b = self.symmetry_breaking_model(
+            formatted_Y_b, formatted_edge_indices, formatted_edge_features, formatted_X_b
+        )
+        holo_repr_Y_b, holo_repr_X_b = self.format_from_stacked_bipartite(
+            holo_repr_Y_b, holo_repr_X_b, shape_info
+        )
         # holo_repr: (t, n, d+2)
         # set transformer: constraint talks to constraint
         if self.constraint_set_block is not None:
@@ -463,8 +517,19 @@ class SetCoverHolo(torch.nn.Module):
 
         # gnn: constraint talks to variable
         if self.constraint_variable_gnn is not None:
-            _, holo_repr_X_a = self.constraint_variable_gnn(holo_repr_Y, edge_indices, edge_features, holo_repr_X_a)
-            _, holo_repr_X_b = self.constraint_variable_gnn(holo_repr_Y, edge_indices, edge_features, holo_repr_X_b)
+            formatted_Y, formatted_X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(holo_repr_Y, holo_repr_X_a, edge_indices, edge_features)
+            holo_repr_Y_a_updated, holo_repr_X_a = self.constraint_variable_gnn(
+                formatted_Y, formatted_edge_indices, formatted_edge_features, formatted_X_a
+            )
+            _, holo_repr_X_a = self.format_from_stacked_bipartite(holo_repr_Y_a_updated, holo_repr_X_a, shape_info)
+
+            formatted_Y, formatted_X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(holo_repr_Y, holo_repr_X_b, edge_indices, edge_features)
+            holo_repr_Y_b_updated, holo_repr_X_b = self.constraint_variable_gnn(
+                formatted_Y, formatted_edge_indices, formatted_edge_features, formatted_X_b
+            )
+            _, holo_repr_X_b = self.format_from_stacked_bipartite(holo_repr_Y_b_updated, holo_repr_X_b, shape_info)
         holo_repr_X = self.variable_pma(
                         torch.stack((holo_repr_X_a, holo_repr_X_b), 
                                     dim=2).reshape(-1, 2, holo_repr_X_a.size(-1))).reshape(
