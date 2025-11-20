@@ -11,13 +11,7 @@ import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 
-from models import (
-    GNNPolicy,
-    Holo,
-    PowerMethod,
-    ProductTupleEncoder,
-    SymmetryBreakingGNN,
-)
+from disjunctive_dual.models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
@@ -249,36 +243,73 @@ def get_optimizer(args, model):
 def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     emb_size = args.hidden_channels
     n_layers = args.num_layers
-    r = args.r
-    num_heads = getattr(args, "num_heads", 0)
-    isab_num_inds = getattr(args, "isab_num_inds", None)
-    if args.r == 1:
-         output_size = 1
-    else:
-        raise NotImplementedError("Only r=1 is supported for now.")
+    num_heads = args.num_heads
+    isab_num_inds = args.isab_num_inds
+    output_size = 1
+
+    def _load_state_dict(model, path: Union[str, Path]):
+        state = torch.load(path, map_location=args.device)
+        state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
+        model.load_state_dict(state_dict)
+        return model
 
     if args.model == "raw":
-        tuple_encoder = ProductTupleEncoder(emb_size)
+        model = GNNPolicy(
+            emb_size,
+            cons_nfeats,
+            edge_nfeats,
+            var_nfeats,
+            output_size,
+            n_layers,
+            holo=None,
+        )
     elif args.model == "holo":
-        if args.symmetry_breaking_model == "power_method":
-            symmetry_breaking_model = PowerMethod(args.power, emb_size + 1)
-        elif args.symmetry_breaking_model == "gnn":
-            symmetry_breaking_model = SymmetryBreakingGNN(emb_size + 1, emb_size + 1)
-        else:
-            raise ValueError(
-                f"Unkown symmetry breaking model {args.symmetry_breaking_model}"
-            )
-        tuple_encoder = Holo(
+        selector_layers = n_layers
+        selector_path = getattr(args, "breaking_selector_model_path", None)
+        if not selector_path:
+            raise ValueError("`breaking_selector_model_path` must be provided when using the holo model.")
+        selector_path = Path(selector_path)
+        if not selector_path.exists():
+            raise FileNotFoundError(f"breaking selector checkpoint not found: {selector_path}")
+
+        breaking_selector_model = GNNPolicy(emb_size, 
+                                            cons_nfeats, 
+                                            edge_nfeats, 
+                                            var_nfeats,
+                                            output_size,
+                                            selector_layers,
+                                            holo=None)
+        breaking_selector_model = _load_state_dict(breaking_selector_model, selector_path)
+        breaking_selector_model = breaking_selector_model.to(args.device)
+        breaking_selector_model.eval()
+        for param in breaking_selector_model.parameters():
+            param.requires_grad_(False)
+
+        sym_break_layers = getattr(args, "sym_break_layers", 2)
+        symmetry_breaking_model = StackedBipartiteGNN(
+            hidden_channels=emb_size + 2,
+            edge_nfeats=edge_nfeats,
+            n_layers=sym_break_layers,
+        )
+
+        holo = SetCoverHolo(
             n_breakings=args.n_breakings,
+            breaking_selector_model=breaking_selector_model,
             symmetry_breaking_model=symmetry_breaking_model,
             num_heads=num_heads,
             isab_num_inds=isab_num_inds,
+            mp_layers=getattr(args, "mp_layers", 2),
+            edge_nfeats=edge_nfeats,
         )
+        model = GNNPolicy(emb_size, 
+                          cons_nfeats, 
+                          edge_nfeats, 
+                          var_nfeats,
+                          output_size,
+                          n_layers,
+                          holo=holo)
     else:
-        raise NotImplementedError()
-
-    model = GNNPolicy(emb_size, cons_nfeats, edge_nfeats, var_nfeats, output_size,
-                      n_layers, tuple_encoder, r=r)
+        raise NotImplementedError(f"Unknown model type '{args.model}'.")
 
     return model.to(args.device)
 

@@ -40,6 +40,16 @@ class MultiheadAttentionBlock(nn.Module):
         return O
 
 
+class SetAttentionBlock(nn.Module):
+    """Set Transformer SAB block implemented with torch MultiheadAttention."""
+    def __init__(self, dim_in, dim_out, num_heads, ln=False):
+        super().__init__()
+        self.mab = MultiheadAttentionBlock(dim_in, dim_in, dim_out, num_heads, ln=ln)
+
+    def forward(self, X):
+        return self.mab(X, X)
+
+
 class InducedSetAttentionBlock(nn.Module):
     """Set Transformer ISAB block implemented with torch MultiheadAttention."""
 
@@ -230,7 +240,7 @@ class GNNPolicy(nn.Module):
 
         # FINAL MLP
         self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(self.holo.emb_size, emb_size),
+            torch.nn.Linear(self.holo.emb_size if self.holo is not None else emb_size, emb_size),
             torch.nn.ReLU(),
             torch.nn.Linear(emb_size, output_size, bias=False),
         )
@@ -247,7 +257,8 @@ class GNNPolicy(nn.Module):
         Y, X = self.data_encoder(Y, edge_indices, edge_features, X)
         
         # 3. break symmetry
-        Y, X = self.holo(Y, X, constraint_features, edge_indices, edge_features, variable_features)
+        if self.holo is not None:
+            Y, X = self.holo(Y, X, constraint_features, edge_indices, edge_features, variable_features)
 
         # 4. transform variable features to strong branching decision
         output = self.output_module(X).squeeze(-1)
@@ -342,7 +353,7 @@ class SetCoverHolo(torch.nn.Module):
         else:
             self.constraint_variable_gnn = None
         
-        self.constraint_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
+        self.constraint_sab = SetAttentionBlock(dim_in=self.emb_size, dim_out=self.emb_size, num_heads=1, ln=True)
         self.variable_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
 
     def get_nodes_to_break(
@@ -503,28 +514,29 @@ class SetCoverHolo(torch.nn.Module):
             Y_a = self.constraint_set_block(Y_a)
             Y_b = self.constraint_set_block(Y_b) # (t, n_constraints, d+2)
         
-        # Question: apply pooling over Y and use mixed Y to update X_a and X_b? 
-        Y = self.constraint_pma(
+        # set transformer: constraint's 2 problems talk to each other
+        Y = self.constraint_sab(
                         torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1))).reshape(
-                                        one_hot_breakings.size(0), n_constraints, -1
+                                        one_hot_breakings.size(0), n_constraints, 2, -1
                                     )
+        Y_a, Y_b = Y[:,:,0], Y[:,:,1]
         # (t, n_constraints, d+2)
 
         # gnn: constraint talks to variable
         if self.constraint_variable_gnn is not None:
-            Y, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
-                self.format_for_stacked_bipartite(Y, X_a, edge_indices, edge_features)
+            Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
             Y_a, X_a = self.constraint_variable_gnn(
-                Y, formatted_edge_indices, formatted_edge_features, X_a
+                Y_a, formatted_edge_indices, formatted_edge_features, X_a
             )
-            _, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
+            Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
 
-            Y, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
-                self.format_for_stacked_bipartite(Y, X_b, edge_indices, edge_features)
+            Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
             Y_b, X_b = self.constraint_variable_gnn(
-                Y, formatted_edge_indices, formatted_edge_features, X_b
+                Y_b, formatted_edge_indices, formatted_edge_features, X_b
             )
-            _, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
+            Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
         X = self.variable_pma(
                         torch.stack((X_a, X_b), dim=2).reshape(-1, 2, X_a.size(-1))).reshape(
                                         one_hot_breakings.size(0), n_variables, -1
