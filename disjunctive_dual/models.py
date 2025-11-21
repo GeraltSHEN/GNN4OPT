@@ -246,7 +246,12 @@ class GNNPolicy(nn.Module):
         )
 
     def forward(
-        self, constraint_features, edge_indices, edge_features, variable_features
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        candidates=None,
     ):
         # 1. raw features to embeddings in common dimension
         Y = self.cons_embedding(constraint_features)
@@ -258,7 +263,15 @@ class GNNPolicy(nn.Module):
         
         # 3. break symmetry
         if self.holo is not None:
-            Y, X = self.holo(Y, X, constraint_features, edge_indices, edge_features, variable_features)
+            Y, X = self.holo(
+                Y,
+                X,
+                constraint_features,
+                edge_indices,
+                edge_features,
+                variable_features,
+                candidates=candidates,
+            )
 
         # 4. transform variable features to strong branching decision
         output = self.output_module(X).squeeze(-1)
@@ -284,17 +297,17 @@ class SetCoverHolo(torch.nn.Module):
     4. break symmetry. 
     Y, X:= symmetry_breaking_model(Y, X, adj_t) 
 
-    5. Y go into set transformer and let constraint nodes talk to each other
-    Y:= InducedSetAttentionBlock(Y) \in R^{2t * n_constraints * (d+2)} where n_constraints get mixed information from each other
-
+    5. Y go into set transformer and let constraint nodes talk to each other, problem channels also talk to each other
+    Y:= setTransformer(Y) \in R^{2t * n_constraints * (d+2)} where n_constraints get mixed information from each other, sub-problems get mixed information from each other
+    
     6. X and Y get updated through message passing, i.e. let constraint nodes talk to variable nodes
     Y or X:= BipartiteGraphConvolution(X, edge_index, Y) \in R^{2t * n_constraints or n_variables * (d+2)} for a few rounds
+    X:= setTransformer(X) \in R^{t * n_variables * (d+2)} let sub-problems get mixed information by learned pooling
     
     7. X get grouped across breakings for future ranking task, i.e.
     for each variable node v, get X_v \in R^{2t * (d+2)}, 
     potentially followed by some reduction to aggregare across views t, across sets 2, across embedding dimension (d+2),
     end up with X \in R^{n_variables * final_embedding_dimension} (You shouldn't do anything for ranking, I will handle it myself in the future)
-    
     """
 
     def __init__(
@@ -361,7 +374,8 @@ class SetCoverHolo(torch.nn.Module):
         constraint_features,
         variable_features,
         edge_indices,
-        edge_features
+        edge_features,
+        candidates=None,
     ):
         """Select variable nodes to break using an external selector model."""
         k = self.n_breakings
@@ -369,7 +383,11 @@ class SetCoverHolo(torch.nn.Module):
             scores = self.breaking_selector_model(
                 constraint_features, edge_indices, edge_features, variable_features
             )
-        return torch.topk(scores, k=k).indices
+        if candidates is not None:
+            candidate_scores = scores[candidates]
+            return candidates[torch.topk(candidate_scores, k=k).indices]
+        else:
+            return torch.topk(scores, k=k).indices
     
     def revise_r(
             self, r, edge_indices, branching_variable_indices):
@@ -447,6 +465,7 @@ class SetCoverHolo(torch.nn.Module):
         edge_indices,
         edge_features,
         variable_features, # [c, is_fixed_to_1, is_fixed_to_0, is_not_fixed]
+        candidates=None,
     ):
         device = Y.device
         dtype = Y.dtype
@@ -459,6 +478,7 @@ class SetCoverHolo(torch.nn.Module):
             variable_features=variable_features,
             edge_indices=edge_indices,
             edge_features=edge_features,
+            candidates=candidates,
         ) # (t,)
         # add one-hot encodings to X
         one_hot_breakings = F.one_hot(break_node_indices, n_variables).unsqueeze(-1) # (t, n_variables, 1)
