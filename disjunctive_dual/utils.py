@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 
-from disjunctive_dual.models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
+from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
