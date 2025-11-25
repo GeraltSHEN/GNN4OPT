@@ -45,6 +45,8 @@ def evaluate(policy, data_loader, device, stats_filename):
                 batch.edge_attr,
                 batch.variable_features,
                 candidates=batch.candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
             )
             # Index the results by the candidates, and split and pad them
             logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)

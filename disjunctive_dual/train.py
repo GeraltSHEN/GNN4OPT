@@ -135,6 +135,8 @@ def train(
                 batch.edge_attr,
                 batch.variable_features,
                 candidates=batch.candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
             )
 
             if score_th < float("inf"):
@@ -229,6 +231,8 @@ def evaluate(policy, data_loader, device, writer, num_gradient_steps):
                 batch.edge_attr,
                 batch.variable_features,
                 candidates=batch.candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
             )
             # Index the results by the candidates, and split and pad them
             logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
