@@ -21,6 +21,8 @@ from utils import (
     load_checkpoint,
     print_dash_str
 )
+# TODO: try different ltr losses?
+from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2
 
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
@@ -155,6 +157,9 @@ def train(
                 loss = F.cross_entropy(logits, batch.candidate_choices)
             elif loss_option == "regression":
                 loss = F.mse_loss(logits, batch.candidate_scores)
+            # TODO
+            elif loss_option == "ranking":
+                loss = LambdaNDCGLoss1(logits, batch.candidate_scores, batch.nb_candidates)
             else:
                 raise ValueError(f"Unsupported loss option: {loss_option}")
 
