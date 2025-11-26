@@ -1,13 +1,47 @@
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Optional
+import time
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
 from torch_geometric.nn import MessagePassing
-from torch_geometric.nn.conv.gcn_conv import gcn_norm
-from torch_sparse import SparseTensor
+
+PERFORMANCE_DEBUG = True  # Toggle to print timing and memory information
+
+
+@contextmanager
+def _perf_timer(label: str):
+    if not PERFORMANCE_DEBUG:
+        yield
+        return
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start)
+        print(f"[Perf] {label}: {elapsed_ms:.3f} s")
+
+
+def _reset_peak_memory(device: torch.device):
+    if not PERFORMANCE_DEBUG:
+        return None
+    if torch.cuda.is_available() and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+        return device
+    if PERFORMANCE_DEBUG:
+        print("[Perf] SetCoverHolo peak memory: skipped (CUDA not available or tensor on CPU).")
+    return None
+
+
+def _log_peak_memory(device: Optional[torch.device]):
+    if device is None or not PERFORMANCE_DEBUG:
+        return
+    peak_bytes = torch.cuda.max_memory_allocated(device)
+    print(
+        f"[Perf] SetCoverHolo peak CUDA memory on {device}: {peak_bytes / (1024 ** 2):.2f} MB"
+    )
 
 
 class MultiheadAttentionBlock(nn.Module):
@@ -46,7 +80,7 @@ class SetAttentionBlock(nn.Module):
         super().__init__()
         self.mab = MultiheadAttentionBlock(dim_in, dim_in, dim_out, num_heads, ln=ln)
 
-    def forward(self, X, key_padding_mask):
+    def forward(self, X, key_padding_mask=None):
         return self.mab(X, X, key_padding_mask)
 
 
@@ -67,7 +101,7 @@ class InducedSetAttentionBlock(nn.Module):
         batch_size = X.size(0)
         inducing = self.inducing_points.repeat(batch_size, 1, 1)
         H = self.mab0(inducing, X, key_padding_mask)
-        return self.mab1(X, H)
+        return self.mab1(X, H, key_padding_mask=None)
 
 
 class PoolingMultiheadAttention(nn.Module):
@@ -256,29 +290,33 @@ class GNNPolicy(nn.Module):
         n_variables_per_graph=None,
     ):
         # 1. raw features to embeddings in common dimension
-        Y = self.cons_embedding(constraint_features)
-        edge_features = self.edge_embedding(edge_features)
-        X = self.var_embedding(variable_features)
+        with _perf_timer("GNNPolicy step 1: embed raw features"):
+            Y = self.cons_embedding(constraint_features)
+            edge_features = self.edge_embedding(edge_features)
+            X = self.var_embedding(variable_features)
 
         # 2. constraint-variable message passing
-        Y, X = self.data_encoder(Y, edge_indices, edge_features, X)
+        with _perf_timer("GNNPolicy step 2: constraint-variable message passing"):
+            Y, X = self.data_encoder(Y, edge_indices, edge_features, X)
         
         # 3. break symmetry
         if self.holo is not None:
-            Y, X = self.holo(
-                Y,
-                X,
-                constraint_features,
-                edge_indices,
-                edge_features,
-                variable_features,
-                candidates=candidates,
-                n_constraints_per_graph=n_constraints_per_graph,
-                n_variables_per_graph=n_variables_per_graph,
-            )
+            with _perf_timer("GNNPolicy step 3: symmetry breaking / SetCoverHolo"):
+                Y, X = self.holo(
+                    Y,
+                    X,
+                    constraint_features,
+                    edge_indices,
+                    edge_features,
+                    variable_features,
+                    candidates=candidates,
+                    n_constraints_per_graph=n_constraints_per_graph,
+                    n_variables_per_graph=n_variables_per_graph,
+                )
 
         # 4. transform variable features to strong branching decision
-        output = self.output_module(X).squeeze(-1)
+        with _perf_timer("GNNPolicy step 4: output head"):
+            output = self.output_module(X).squeeze(-1)
         return output
 
 
@@ -622,6 +660,8 @@ class SetCoverHolo(torch.nn.Module):
         n_constraints_total = n_constraints_per_graph.sum().int()
         n_variables_every = n_variables_per_graph.sum().int() // num_graphs
 
+        peak_mem_device = _reset_peak_memory(Y.device)
+
         break_node_indices_local, break_node_indices_global = self.get_nodes_to_break(
             constraint_features=constraint_features,
             variable_features=variable_features,
@@ -632,86 +672,93 @@ class SetCoverHolo(torch.nn.Module):
         )  # (bsz, t)
         bsz, t = break_node_indices_local.shape
         # add one-hot encodings to X
-        one_hot_breakings = F.one_hot(break_node_indices_local.T, 
-                                      n_variables_every).reshape(t, -1).unsqueeze(-1)
-        # (t, bsz * n_variables_every, 1)
-        all_zeros = torch.zeros_like(one_hot_breakings)
-        one_hot_breakings_a = torch.cat([one_hot_breakings, all_zeros], dim=-1)
-        one_hot_breakings_b = torch.cat([all_zeros, one_hot_breakings], dim=-1) # (t, bsz * n_variables_every, 2)
-        X_a = torch.cat([X.unsqueeze(0).expand(t, X.size(0), X.size(1)), 
-                         one_hot_breakings_a], dim=-1)  # (t, bsz * n_variables_every, d+2)
-        X_b = torch.cat([X.unsqueeze(0).expand(t, X.size(0), X.size(1)), 
-                         one_hot_breakings_b], dim=-1) # (t, bsz * n_variables_every, d+2)
+        with _perf_timer("SetCoverHolo step 1: add one-hot encodings to X"):
+            one_hot_breakings = F.one_hot(break_node_indices_local.T, 
+                                          n_variables_every).reshape(t, -1).unsqueeze(-1)
+            # (t, bsz * n_variables_every, 1)
+            all_zeros = torch.zeros_like(one_hot_breakings)
+            one_hot_breakings_a = torch.cat([one_hot_breakings, all_zeros], dim=-1)
+            one_hot_breakings_b = torch.cat([all_zeros, one_hot_breakings], dim=-1) # (t, bsz * n_variables_every, 2)
+            X_a = torch.cat([X.unsqueeze(0).expand(t, X.size(0), X.size(1)), 
+                             one_hot_breakings_a], dim=-1)  # (t, bsz * n_variables_every, d+2)
+            X_b = torch.cat([X.unsqueeze(0).expand(t, X.size(0), X.size(1)), 
+                             one_hot_breakings_b], dim=-1) # (t, bsz * n_variables_every, d+2)
         # add r-gating to Y
-        r = constraint_features
-        r_after_branching = self.revise_r(r=r, 
-                                          edge_indices=edge_indices, 
-                                          branching_variable_indices=break_node_indices_global.T)
-        # (t, n_constraints_total, 1)
-        Y_a = torch.cat([r * Y.unsqueeze(0).expand(t, n_constraints_total, Y.size(1)),
-                         torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
-                         dim=-1) # (t, n_constraints_total, d+2)
-        Y_b = torch.cat([r_after_branching * Y.unsqueeze(0).expand(t, n_constraints_total, Y.size(1)),
-                         torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
-                         dim=-1) # (t, n_constraints_total, d+2)
+        with _perf_timer("SetCoverHolo step 2: apply r-gating to Y"):
+            r = constraint_features
+            r_after_branching = self.revise_r(r=r, 
+                                              edge_indices=edge_indices, 
+                                              branching_variable_indices=break_node_indices_global.T)
+            # (t, n_constraints_total, 1)
+            Y_a = torch.cat([r * Y.unsqueeze(0).expand(t, n_constraints_total, Y.size(1)),
+                             torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
+                             dim=-1) # (t, n_constraints_total, d+2)
+            Y_b = torch.cat([r_after_branching * Y.unsqueeze(0).expand(t, n_constraints_total, Y.size(1)),
+                             torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
+                             dim=-1) # (t, n_constraints_total, d+2)
         # break symmetry
-        Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
-            self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
-        Y_a, X_a = self.symmetry_breaking_model(
-            Y_a, formatted_edge_indices, formatted_edge_features, X_a
-        )
-        Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
-
-        Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
-            self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
-        Y_b, X_b = self.symmetry_breaking_model(
-            Y_b, formatted_edge_indices, formatted_edge_features, X_b
-        )
-        Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
-        # holo_repr: (t, n, d+2)
-
-        # set transformer: constraint talks to constraint
-        Y_a, key_padding_mask_a = \
-            self.format_for_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
-        Y_b, key_padding_mask_b = \
-            self.format_for_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
-        # (bsz*t, n_constraints_max, d+2)
-        if self.constraint_set_block is not None:
-            Y_a = self.constraint_set_block(Y_a, key_padding_mask_a)
-            Y_b = self.constraint_set_block(Y_b, key_padding_mask_b) 
-        # (bsz*t, n_constraints_max, d+2)
-        Y_a = self.format_from_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
-        Y_b = self.format_from_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
-        # (t, n_constraints_total, d+2)
-        
-        # set transformer: constraint's 2 problems talk to each other
-        Y = self.constraint_sab(
-                        torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1)),
-                        key_padding_mask=None).reshape(
-                                        one_hot_breakings.size(0), n_constraints_total, 2, -1
-                                    )
-        Y_a, Y_b = Y[:,:,0], Y[:,:,1]
-        # (t, n_constraints, d+2)
-
-        # gnn: constraint talks to variable
-        if self.constraint_variable_gnn is not None:
+        with _perf_timer("SetCoverHolo step 3: break symmetry"):
             Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
                 self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
-            Y_a, X_a = self.constraint_variable_gnn(
+            Y_a, X_a = self.symmetry_breaking_model(
                 Y_a, formatted_edge_indices, formatted_edge_features, X_a
             )
             Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
 
             Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
                 self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
-            Y_b, X_b = self.constraint_variable_gnn(
+            Y_b, X_b = self.symmetry_breaking_model(
                 Y_b, formatted_edge_indices, formatted_edge_features, X_b
             )
             Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
+        # holo_repr: (t, n, d+2)
+
+        # set transformer: constraint talks to constraint
+        with _perf_timer("SetCoverHolo step 4: constraint set transformer"):
+            Y_a, key_padding_mask_a = \
+                self.format_for_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
+            Y_b, key_padding_mask_b = \
+                self.format_for_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
+            # (bsz*t, n_constraints_max, d+2)
+            if self.constraint_set_block is not None:
+                Y_a = self.constraint_set_block(Y_a, key_padding_mask_a)
+                Y_b = self.constraint_set_block(Y_b, key_padding_mask_b) 
+            # (bsz*t, n_constraints_max, d+2)
+            Y_a = self.format_from_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
+            Y_b = self.format_from_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
+        # (t, n_constraints_total, d+2)
+        
+        # set transformer: constraint's 2 problems talk to each other
+        with _perf_timer("SetCoverHolo step 5: cross-problem constraint attention"):
+            Y = self.constraint_sab(
+                            torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1)),
+                            key_padding_mask=None).reshape(
+                                            one_hot_breakings.size(0), n_constraints_total, 2, -1
+                                        )
+            Y_a, Y_b = Y[:,:,0], Y[:,:,1]
+        # (t, n_constraints, d+2)
+
+        # gnn: constraint talks to variable
+        with _perf_timer("SetCoverHolo step 6: constraint-variable message passing"):
+            if self.constraint_variable_gnn is not None:
+                Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+                    self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
+                Y_a, X_a = self.constraint_variable_gnn(
+                    Y_a, formatted_edge_indices, formatted_edge_features, X_a
+                )
+                Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
+
+                Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+                    self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
+                Y_b, X_b = self.constraint_variable_gnn(
+                    Y_b, formatted_edge_indices, formatted_edge_features, X_b
+                )
+                Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
         X = self.variable_pma(
                         torch.stack((X_a, X_b), dim=2).reshape(-1, 2, X_a.size(-1)),
                         key_padding_mask=None).reshape(
                                         one_hot_breakings.size(0), n_variables_every * num_graphs, -1
                                     )
         # (t, n_variables, d+2)
+        _log_peak_memory(peak_mem_device)
         return Y, X
