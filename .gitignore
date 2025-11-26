@@ -10,3 +10,5 @@ milp-evolve-multi_class_learning/
 logs/
 joboutputs/
 *.pth
+disjunctive_dual/speed_and_memory_test.py
+joboutput/
