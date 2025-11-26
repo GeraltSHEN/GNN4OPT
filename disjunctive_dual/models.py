@@ -302,7 +302,7 @@ class GNNPolicy(nn.Module):
         # 3. break symmetry
         if self.holo is not None:
             with _perf_timer("GNNPolicy step 3: symmetry breaking / SetCoverHolo"):
-                Y, X = self.holo(
+                X = self.holo(
                     Y,
                     X,
                     constraint_features,
@@ -346,10 +346,8 @@ class SetCoverHolo(torch.nn.Module):
     Y or X:= BipartiteGraphConvolution(X, edge_index, Y) \in R^{2t * n_constraints or n_variables * (d+2)} for a few rounds
     X:= setTransformer(X) \in R^{t * n_variables * (d+2)} let sub-problems get mixed information by learned pooling
     
-    7. X get grouped across breakings for future ranking task, i.e.
-    for each variable node v, get X_v \in R^{2t * (d+2)}, 
-    potentially followed by some reduction to aggregare across views t, across sets 2, across embedding dimension (d+2),
-    end up with X \in R^{n_variables * final_embedding_dimension} (You shouldn't do anything for ranking, I will handle it myself in the future)
+    7. X go into set transformer again, allowing breaking views to talk to each other, 
+    X:= setTransformer(X) \in R^{n_variables * (d+2)}
     """
 
     def __init__(
@@ -408,8 +406,12 @@ class SetCoverHolo(torch.nn.Module):
         else:
             self.constraint_variable_gnn = None
         
+        # set transformer: sub-problem talks to sub-problem (two dual LP)
         self.constraint_sab = SetAttentionBlock(dim_in=self.emb_size, dim_out=self.emb_size, num_heads=1, ln=True)
-        self.variable_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
+        # set transformer: sub-problems are mixed (primal aspect)
+        self.variable_problem_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
+        # set transformer: views are mixed (primal aspect)
+        self.variable_view_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
 
     def get_nodes_to_break(
         self,
@@ -733,7 +735,7 @@ class SetCoverHolo(torch.nn.Module):
             Y = self.constraint_sab(
                             torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1)),
                             key_padding_mask=None).reshape(
-                                            one_hot_breakings.size(0), n_constraints_total, 2, -1
+                                            t, n_constraints_total, 2, -1
                                         )
             Y_a, Y_b = Y[:,:,0], Y[:,:,1]
         # (t, n_constraints, d+2)
@@ -754,11 +756,13 @@ class SetCoverHolo(torch.nn.Module):
                     Y_b, formatted_edge_indices, formatted_edge_features, X_b
                 )
                 Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
-        X = self.variable_pma(
+        X = self.variable_problem_pma(
                         torch.stack((X_a, X_b), dim=2).reshape(-1, 2, X_a.size(-1)),
                         key_padding_mask=None).reshape(
-                                        one_hot_breakings.size(0), n_variables_every * num_graphs, -1
+                                        t, n_variables_every * num_graphs, -1
                                     )
         # (t, n_variables, d+2)
+        X = self.variable_view_pma(X.transpose(0, 1), key_padding_mask=None).squeeze(1)
+        # (n_variables, d+2)
         _log_peak_memory(peak_mem_device)
-        return Y, X
+        return X
