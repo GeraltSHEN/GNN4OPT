@@ -247,10 +247,27 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     isab_num_inds = args.isab_num_inds
     output_size = 1
 
-    def _load_state_dict(model, path: Union[str, Path]):
-        state = torch.load(path, map_location=args.device)
+    def _load_breaking_selector_model(model, selector_path: Union[str, Path]):
+        if not selector_path:
+            raise ValueError("`breaking_selector_model_path` must be provided when using the holo model.")
+        selector_path = Path(selector_path)
+        if not selector_path.exists():
+            raise FileNotFoundError(f"breaking selector checkpoint not found: {selector_path}")
+        checkpoints = [x for x in os.listdir(selector_path) 
+                       if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
+        if step == 'max':
+            step = 0
+            if checkpoints:
+                step, last_checkpoint = max([(int(x.split('.')[0]), x) for x in checkpoints])
+        else:
+            last_checkpoint = str(step) + '.pth'
+        if step:
+            selector_path = os.path.join(selector_path, last_checkpoint)
+
+        state = torch.load(selector_path, map_location=args.device)
         state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
         model.load_state_dict(state_dict)
+        print(f"load {selector_path} for breaking selector model.")
         return model
 
     if args.model == "raw":
@@ -266,12 +283,6 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     elif args.model == "holo":
         selector_layers = n_layers
         selector_path = getattr(args, "breaking_selector_model_path", None)
-        if not selector_path:
-            raise ValueError("`breaking_selector_model_path` must be provided when using the holo model.")
-        selector_path = Path(selector_path)
-        if not selector_path.exists():
-            raise FileNotFoundError(f"breaking selector checkpoint not found: {selector_path}")
-
         breaking_selector_model = GNNPolicy(emb_size, 
                                             cons_nfeats, 
                                             edge_nfeats, 
@@ -279,7 +290,8 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
                                             output_size,
                                             selector_layers,
                                             holo=None)
-        breaking_selector_model = _load_state_dict(breaking_selector_model, selector_path)
+        breaking_selector_model = _load_breaking_selector_model(breaking_selector_model, 
+                                                                selector_path)
         breaking_selector_model = breaking_selector_model.to(args.device)
         breaking_selector_model.eval()
         for param in breaking_selector_model.parameters():

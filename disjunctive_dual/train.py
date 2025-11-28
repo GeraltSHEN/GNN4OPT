@@ -159,7 +159,9 @@ def train(
                 loss = F.mse_loss(logits, batch.candidate_scores)
             # TODO
             elif loss_option == "ranking":
-                loss = LambdaNDCGLoss1(logits, batch.candidate_scores, batch.nb_candidates)
+                loss_fn = LambdaNDCGLoss1()
+                padded_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates)
+                loss = loss_fn(logits, padded_scores, batch.nb_candidates).mean()
             else:
                 raise ValueError(f"Unsupported loss option: {loss_option}")
 
@@ -301,14 +303,14 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train the MILP branching policy.")
     parser.add_argument("--dataset", type=str, default="set_cover", help="Dataset key.")
     parser.add_argument("--cfg_idx", type=int, default=0, help="Configuration index.")
-    parser.add_argument("--config_root", type=str, default="./cfg", help="Directory containing configuration files.")
+    parser.add_argument("--config_root", type=str, default="./disjunctive_dual/cfg", help="Directory containing configuration files.")
     parser.add_argument("--model_suffix", type=str, default="", help="Optional suffix appended to model/log directories.")
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.")
     parser.add_argument("--resume_model_dir", type=str, default="", help="Directory containing checkpoints to resume from.")
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=1000,
+        default=10000,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
@@ -320,7 +322,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--print_every",
         type=int,
-        default=1000,
+        default=10000,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     return parser.parse_args(argv)
@@ -361,7 +363,9 @@ def main(argv=None):
     policy = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
     optimizer = get_optimizer(args, policy)
 
-    base_model_dir = Path(getattr(args, "model_dir", "./models"))
+    base_model_dir = Path(getattr(args, "model_dir", "./disjunctive_dual/models"))
+    if getattr(args, "model", None):
+        base_model_dir = base_model_dir / args.model
     base_log_dir = Path(getattr(args, "log_dir", "./logs"))
     model_id = getattr(args, "model_id", None)
     if model_id:

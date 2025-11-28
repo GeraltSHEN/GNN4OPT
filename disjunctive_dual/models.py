@@ -326,28 +326,28 @@ class SetCoverHolo(torch.nn.Module):
     1. oracle or heuristic (customized get_nodes_to_break method) to select n_breakings (n_branching) candidates, say t in total
     
     2. add one-hot encodings in the form of 2-element-set to nodes, i.e. 
-    Y:= {[Y, 0, 0], [Y, 0, 0]} \in R^{2t * n_constraints * (d+2)}
-    X:= {[X, 1_v, 0], [X, 0, 1_v]} \in R^{2t * n_variables * (d+2)}
+    Y:= {[Y, 0, 0], [Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
+    X:= {[X, 1_v, 0], [X, 0, 1_v]} in R^{2t * n_variables * (d+2)}
     
-    3. r-gated constraint embeddings. The forward pass will take the original graph input, constraint_feature:=[r] \in R^{n_constraints * 1},
-    Y:= {[r * Y, 0, 0], [Y, 0, 0]} \in R^{2t * n_constraints * (d+2)}
-    The forward pass will take the original graph input, edge_index:=[constraint_indices, variable_indices] \in R^{2 * n_edges},
+    3. r-gated constraint embeddings. The forward pass will take the original graph input, constraint_feature:=[r] in R^{n_constraints * 1},
+    Y:= {[r * Y, 0, 0], [Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
+    The forward pass will take the original graph input, edge_index:=[constraint_indices, variable_indices] in R^{2 * n_edges},
     for each v in n_breaking, find the constraint_indices_connected_to_v, and 
     get revised r' by setting r[constraint_indices_connected_to_v] = 0
-    Y:= {[r * Y, 0, 0], [r' * Y, 0, 0]} \in R^{2t * n_constraints * (d+2)}
+    Y:= {[r * Y, 0, 0], [r' * Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
     
     4. break symmetry. 
     Y, X:= symmetry_breaking_model(Y, X, adj_t) 
 
     5. Y go into set transformer and let constraint nodes talk to each other, problem channels also talk to each other
-    Y:= setTransformer(Y) \in R^{2t * n_constraints * (d+2)} where n_constraints get mixed information from each other, sub-problems get mixed information from each other
+    Y:= setTransformer(Y) in R^{2t * n_constraints * (d+2)} where n_constraints get mixed information from each other, sub-problems get mixed information from each other
     
     6. X and Y get updated through message passing, i.e. let constraint nodes talk to variable nodes
-    Y or X:= BipartiteGraphConvolution(X, edge_index, Y) \in R^{2t * n_constraints or n_variables * (d+2)} for a few rounds
-    X:= setTransformer(X) \in R^{t * n_variables * (d+2)} let sub-problems get mixed information by learned pooling
+    Y or X:= BipartiteGraphConvolution(X, edge_index, Y) in R^{2t * n_constraints or n_variables * (d+2)} for a few rounds
+    X:= setTransformer(X) in R^{t * n_variables * (d+2)} let sub-problems get mixed information by learned pooling
     
     7. X go into set transformer again, allowing breaking views to talk to each other, 
-    X:= setTransformer(X) \in R^{n_variables * (d+2)}
+    X:= setTransformer(X) in R^{n_variables * (d+2)}
     """
 
     def __init__(
@@ -640,7 +640,7 @@ class SetCoverHolo(torch.nn.Module):
         self,
         Y,
         X,
-        constraint_features, # [r] \in R^{n_constraints * 1}
+        constraint_features, # [r] in R^{n_constraints * 1}
         edge_indices,
         edge_features,
         variable_features, # [c, is_fixed_to_1, is_fixed_to_0, is_not_fixed]

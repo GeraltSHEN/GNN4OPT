@@ -1,7 +1,7 @@
 .DS_Store
 __pycache__/
 quick_test.ipynb
-models/
+*models/
 logs/run_training/
 legacy_code_generator/__pycache__/
 legacy_code_generator/data/
