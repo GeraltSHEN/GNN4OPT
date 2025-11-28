@@ -21,7 +21,7 @@ epochs: 1
 lr: 0.001
 batch_size: 16
 weight_decay: 0.0005
-loss_option: classification
+loss_option: ranking
 resume: false
 eval_every: 10000
 save_every: 10000

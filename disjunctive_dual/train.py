@@ -149,19 +149,30 @@ def train(
                 batch = batch[select_indices]
                 if len(logits) == 0:
                     continue
-            else:
-                # Index the results by the candidates, and split and pad them
-                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
 
             if loss_option == "classification":
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
                 loss = F.cross_entropy(logits, batch.candidate_choices)
             elif loss_option == "regression":
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
                 loss = F.mse_loss(logits, batch.candidate_scores)
-            # TODO
             elif loss_option == "ranking":
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates,
+                                    pad_value=0)
                 loss_fn = LambdaNDCGLoss1()
-                padded_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates)
-                loss = loss_fn(logits, padded_scores, batch.nb_candidates).mean()
+                padded_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates, 
+                                           pad_value=0)
+                loss = loss_fn(logits, padded_scores, batch.nb_candidates)
+                nan_mask = torch.isnan(loss)
+                if nan_mask.any():
+                    nan_indices = nan_mask.nonzero(as_tuple=False).flatten()
+                    print(f"NaN ranking loss at indices {nan_indices.tolist()}")
+                    print(f"logits: {logits[nan_indices].detach().cpu()}")
+                    print(f"padded_scores: {padded_scores[nan_indices].detach().cpu()}")
+                loss = loss.mean()
             else:
                 raise ValueError(f"Unsupported loss option: {loss_option}")
 

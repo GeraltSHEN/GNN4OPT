@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 
-PERFORMANCE_DEBUG = True  # Toggle to print timing and memory information
+PERFORMANCE_DEBUG = False  # Toggle to print timing and memory information
 
 
 @contextmanager
