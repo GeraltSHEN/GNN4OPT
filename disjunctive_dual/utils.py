@@ -255,14 +255,9 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             raise FileNotFoundError(f"breaking selector checkpoint not found: {selector_path}")
         checkpoints = [x for x in os.listdir(selector_path) 
                        if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
-        if step == 'max':
-            step = 0
-            if checkpoints:
-                step, last_checkpoint = max([(int(x.split('.')[0]), x) for x in checkpoints])
-        else:
-            last_checkpoint = str(step) + '.pth'
-        if step:
-            selector_path = os.path.join(selector_path, last_checkpoint)
+        if checkpoints:
+            last_checkpoint = max(checkpoints, key=lambda x: int(x.split('.')[0]))
+            selector_path = selector_path / last_checkpoint
 
         state = torch.load(selector_path, map_location=args.device)
         state_dict = state["model"] if isinstance(state, dict) and "model" in state else state

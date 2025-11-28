@@ -30,7 +30,7 @@ BASE_DEFAULTS = {
     "seed": 42,
     "epochs": 1,
     "lr": 1e-3,
-    "batch_size": 32,
+    "batch_size": 16,
     "weight_decay": 5e-4,
     "loss_option": "ranking",
     "resume": False,
