@@ -13,12 +13,8 @@
 module load anaconda
 conda activate opt-ml-env
 
-echo "try raw train"
 python disjunctive_dual/train.py --dataset set_cover --cfg_idx 0
-echo "try raw eval"
 python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 0 --eval_split test
-echo "try holo train"
-python disjunctive_dual/train.py --dataset set_cover --cfg_idx 1
-echo "try holo eval"
-python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 1 --eval_split test
+# python disjunctive_dual/train.py --dataset set_cover --cfg_idx 1
+# python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 1 --eval_split test
 

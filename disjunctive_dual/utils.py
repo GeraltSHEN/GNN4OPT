@@ -89,10 +89,12 @@ class GraphDataset(Dataset):
         sample_state, _, sample_action, sample_action_set, sample_scores = sample["data"]
 
         constraint_dict, edge_dict, variable_dict = sample_state
+        constraint_default_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
         edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
         edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
         variable_names = variable_dict["names"]
         variable_values = np.asarray(variable_dict["values"], dtype=np.float32)
+        variable_default_features = torch.as_tensor(variable_values, dtype=torch.float32)
         # pick the relevant variable features
         feature_indices = {
             name: variable_names.index(name)
@@ -113,6 +115,10 @@ class GraphDataset(Dataset):
             ),
             dtype=torch.float32,
         )
+        variable_features = torch.cat(
+            (variable_features, variable_default_features),
+            dim=-1,
+        )
 
         # mark constraints that touch any variable fixed to 1
         f1_mask = torch.as_tensor(is_fixed_to_1, dtype=torch.bool)
@@ -125,6 +131,10 @@ class GraphDataset(Dataset):
                 connected_constraints = constraint_indices[f1_edge_mask]
                 r[connected_constraints] = 0
         constraint_features = r.unsqueeze(-1)
+        constraint_features = torch.cat(
+            (constraint_features, constraint_default_features),
+            dim=-1,
+        )
 
         if self.binarize_edge_features:
             non_zero_mask = edge_features != 0

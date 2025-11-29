@@ -329,7 +329,7 @@ class SetCoverHolo(torch.nn.Module):
     Y:= {[Y, 0, 0], [Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
     X:= {[X, 1_v, 0], [X, 0, 1_v]} in R^{2t * n_variables * (d+2)}
     
-    3. r-gated constraint embeddings. The forward pass will take the original graph input, constraint_feature:=[r] in R^{n_constraints * 1},
+    3. r-gated constraint embeddings. The forward pass takes the original graph input, whose first constraint feature is the r-gate (extra constraint features may follow),
     Y:= {[r * Y, 0, 0], [Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
     The forward pass will take the original graph input, edge_index:=[constraint_indices, variable_indices] in R^{2 * n_edges},
     for each v in n_breaking, find the constraint_indices_connected_to_v, and 
@@ -478,7 +478,7 @@ class SetCoverHolo(torch.nn.Module):
     def revise_r(
             self, r, edge_indices, branching_variable_indices):
         """
-        r: base r (n_constraints_total, 1)
+        r: base r gating column (n_constraints_total, 1)
         edge_indices: (2, E)
         branching_variable_indices: (t, bsz) where indices at the second dim 
         must be global indices
@@ -640,7 +640,7 @@ class SetCoverHolo(torch.nn.Module):
         self,
         Y,
         X,
-        constraint_features, # [r] in R^{n_constraints * 1}
+        constraint_features, # first column is r-gate; remaining columns are extra features
         edge_indices,
         edge_features,
         variable_features, # [c, is_fixed_to_1, is_fixed_to_0, is_not_fixed]
@@ -687,7 +687,8 @@ class SetCoverHolo(torch.nn.Module):
                              one_hot_breakings_b], dim=-1) # (t, bsz * n_variables_every, d+2)
         # add r-gating to Y
         with _perf_timer("SetCoverHolo step 2: apply r-gating to Y"):
-            r = constraint_features
+            # Use only the original r-gating column; extra features remain available in constraint_features
+            r = constraint_features[:, :1]
             r_after_branching = self.revise_r(r=r, 
                                               edge_indices=edge_indices, 
                                               branching_variable_indices=break_node_indices_global.T)
