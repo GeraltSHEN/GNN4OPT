@@ -13,7 +13,7 @@ sym_break_layers: 2
 mp_layers: 2
 breaking_selector_model_path: ./disjunctive_dual/models/raw/set_cover_cfg0
 edge_nfeats: 1
-binarize_edge_features: true
+binarize_edge_features: false
 file_pattern: sample_*.pkl
 seed: 42
 epochs: 2
