@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import Optional
+from typing import Optional, List, Tuple
 import time
 
 import torch
@@ -767,3 +767,439 @@ class SetCoverHolo(torch.nn.Module):
         # (n_variables, d+2)
         _log_peak_memory(peak_mem_device)
         return X
+
+
+class SetCoverGumbel(torch.nn.Module):
+    """
+    A Set-Cover-specific GumbelModel for symmetry breaking.
+    """
+
+    def __init__(
+        self,
+        selection_model: Optional[torch.nn.Module],
+        symmetry_breaking_model: StackedBipartiteGNN,
+        num_subgraphs: int,
+        num_marked: int = 1,
+        tau: float = 1.0,
+        hard: bool = True,
+        use_noise: bool = True,
+        detach_marking: bool = False,
+    ):
+        """
+        Args:
+            selection_model: Network producing a scalar score per variable node.
+                The model is expected to accept (constraint_features, edge_indices,
+                edge_features, variable_features) and return shape (n_vars,) or
+                (n_vars, 1). When None, variables are selected uniformly at random.
+            symmetry_breaking_model: Prediction model applied after marking the
+                selected variables. Typically a `StackedBipartiteGNN` whose
+                `hidden_channels` matches `base_dim + num_marked`.
+            num_subgraphs: Number of subgraphs (views) to sample. The original
+                graph counts as one view; sampling happens `num_subgraphs - 1` times.
+            num_marked: How many nodes to mark per sampled subgraph.
+            tau: Gumbel-Softmax temperature.
+            hard: When True, uses straight-through discrete samples; otherwise
+                returns soft probabilities.
+            use_noise: Enable Gumbel noise during training; when False behaves
+                deterministically given the logits.
+            detach_marking: If True, detaches the marking channels before they
+                are concatenated to the variable embeddings.
+        """
+        super().__init__()
+        if num_subgraphs < 1:
+            raise ValueError("num_subgraphs must be at least 1.")
+        if num_marked < 1:
+            raise ValueError("num_marked must be at least 1.")
+
+        self.selection_model = selection_model
+        self.symmetry_breaking_model = symmetry_breaking_model
+        self.num_subgraphs = num_subgraphs
+        self.num_marked = num_marked
+        self.tau = tau
+        self.hard = hard
+        self.use_noise = use_noise
+        self.detach_marking = detach_marking
+
+        # The prediction model operates on augmented embeddings
+        self.emb_size = self.symmetry_breaking_model.out_dim
+        self._mask_value = float("-inf")
+        self.last_selection = {}
+
+    @staticmethod
+    def _top_k_gumbel_softmax(
+        logits: torch.Tensor,
+        k: int,
+        tau: float = 1.0,
+        hard: bool = False,
+        use_noise: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Vectorised top-k Gumbel-Softmax sampling.
+
+        Args:
+            logits: Tensor of shape (..., num_nodes).
+            k: Number of nodes to sample.
+            tau: Temperature for the softmax.
+            hard: If True, returns straight-through one-hot samples.
+            use_noise: Whether to inject Gumbel noise.
+
+        Returns:
+            samples: Tensor with shape (..., num_nodes, k) containing
+                soft/hard samples for each of the k selections.
+            indices: Tensor with shape (..., k) containing the argmax indices.
+        """
+        if use_noise:
+            gumbels = torch.distributions.Gumbel(
+                torch.zeros_like(logits), torch.ones_like(logits)
+            ).sample()
+            gumbels = (logits + gumbels) / tau
+        else:
+            gumbels = logits
+        y_soft = gumbels.softmax(dim=-1)
+
+        if hard:
+            topk = y_soft.topk(k, dim=-1)
+            indices = topk.indices
+            rets: List[torch.Tensor] = []
+            for i in range(k):
+                y_hard = torch.zeros_like(logits).scatter_(
+                    -1, indices[..., i : i + 1], 1.0
+                )
+                ret = y_hard - y_soft.detach() + y_soft
+                rets.append(ret.unsqueeze(-1))
+            samples = torch.cat(rets, dim=-1)
+        else:
+            indices = torch.empty_like(logits, dtype=torch.long)
+            samples = y_soft.unsqueeze(-1).expand(*y_soft.shape, k)
+        return samples, indices
+
+    def preprocess_observation(self, n_variables_per_graph: torch.Tensor, device) -> dict:
+        """
+        Create a minimal observation dictionary mirroring the RL utilities in
+        `policy-learn` but tailored to the static tensors available here.
+
+        The observation only tracks which variable indices have been selected so
+        far; everything else is passed directly to the model in the forward call.
+        """
+        num_rounds = max(self.num_subgraphs - 1, 0)
+        num_slots = num_rounds * self.num_marked
+        which_subgraphs = torch.full(
+            (n_variables_per_graph.numel(), num_slots),
+            -1,
+            device=device,
+            dtype=torch.long,
+        )
+        return {
+            "which_subgraphs": which_subgraphs,
+            "n_variables_per_graph": n_variables_per_graph,
+        }
+
+    @staticmethod
+    def update_observation_inplace_no_replace(
+        obs: dict, selection_indices: torch.Tensor
+    ) -> None:
+        """
+        Append new selections to the observation without overwriting previous
+        ones. The observation stores the *global* variable ids. The incoming
+        `selection_indices` can be flat (num_graphs * k) or shaped as
+        (num_graphs, k).
+        """
+        which_subgraphs = obs["which_subgraphs"]
+        if which_subgraphs.numel() == 0:
+            return
+        selection_indices = selection_indices.view(which_subgraphs.size(0), -1)
+        for g in range(which_subgraphs.size(0)):
+            empty_slots = (which_subgraphs[g] == -1).nonzero(as_tuple=False).flatten()
+            if empty_slots.numel() == 0:
+                continue
+            num_to_fill = min(empty_slots.numel(), selection_indices.size(1))
+            which_subgraphs[g, empty_slots[:num_to_fill]] = selection_indices[
+                g, :num_to_fill
+            ]
+
+    def _compute_selection_logits(
+        self,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Run the provided selector to obtain logits per variable. If no selector
+        is provided, fall back to uniform logits.
+        """
+        if self.selection_model is None:
+            return torch.zeros(
+                variable_features.size(0),
+                device=variable_features.device,
+                dtype=variable_features.dtype,
+            )
+        logits = self.selection_model(
+            constraint_features, edge_indices, edge_features, variable_features
+        )
+        logits = logits.squeeze(-1)
+        if logits.dim() != 1:
+            raise ValueError(
+                f"Selection model must return shape (n_vars,) or (n_vars, 1); got {tuple(logits.shape)}"
+            )
+        return logits
+
+    def _build_dense_logits(
+        self,
+        logits: torch.Tensor,
+        n_variables_per_graph: torch.Tensor,
+        candidates: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Convert a flat logits vector into a padded matrix of shape
+        (num_graphs, max_num_vars) so that the Gumbel sampling can happen
+        independently per graph.
+        """
+        device, dtype = logits.device, logits.dtype
+        mask_value = torch.finfo(dtype).min
+        num_graphs = int(n_variables_per_graph.numel())
+        max_vars = int(n_variables_per_graph.max().item())
+        dense_logits = torch.full(
+            (num_graphs, max_vars), mask_value, device=device, dtype=dtype
+        )
+        offsets = torch.cumsum(
+            torch.cat(
+                (
+                    torch.zeros(1, device=device, dtype=torch.long),
+                    n_variables_per_graph[:-1],
+                )
+            ),
+            dim=0,
+        )
+
+        for g, (start, n_vars) in enumerate(zip(offsets.tolist(), n_variables_per_graph.tolist())):
+            start = int(start)
+            n_vars = int(n_vars)
+            end = start + n_vars
+            if candidates is None:
+                dense_logits[g, :n_vars] = logits[start:end]
+            else:
+                mask = (candidates >= start) & (candidates < end)
+                graph_candidates = candidates[mask]
+                if graph_candidates.numel() == 0:
+                    continue
+                dense_logits[g, (graph_candidates - start).long()] = logits[graph_candidates]
+        return dense_logits, offsets
+
+    @staticmethod
+    def _mask_selected_logits(
+        dense_logits: torch.Tensor, indices: torch.Tensor, mask_value: float
+    ) -> torch.Tensor:
+        """Mask out already selected nodes so future rounds sample without replacement."""
+        batch_idx = torch.arange(
+            dense_logits.size(0), device=dense_logits.device
+        ).unsqueeze(-1)
+        dense_logits[batch_idx, indices] = mask_value
+        return dense_logits
+
+    def mark_subgraphs(
+        self,
+        samples: List[torch.Tensor],
+        n_variables_per_graph: torch.Tensor,
+        dtype: torch.dtype,
+        device: torch.device,
+        detach: bool = False,
+    ) -> torch.Tensor:
+        """
+        Convert a list of sampled subgraphs into per-view marking features.
+
+        Args:
+            samples: Each element has shape (batch, max_vars, num_marked).
+            n_variables_per_graph: 1D tensor with variable counts per graph.
+            dtype/device: Used to materialise zero-marking for the base graph.
+            detach: Whether to detach the marking channels from autograd.
+
+        Returns:
+            Tensor with shape (num_views, sum(n_variables_per_graph), num_marked)
+            where view 0 corresponds to the unmarked original graph.
+        """
+        total_vars = int(n_variables_per_graph.sum().item())
+        if len(samples) == 0:
+            base = torch.zeros(
+                (1, total_vars, self.num_marked), device=device, dtype=dtype
+            )
+            return base.detach() if detach else base
+
+        offsets = torch.cumsum(
+            torch.cat(
+                (
+                    torch.zeros(1, device=device, dtype=torch.long),
+                    n_variables_per_graph[:-1],
+                )
+            ),
+            dim=0,
+        )
+        marks: List[torch.Tensor] = [
+            torch.zeros(
+                (total_vars, self.num_marked), device=device, dtype=samples[0].dtype
+            )
+        ]
+        for sample in samples:
+            view_marks = torch.zeros_like(marks[0])
+            for g, (start, n_vars) in enumerate(zip(offsets.tolist(), n_variables_per_graph.tolist())):
+                start = int(start)
+                n_vars = int(n_vars)
+                end = start + n_vars
+                view_marks[start:end] = sample[g, :n_vars, :]
+            marks.append(view_marks)
+        marks = torch.stack(marks, dim=0)
+        return marks.detach() if detach else marks
+
+    @staticmethod
+    def format_for_stacked_bipartite(Y, X, edge_indices, edge_features):
+        """
+        Expand the bipartite graph for multiple views by stacking the node
+        features and adjusting the edge indices accordingly.
+        """
+        num_views, n_constraints, _ = Y.shape
+        _, n_variables, _ = X.shape
+
+        formatted_Y = Y.reshape(num_views * n_constraints, -1)
+        formatted_X = X.reshape(num_views * n_variables, -1)
+
+        constraint_offsets = torch.arange(num_views, device=Y.device).unsqueeze(1) * n_constraints
+        variable_offsets = torch.arange(num_views, device=Y.device).unsqueeze(1) * n_variables
+        constraint_edges = edge_indices[0].unsqueeze(0) + constraint_offsets
+        variable_edges = edge_indices[1].unsqueeze(0) + variable_offsets
+        formatted_edge_indices = torch.stack(
+            (constraint_edges.reshape(-1), variable_edges.reshape(-1)), dim=0
+        )
+        formatted_edge_features = (
+            edge_features.unsqueeze(0)
+            .expand(num_views, edge_features.size(0), -1)
+            .reshape(num_views * edge_features.size(0), -1)
+        )
+        shape_info = {
+            "num_views": num_views,
+            "n_constraints": n_constraints,
+            "n_variables": n_variables,
+        }
+        return formatted_Y, formatted_X, formatted_edge_indices, formatted_edge_features, shape_info
+
+    @staticmethod
+    def format_from_stacked_bipartite(Y, X, shape_info):
+        """
+        Undo `format_for_stacked_bipartite` by restoring the view dimension.
+        """
+        num_views = shape_info["num_views"]
+        n_constraints = shape_info["n_constraints"]
+        n_variables = shape_info["n_variables"]
+        Y = Y.reshape(num_views, n_constraints, -1)
+        X = X.reshape(num_views, n_variables, -1)
+        return Y, X
+
+    def forward(
+        self,
+        Y: torch.Tensor,
+        X: torch.Tensor,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+        candidates: Optional[torch.Tensor] = None,
+        n_constraints_per_graph: Optional[torch.Tensor] = None,
+        n_variables_per_graph: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Selects variable subgraphs with Gumbel-Softmax, appends the resulting
+        marks to the node features, runs the symmetry-breaking GNN, and finally
+        aggregates the per-view variable embeddings.
+
+        Args match those of `SetCoverHolo` so this module can be swapped into
+        `GNNPolicy` with minimal changes.
+        """
+        device, dtype = Y.device, Y.dtype
+        if n_constraints_per_graph is None:
+            n_constraints_per_graph = torch.tensor(
+                [Y.size(0)], device=device, dtype=torch.long
+            )
+        if n_variables_per_graph is None:
+            n_variables_per_graph = torch.tensor(
+                [X.size(0)], device=device, dtype=torch.long
+            )
+
+        dense_logits, offsets = self._build_dense_logits(
+            logits=self._compute_selection_logits(
+                constraint_features, edge_indices, edge_features, variable_features
+            ),
+            n_variables_per_graph=n_variables_per_graph,
+            candidates=candidates,
+        )
+        obs = self.preprocess_observation(n_variables_per_graph, device)
+
+        samples: List[torch.Tensor] = []
+        indices_per_round: List[torch.Tensor] = []
+        num_rounds = max(self.num_subgraphs - 1, 0)
+        working_logits = dense_logits.clone()
+        mask_value = torch.finfo(working_logits.dtype).min
+
+        for _ in range(num_rounds):
+            available = (~torch.isinf(working_logits)).sum(dim=1)
+            if (available < self.num_marked).any():
+                raise ValueError(
+                    "Not enough available variables to sample without replacement; "
+                    f"requested {self.num_marked}, available {available.min().item()}."
+                )
+            sample, idx = self._top_k_gumbel_softmax(
+                working_logits,
+                k=self.num_marked,
+                tau=self.tau,
+                hard=self.hard,
+                use_noise=self.training and self.use_noise,
+            )
+            samples.append(sample)
+            indices_per_round.append(idx)
+            working_logits = self._mask_selected_logits(
+                working_logits, idx, mask_value=mask_value
+            )
+
+        # Record selections as global indices for potential debugging/analysis
+        if indices_per_round:
+            global_indices: List[torch.Tensor] = []
+            for idx in indices_per_round:
+                global_idx = idx + offsets.view(-1, 1)
+                global_indices.append(global_idx)
+                self.update_observation_inplace_no_replace(obs, global_idx.flatten())
+            self.last_selection = {
+                "dense_logits": dense_logits.detach(),
+                "indices": [g.detach() for g in global_indices],
+            }
+        else:
+            self.last_selection = {"dense_logits": dense_logits.detach(), "indices": []}
+
+        markings = self.mark_subgraphs(
+            samples,
+            n_variables_per_graph=n_variables_per_graph,
+            dtype=dtype,
+            device=device,
+            detach=self.detach_marking,
+        )
+        num_views = markings.size(0)
+
+        zeros_for_constraints = torch.zeros(
+            (num_views, Y.size(0), self.num_marked), device=device, dtype=dtype
+        )
+        Y_aug = torch.cat(
+            (Y.unsqueeze(0).expand(num_views, -1, -1), zeros_for_constraints), dim=-1
+        )
+        X_aug = torch.cat(
+            (X.unsqueeze(0).expand(num_views, -1, -1), markings), dim=-1
+        )
+
+        Y_formatted, X_formatted, edge_indices_f, edge_features_f, shape_info = (
+            self.format_for_stacked_bipartite(Y_aug, X_aug, edge_indices, edge_features)
+        )
+        Y_formatted, X_formatted = self.symmetry_breaking_model(
+            Y_formatted, edge_indices_f, edge_features_f, X_formatted
+        )
+        _, X_views = self.format_from_stacked_bipartite(
+            Y_formatted, X_formatted, shape_info
+        )
+        
+        X_out = X_views.mean(dim=0)
+        return X_out

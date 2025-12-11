@@ -4,14 +4,14 @@ import os
 import random
 import pickle
 from pathlib import Path
-from typing import Dict, Sequence, Union
+from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 
-from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
+from models import GNNPolicy, SetCoverGumbel, SetCoverHolo, StackedBipartiteGNN
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
@@ -257,22 +257,28 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     isab_num_inds = args.isab_num_inds
     output_size = 1
 
-    def _load_breaking_selector_model(model, selector_path: Union[str, Path]):
+    def _load_selector_model(model, selector_path: Optional[Union[str, Path]]):
+        """Load a pre-trained selector model if a checkpoint is provided."""
         if not selector_path:
-            raise ValueError("`breaking_selector_model_path` must be provided when using the holo model.")
+            return model
         selector_path = Path(selector_path)
         if not selector_path.exists():
-            raise FileNotFoundError(f"breaking selector checkpoint not found: {selector_path}")
-        checkpoints = [x for x in os.listdir(selector_path) 
-                       if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
+            raise FileNotFoundError(f"Selector checkpoint not found: {selector_path}")
+        checkpoints = [
+            x
+            for x in os.listdir(selector_path)
+            if not x.startswith("events")
+            and not x.endswith(".json")
+            and not x.endswith(".pkl")
+        ]
         if checkpoints:
-            last_checkpoint = max(checkpoints, key=lambda x: int(x.split('.')[0]))
+            last_checkpoint = max(checkpoints, key=lambda x: int(x.split(".")[0]))
             selector_path = selector_path / last_checkpoint
 
         state = torch.load(selector_path, map_location=args.device)
         state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
         model.load_state_dict(state_dict)
-        print(f"load {selector_path} for breaking selector model.")
+        print(f"Loaded selector model from {selector_path}")
         return model
 
     if args.model == "raw":
@@ -295,8 +301,9 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
                                             output_size,
                                             selector_layers,
                                             holo=None)
-        breaking_selector_model = _load_breaking_selector_model(breaking_selector_model, 
-                                                                selector_path)
+        if selector_path is None:
+            raise ValueError("`breaking_selector_model_path` must be provided when using the holo model.")
+        breaking_selector_model = _load_selector_model(breaking_selector_model, selector_path)
         breaking_selector_model = breaking_selector_model.to(args.device)
         breaking_selector_model.eval()
         for param in breaking_selector_model.parameters():
@@ -325,6 +332,48 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
                           output_size,
                           n_layers,
                           holo=holo)
+    elif args.model == "gumbel":
+        print("Try gumbel!")
+        selector_layers = n_layers
+        # Selection model is trained jointly; no external checkpoint needed.
+        selection_model = GNNPolicy(
+            emb_size,
+            cons_nfeats,
+            edge_nfeats,
+            var_nfeats,
+            output_size,
+            selector_layers,
+            holo=None,
+        ).to(args.device)
+
+        gumbel_num_marked = getattr(args, "num_marked", 1)
+        gumbel_sym_layers = getattr(args, "gumbel_sym_break_layers", getattr(args, "sym_break_layers", 2))
+        symmetry_breaking_model = StackedBipartiteGNN(
+            hidden_channels=emb_size + gumbel_num_marked,
+            edge_nfeats=edge_nfeats,
+            n_layers=gumbel_sym_layers,
+        )
+
+        gumbel = SetCoverGumbel(
+            selection_model=selection_model,
+            symmetry_breaking_model=symmetry_breaking_model,
+            num_subgraphs=getattr(args, "num_subgraphs", 2),
+            num_marked=gumbel_num_marked,
+            tau=getattr(args, "gumbel_tau", 1.0),
+            hard=getattr(args, "gumbel_hard", True),
+            use_noise=getattr(args, "gumbel_use_noise", True),
+            detach_marking=getattr(args, "gumbel_detach_marking", False),
+        )
+
+        model = GNNPolicy(
+            emb_size,
+            cons_nfeats,
+            edge_nfeats,
+            var_nfeats,
+            output_size,
+            n_layers,
+            holo=gumbel,
+        )
     else:
         raise NotImplementedError(f"Unknown model type '{args.model}'.")
 

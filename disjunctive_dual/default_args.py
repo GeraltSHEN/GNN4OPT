@@ -14,7 +14,7 @@ BASE_DEFAULTS = {
     "model_dir": "./disjunctive_dual/models",
     "log_dir": "./disjunctive_dual/logs",
     # model options
-    "model": "raw",  # raw; holo
+    "model": "raw",  # raw; holo; gumbel
     "hidden_channels": 64,
     "num_layers": 2,
     "n_breakings": 8,
@@ -23,14 +23,22 @@ BASE_DEFAULTS = {
     "sym_break_layers": 2,
     "mp_layers": 2,
     "breaking_selector_model_path": None,
+    # gumbel options
+    "num_subgraphs": 2,
+    "num_marked": 1,
+    "gumbel_tau": 1.0,
+    "gumbel_hard": True,
+    "gumbel_use_noise": True,
+    "gumbel_detach_marking": False,
+    "gumbel_sym_break_layers": 2,
     "edge_nfeats": 1,
     "binarize_edge_features": False,
     "file_pattern": "sample_*.pkl",
     # training options
     "seed": 42,
-    "epochs": 1,
-    "lr": 1e-3,
-    "batch_size": 16,
+    "epochs": 2,
+    "lr": 1e-4,
+    "batch_size": 8,
     "weight_decay": 5e-4,
     "loss_option": "ranking",
     "resume": False,
