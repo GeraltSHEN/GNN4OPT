@@ -16,8 +16,8 @@ conda activate opt-ml-env
 # python disjunctive_dual/train.py --dataset set_cover --cfg_idx 0
 # python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 0 --eval_split test
 
-# python disjunctive_dual/train.py --dataset set_cover --cfg_idx 1
-# python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 1 --eval_split test
+python disjunctive_dual/train.py --dataset set_cover --cfg_idx 6
+python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 6 --eval_split test
 
-python disjunctive_dual/train.py --dataset set_cover --cfg_idx 1 --resume
-python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 1 --model_suffix "resume_from_set_cover_cfg1" --eval_split test
+# python disjunctive_dual/train.py --dataset set_cover --cfg_idx 1 --resume
+# python disjunctive_dual/eval.py --dataset set_cover --cfg_idx 1 --model_suffix "resume_from_set_cover_cfg1" --eval_split test

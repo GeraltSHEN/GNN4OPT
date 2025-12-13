@@ -506,6 +506,29 @@ class SetCoverHolo(torch.nn.Module):
         connected.scatter_add_(1, row_idx, mask)
         r_after_branching[connected > 0] = 0.0
         return r_after_branching
+    
+
+    def remove_edges_via_r(self, r, edge_indices):
+        """
+        r: base r gating column (t, n_constraints_total, 1)
+            or r_after_branching: (t, n_constraints_total, 1)
+            Note: remember to repeat base r t times to make it in shape of (t, n_constraints_total, 1) in forward
+        edge_indices: (2, t * E) original edges repeated t times
+
+        Returns:
+        reduced_edge_indices: (2, E'_1 + E'_'2 + ... + E'_t)
+            for each view, the original E_l is reduced to E'_l in this manner:
+            when r_i = 0, all edges connected to node i are removed. 
+            Note that edge_indices[0] are constraint nodes and edge_indices[1] are variable nodes (correct?)
+        """
+        constraint_gate = r.squeeze(-1)  # (t, n_constraints_total)
+        flat_gate = constraint_gate.reshape(-1)  # (t * n_constraints_total,)
+
+        constraint_nodes = edge_indices[0]
+        edge_mask = flat_gate[constraint_nodes] > 0
+        reduced_edge_indices = edge_indices[:, edge_mask]
+        return reduced_edge_indices, edge_mask
+
 
     def format_for_stacked_bipartite(self, Y, X, edge_indices, edge_features):
         """
@@ -693,25 +716,35 @@ class SetCoverHolo(torch.nn.Module):
                                               edge_indices=edge_indices, 
                                               branching_variable_indices=break_node_indices_global.T)
             # (t, n_constraints_total, 1)
-            Y_a = torch.cat([r * Y.unsqueeze(0).expand(t, n_constraints_total, Y.size(1)),
+            r_base_views = r.unsqueeze(0).expand(t, n_constraints_total, 1)
+            Y_a = torch.cat([r_base_views * Y.unsqueeze(0),
                              torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
                              dim=-1) # (t, n_constraints_total, d+2)
-            Y_b = torch.cat([r_after_branching * Y.unsqueeze(0).expand(t, n_constraints_total, Y.size(1)),
+            Y_b = torch.cat([r_after_branching * Y.unsqueeze(0),
                              torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
                              dim=-1) # (t, n_constraints_total, d+2)
+
         # break symmetry
         with _perf_timer("SetCoverHolo step 3: break symmetry"):
             Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
                 self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
+            formatted_edge_indices_a, edge_mask_a = self.remove_edges_via_r(
+                r_base_views, formatted_edge_indices
+            )
+            formatted_edge_features_a = formatted_edge_features[edge_mask_a]
             Y_a, X_a = self.symmetry_breaking_model(
-                Y_a, formatted_edge_indices, formatted_edge_features, X_a
+                Y_a, formatted_edge_indices_a, formatted_edge_features_a, X_a
             )
             Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
 
             Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
                 self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
+            formatted_edge_indices_b, edge_mask_b = self.remove_edges_via_r(
+                r_after_branching, formatted_edge_indices
+            )
+            formatted_edge_features_b = formatted_edge_features[edge_mask_b]
             Y_b, X_b = self.symmetry_breaking_model(
-                Y_b, formatted_edge_indices, formatted_edge_features, X_b
+                Y_b, formatted_edge_indices_b, formatted_edge_features_b, X_b
             )
             Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
         # holo_repr: (t, n, d+2)
@@ -744,17 +777,17 @@ class SetCoverHolo(torch.nn.Module):
         # gnn: constraint talks to variable
         with _perf_timer("SetCoverHolo step 6: constraint-variable message passing"):
             if self.constraint_variable_gnn is not None:
-                Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+                Y_a, X_a, _, __, shape_info = \
                     self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
                 Y_a, X_a = self.constraint_variable_gnn(
-                    Y_a, formatted_edge_indices, formatted_edge_features, X_a
+                    Y_a, formatted_edge_indices_a, formatted_edge_features_a, X_a
                 )
                 Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
 
-                Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+                Y_b, X_b, _, __, shape_info = \
                     self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
                 Y_b, X_b = self.constraint_variable_gnn(
-                    Y_b, formatted_edge_indices, formatted_edge_features, X_b
+                    Y_b, formatted_edge_indices_b, formatted_edge_features_b, X_b
                 )
                 Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
         X = self.variable_problem_pma(
