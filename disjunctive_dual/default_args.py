@@ -22,6 +22,7 @@ BASE_DEFAULTS = {
     "isab_num_inds": 50,
     "sym_break_layers": 2,
     "mp_layers": 2,
+    "use_set_transformer": True,
     "breaking_selector_model_path": None,
     "edge_nfeats": 1,
     "binarize_edge_features": False,

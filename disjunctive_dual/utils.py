@@ -255,6 +255,7 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     n_layers = args.num_layers
     num_heads = args.num_heads
     isab_num_inds = args.isab_num_inds
+    use_set_transformer = getattr(args, "use_set_transformer", True)
     output_size = 1
 
     def _load_breaking_selector_model(model, selector_path: Union[str, Path]):
@@ -317,6 +318,7 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             isab_num_inds=isab_num_inds,
             mp_layers=getattr(args, "mp_layers", 2),
             edge_nfeats=edge_nfeats,
+            use_set_transformer=use_set_transformer,
         )
         model = GNNPolicy(emb_size, 
                           cons_nfeats, 

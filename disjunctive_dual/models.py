@@ -358,7 +358,8 @@ class SetCoverHolo(torch.nn.Module):
         num_heads: int = 0,
         isab_num_inds: int = 0,
         mp_layers: int = 1,
-        edge_nfeats: int = 1
+        edge_nfeats: int = 1,
+        use_set_transformer: bool = True,
     ):
         super().__init__()
 
@@ -373,10 +374,11 @@ class SetCoverHolo(torch.nn.Module):
         self.emb_size = self.symmetry_breaking_model.out_dim
         self.edge_nfeats = edge_nfeats
         self.num_heads = num_heads
+        self.use_set_transformer = use_set_transformer
         # self.ln = torch.nn.LayerNorm(self.emb_size)
 
         # set transformer: constraint talks to constraint
-        if num_heads > 0:
+        if self.use_set_transformer and num_heads > 0:
             if self.emb_size % num_heads != 0:
                 raise ValueError(
                     f"symmetry_breaking_model.out_dim ({self.emb_size}) "
@@ -397,7 +399,7 @@ class SetCoverHolo(torch.nn.Module):
 
         # GNN: constraint talks to variable
         self.mp_layers = mp_layers
-        if self.mp_layers > 0:
+        if self.use_set_transformer and self.mp_layers > 0:
             self.constraint_variable_gnn = StackedBipartiteGNN(
                 hidden_channels=self.emb_size,
                 edge_nfeats=self.edge_nfeats,
@@ -407,7 +409,11 @@ class SetCoverHolo(torch.nn.Module):
             self.constraint_variable_gnn = None
         
         # set transformer: sub-problem talks to sub-problem (two dual LP)
-        self.constraint_sab = SetAttentionBlock(dim_in=self.emb_size, dim_out=self.emb_size, num_heads=1, ln=True)
+        self.constraint_sab = (
+            SetAttentionBlock(dim_in=self.emb_size, dim_out=self.emb_size, num_heads=1, ln=True)
+            if self.use_set_transformer
+            else None
+        )
         # set transformer: sub-problems are mixed (primal aspect)
         self.variable_problem_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
         # set transformer: views are mixed (primal aspect)
@@ -750,33 +756,35 @@ class SetCoverHolo(torch.nn.Module):
         # holo_repr: (t, n, d+2)
 
         # set transformer: constraint talks to constraint
-        with _perf_timer("SetCoverHolo step 4: constraint set transformer"):
-            Y_a, key_padding_mask_a = \
-                self.format_for_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
-            Y_b, key_padding_mask_b = \
-                self.format_for_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
-            # (bsz*t, n_constraints_max, d+2)
-            if self.constraint_set_block is not None:
-                Y_a = self.constraint_set_block(Y_a, key_padding_mask_a)
-                Y_b = self.constraint_set_block(Y_b, key_padding_mask_b) 
-            # (bsz*t, n_constraints_max, d+2)
-            Y_a = self.format_from_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
-            Y_b = self.format_from_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
+        if self.use_set_transformer:
+            with _perf_timer("SetCoverHolo step 4: constraint set transformer"):
+                Y_a, key_padding_mask_a = \
+                    self.format_for_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
+                Y_b, key_padding_mask_b = \
+                    self.format_for_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
+                # (bsz*t, n_constraints_max, d+2)
+                if self.constraint_set_block is not None:
+                    Y_a = self.constraint_set_block(Y_a, key_padding_mask_a)
+                    Y_b = self.constraint_set_block(Y_b, key_padding_mask_b) 
+                # (bsz*t, n_constraints_max, d+2)
+                Y_a = self.format_from_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
+                Y_b = self.format_from_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
         # (t, n_constraints_total, d+2)
         
         # set transformer: constraint's 2 problems talk to each other
-        with _perf_timer("SetCoverHolo step 5: cross-problem constraint attention"):
-            Y = self.constraint_sab(
-                            torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1)),
-                            key_padding_mask=None).reshape(
-                                            t, n_constraints_total, 2, -1
-                                        )
-            Y_a, Y_b = Y[:,:,0], Y[:,:,1]
+        if self.constraint_sab is not None:
+            with _perf_timer("SetCoverHolo step 5: cross-problem constraint attention"):
+                Y = self.constraint_sab(
+                                torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1)),
+                                key_padding_mask=None).reshape(
+                                                t, n_constraints_total, 2, -1
+                                            )
+                Y_a, Y_b = Y[:,:,0], Y[:,:,1]
         # (t, n_constraints, d+2)
 
         # gnn: constraint talks to variable
-        with _perf_timer("SetCoverHolo step 6: constraint-variable message passing"):
-            if self.constraint_variable_gnn is not None:
+        if self.constraint_variable_gnn is not None:
+            with _perf_timer("SetCoverHolo step 6: constraint-variable message passing"):
                 Y_a, X_a, _, __, shape_info = \
                     self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
                 Y_a, X_a = self.constraint_variable_gnn(
