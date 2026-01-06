@@ -92,6 +92,13 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
     topk_miss_diff_sum = [0.0 for _ in range(k_max - 1)]
     topk_miss_diff_count = [0 for _ in range(k_max - 1)]
     small_top12_gap_count = 0
+    very_small_top12_gap_count = 0
+    top12_gap_counts = {
+        "selector_top1_match": {"lt1e4": 0, "lt1e6": 0},
+        "selector_top1_mismatch": {"lt1e4": 0, "lt1e6": 0},
+        "selector_top8_contains": {"lt1e4": 0, "lt1e6": 0},
+        "selector_top8_misses": {"lt1e4": 0, "lt1e6": 0},
+    }
 
     def _accumulate_difficulty(
         diffs: torch.Tensor,
@@ -199,9 +206,25 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
 
                 top12_valid = valid_diff_mask[:, 0]
                 if top12_valid.any():
-                    small_gap_mask = top12_valid & (gt_diffs[:, 0] < 1e-4)
+                    top12_diffs = gt_diffs[:, 0]
+                    small_gap_mask = top12_valid & (top12_diffs < 1e-4)
                     if small_gap_mask.any():
                         small_top12_gap_count += int(small_gap_mask.sum().item())
+                    very_small_gap_mask = top12_valid & (top12_diffs < 1e-6)
+                    if very_small_gap_mask.any():
+                        very_small_top12_gap_count += int(very_small_gap_mask.sum().item())
+
+                    def _update_gap_counts(group_mask, key: str) -> None:
+                        valid_group = top12_valid & group_mask
+                        if valid_group.any():
+                            group_diffs = top12_diffs[valid_group]
+                            top12_gap_counts[key]["lt1e4"] += int((group_diffs < 1e-4).sum().item())
+                            top12_gap_counts[key]["lt1e6"] += int((group_diffs < 1e-6).sum().item())
+
+                    _update_gap_counts(selector_top1_match, "selector_top1_match")
+                    _update_gap_counts(~selector_top1_match, "selector_top1_mismatch")
+                    _update_gap_counts(selector_topk_contains_best, "selector_top8_contains")
+                    _update_gap_counts(~selector_topk_contains_best, "selector_top8_misses")
 
             total_graphs += batch.num_graphs
 
@@ -237,6 +260,8 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
             },
         },
         "small_top12_gap_count": small_top12_gap_count,
+        "very_small_top12_gap_count": very_small_top12_gap_count,
+        "top12_gap_counts": top12_gap_counts,
         "samples": total_graphs,
     }
 
@@ -247,6 +272,14 @@ def _print_results(split: str, metrics: Dict[str, object], duration: float) -> N
     exploration = metrics["holo_exploration"]
     difficulty = metrics["difficulty"]
     small_gap_count = int(metrics["small_top12_gap_count"])
+    very_small_gap_count = int(metrics["very_small_top12_gap_count"])
+    top12_gap_counts = metrics["top12_gap_counts"]
+
+    def _fmt_gap(key: str) -> str:
+        return (
+            f"<1e-4: {top12_gap_counts[key]['lt1e4']}, "
+            f"<1e-6: {top12_gap_counts[key]['lt1e6']}"
+        )
 
     print_dash_str(f"{split.upper()} results")
     print(
@@ -269,7 +302,15 @@ def _print_results(split: str, metrics: Dict[str, object], duration: float) -> N
         f"Difficulty by selector top8 coverage -> \ncontains: {_format_scores(difficulty['selector_top8_contains_gt']['contains'])}, "
         f"\nmisses: {_format_scores(difficulty['selector_top8_contains_gt']['misses'])}"
     )
+    print(
+        "Top1 vs top2 normalized diff counts -> "
+        f"top1 match: {_fmt_gap('selector_top1_match')}, "
+        f"top1 mismatch: {_fmt_gap('selector_top1_mismatch')}, "
+        f"top8 contains: {_fmt_gap('selector_top8_contains')}, "
+        f"top8 misses: {_fmt_gap('selector_top8_misses')}"
+    )
     print(f"Top1 vs top2 normalized diff < 1e-4: {small_gap_count} samples")
+    print(f"Top1 vs top2 normalized diff < 1e-6: {very_small_gap_count} samples")
     print(f"Split time: {duration:.2f}s")
 
 
