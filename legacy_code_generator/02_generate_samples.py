@@ -10,6 +10,8 @@ import gzip
 import pyscipopt as scip
 import utilities
 
+SMALL_TOP12_GAP = 1e-4
+
 
 class SamplingAgent(scip.Branchrule):
 
@@ -26,6 +28,7 @@ class SamplingAgent(scip.Branchrule):
         self.rng = np.random.RandomState(seed)
         self.new_node = True
         self.sample_counter = 0
+        self.dropped_counter = 0
 
     def branchinit(self):
         self.khalil_root_buffer = {}
@@ -55,7 +58,32 @@ class SamplingAgent(scip.Branchrule):
             data = [state, state_khalil, expert_action, action_set, scores]
 
             # Do not record inconsistent scores. May happen if SCIP was early stopped (time limit).
-            if not any([s < 0 for s in scores]):
+            scores_array = np.asarray(scores, dtype=np.float64)
+            has_negative_scores = np.any(scores_array < 0)
+            top12_gap = None
+            if scores_array.size > 1:
+                sorted_scores = np.sort(scores_array)[::-1]
+                best_score = sorted_scores[0]
+                second_score = sorted_scores[1]
+                denom = max(best_score, 1e-8)
+                top12_gap = (best_score - second_score) / denom
+
+            if has_negative_scores:
+                pass
+
+            elif top12_gap is not None and top12_gap < SMALL_TOP12_GAP:
+                self.dropped_counter += 1
+                self.out_queue.put({
+                    'type': 'dropped',
+                    'episode': self.episode,
+                    'instance': self.instance,
+                    'seed': self.seed,
+                    'node_number': self.model.getCurrentNode().getNumber(),
+                    'node_depth': self.model.getCurrentNode().getDepth(),
+                    'top12_gap': float(top12_gap),
+                })
+
+            else:
 
                 filename = f'{self.out_dir}/sample_{self.episode}_{self.sample_counter}.pkl'
                 with gzip.open(filename, 'wb') as f:
@@ -147,7 +175,7 @@ def make_samples(in_queue, out_queue):
         m.optimize()
         m.freeProb()
 
-        print(f"[w {os.getpid()}] episode {episode} done, {branchrule.sample_counter} samples")
+        print(f"[w {os.getpid()}] episode {episode} done, kept {branchrule.sample_counter} samples, dropped {branchrule.dropped_counter} low-gap samples")
 
         out_queue.put({
             'type': 'done',
@@ -215,6 +243,14 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
         pair.
     time_limit : float in [0, 1e+20]
         Maximum running time for an episode, in seconds.
+
+    Returns
+    -------
+    kept_samples : int
+        Number of samples written to disk (equals n_samples).
+    dropped_samples : int
+        Number of samples discarded because the normalized top-1/top-2 score
+        difference was below SMALL_TOP12_GAP.
     """
     os.makedirs(out_dir, exist_ok=True)
 
@@ -243,9 +279,10 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
     # record answers and write samples
     buffer = {}
     current_episode = 0
-    i = 0
+    kept_samples = 0
+    dropped_samples = 0
     in_buffer = 0
-    while i < n_samples:
+    while kept_samples < n_samples:
         sample = answers_queue.get()
 
         # add received sample to buffer
@@ -268,20 +305,23 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
                     del buffer[current_episode]
                     current_episode += 1
 
+                elif sample['type'] == 'dropped':
+                    dropped_samples += 1
+
                 # else write sample
                 else:
-                    os.rename(sample['filename'], f'{out_dir}/sample_{i+1}.pkl')
+                    os.rename(sample['filename'], f'{out_dir}/sample_{kept_samples+1}.pkl')
                     in_buffer -= 1
-                    i += 1
-                    print(f"[m {os.getpid()}] {i} / {n_samples} samples written, ep {sample['episode']} ({in_buffer} in buffer).")
+                    kept_samples += 1
+                    print(f"[m {os.getpid()}] {kept_samples} / {n_samples} samples written, ep {sample['episode']} ({in_buffer} in buffer).")
 
                     # early stop dispatcher (hard)
-                    if in_buffer + i >= n_samples and dispatcher.is_alive():
+                    if in_buffer + kept_samples >= n_samples and dispatcher.is_alive():
                         dispatcher.terminate()
                         print(f"[m {os.getpid()}] dispatcher stopped...")
 
                     # as soon as enough samples are collected, stop
-                    if i == n_samples:
+                    if kept_samples == n_samples:
                         buffer = {}
                         break
 
@@ -290,6 +330,9 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
         p.terminate()
 
     shutil.rmtree(tmp_samples_dir, ignore_errors=True)
+    print(f"[m {os.getpid()}] kept {kept_samples} samples, dropped {dropped_samples} low-gap samples (norm top1-top2 diff < {SMALL_TOP12_GAP}).")
+
+    return kept_samples, dropped_samples
 
 
 if __name__ == '__main__':
@@ -358,19 +401,26 @@ if __name__ == '__main__':
     os.makedirs(out_dir)
 
     rng = np.random.RandomState(args.seed)
-    collect_samples(instances_train, out_dir + '/train', rng, train_size,
-                    args.njobs, exploration_policy=exploration_strategy,
-                    query_expert_prob=node_record_prob,
-                    time_limit=time_limit)
+    train_kept, train_dropped = collect_samples(
+        instances_train, out_dir + '/train', rng, train_size,
+        args.njobs, exploration_policy=exploration_strategy,
+        query_expert_prob=node_record_prob,
+        time_limit=time_limit)
 
     rng = np.random.RandomState(args.seed + 1)
-    collect_samples(instances_valid, out_dir + '/valid', rng, test_size,
-                    args.njobs, exploration_policy=exploration_strategy,
-                    query_expert_prob=node_record_prob,
-                    time_limit=time_limit)
+    valid_kept, valid_dropped = collect_samples(
+        instances_valid, out_dir + '/valid', rng, test_size,
+        args.njobs, exploration_policy=exploration_strategy,
+        query_expert_prob=node_record_prob,
+        time_limit=time_limit)
 
     rng = np.random.RandomState(args.seed + 2)
-    collect_samples(instances_test, out_dir + '/test', rng, test_size,
-                    args.njobs, exploration_policy=exploration_strategy,
-                    query_expert_prob=node_record_prob,
-                    time_limit=time_limit)
+    test_kept, test_dropped = collect_samples(
+        instances_test, out_dir + '/test', rng, test_size,
+        args.njobs, exploration_policy=exploration_strategy,
+        query_expert_prob=node_record_prob,
+        time_limit=time_limit)
+
+    print(f"Train split: kept {train_kept}, dropped {train_dropped} low-gap samples.")
+    print(f"Validation split: kept {valid_kept}, dropped {valid_dropped} low-gap samples.")
+    print(f"Test split: kept {test_kept}, dropped {test_dropped} low-gap samples.")
