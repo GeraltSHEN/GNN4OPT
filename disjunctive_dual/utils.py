@@ -172,6 +172,7 @@ class GraphDataset(Dataset):
 def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
     """Load train/val/test splits as torch_geometric DataLoaders based on CLI args."""
     dataset_root = Path(f"{args.dataset_path}")
+    print(f'load dataset from {dataset_root}')
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
     edge_nfeats = getattr(args, "edge_nfeats", 1)
     binarize_edge_features = getattr(args, "binarize_edge_features", True)

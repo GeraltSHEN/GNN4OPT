@@ -7,6 +7,8 @@ import torch
 from eval import _infer_feature_dimensions, _load_config, _merge_args_with_config, pad_tensor
 from utils import load_checkpoint, load_data, load_model, print_dash_str, set_seed
 
+# TODO: Top1 vs top2 normalized diff < 1e-4 has a total count printout, but First margin < 1e-4 and First margin < 1e-3 do not have?
+
 def _format_rate(rate: float) -> str:
     return f"{rate * 100:.2f}%"
 
@@ -31,7 +33,7 @@ def _build_args() -> argparse.Namespace:
         eval_train_batch_size=None,
         eval_val_batch_size=None,
         eval_test_batch_size=None,
-        max_samples_per_split=None,
+        max_samples_per_split=100,
     )
     return _merge_args_with_config(init_args, cfg)
 
@@ -92,12 +94,27 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
     topk_miss_diff_sum = [0.0 for _ in range(k_max - 1)]
     topk_miss_diff_count = [0 for _ in range(k_max - 1)]
     small_top12_gap_count = 0
-    very_small_top12_gap_count = 0
+    first_margin_thresholds = (("1e-4", 1e-4), ("1e-3", 1e-3))
+    first_margin_stats = {
+        label: {
+            "total": 0,
+            "top1_match": 0,
+            "top1_mismatch": 0,
+            "top8_contains": 0,
+            "top8_miss": 0,
+        }
+        for label, _ in first_margin_thresholds
+    }
+    large_first_margin_outside_top8_count = 0
+    large_first_margin_outside_top8_contains = 0
+    large_first_margin_outside_top8_miss = 0
+    large_first_margin_outside_top8_top1_match = 0
+    large_first_margin_outside_top8_top1_mismatch = 0
     top12_gap_counts = {
-        "selector_top1_match": {"lt1e4": 0, "lt1e6": 0},
-        "selector_top1_mismatch": {"lt1e4": 0, "lt1e6": 0},
-        "selector_top8_contains": {"lt1e4": 0, "lt1e6": 0},
-        "selector_top8_misses": {"lt1e4": 0, "lt1e6": 0},
+        "selector_top1_match": 0,
+        "selector_top1_mismatch": 0,
+        "selector_top8_contains": 0,
+        "selector_top8_misses": 0,
     }
 
     def _accumulate_difficulty(
@@ -145,16 +162,21 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
             )
             masked_true_scores = true_scores.masked_fill(~candidate_mask, -1e9)
 
-            best_scores, best_indices = masked_true_scores.max(dim=-1)
+            best_scores = masked_true_scores.max(dim=-1).values
+            best_scores_unsqueezed = best_scores.unsqueeze(-1)
             k_top = min(k_max, true_scores.size(1))
 
             holo_top1_idx = holo_logits.argmax(dim=-1)
             selector_topk_idx = selector_logits.topk(k_top, dim=-1).indices
             selector_top1_idx = selector_topk_idx[:, 0]
 
-            selector_top1_match = selector_top1_idx == best_indices
-            selector_topk_contains_best = (selector_topk_idx == best_indices.unsqueeze(-1)).any(dim=-1)
-            holo_top1_match = holo_top1_idx == best_indices
+            selector_top1_scores = masked_true_scores.gather(-1, selector_top1_idx.unsqueeze(-1)).squeeze(-1)
+            selector_topk_scores = masked_true_scores.gather(-1, selector_topk_idx)
+            holo_top1_scores = masked_true_scores.gather(-1, holo_top1_idx.unsqueeze(-1)).squeeze(-1)
+
+            selector_top1_match = selector_top1_scores == best_scores
+            selector_topk_contains_best = (selector_topk_scores == best_scores_unsqueezed).any(dim=-1)
+            holo_top1_match = holo_top1_scores == best_scores
 
             consistency_count += selector_top1_match.float().sum().item()
             consistency_correct += (selector_top1_match & holo_top1_match).float().sum().item()
@@ -167,13 +189,68 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
             exploration_count += exploration_mask.float().sum().item()
             exploration_correct += (exploration_mask & holo_top1_match).float().sum().item()
 
+            best_norm = best_scores.clamp_min(1e-8)
+            if masked_true_scores.size(1) > 1:
+                sorted_true_scores, _ = masked_true_scores.sort(dim=1, descending=True)
+                full_score_diffs = (sorted_true_scores[:, :-1] - sorted_true_scores[:, 1:]) / best_norm.unsqueeze(-1)
+                valid_full_margin_mask = (
+                    torch.arange(full_score_diffs.size(1), device=device).unsqueeze(0)
+                    < (num_candidates - 1).unsqueeze(1)
+                )
+                positive_margin_mask = (full_score_diffs > 0) & valid_full_margin_mask
+                margin_indices = (
+                    torch.arange(full_score_diffs.size(1), device=device)
+                    .unsqueeze(0)
+                    .expand_as(full_score_diffs)
+                )
+                first_margin_idx = torch.where(
+                    positive_margin_mask,
+                    margin_indices,
+                    torch.full_like(margin_indices, full_score_diffs.size(1)),
+                ).min(dim=1).values
+                has_first_margin = first_margin_idx < full_score_diffs.size(1)
+                first_margin_values = torch.zeros_like(best_scores)
+                if has_first_margin.any():
+                    margin_rows = has_first_margin.nonzero(as_tuple=False).squeeze(-1)
+                    chosen_idx = first_margin_idx[margin_rows].long()
+                    first_margin_values[margin_rows] = full_score_diffs[margin_rows, chosen_idx]
+
+                for label, threshold in first_margin_thresholds:
+                    margin_mask = has_first_margin & (first_margin_values < threshold)
+                    if margin_mask.any():
+                        stats = first_margin_stats[label]
+                        stats["total"] += int(margin_mask.sum().item())
+                        stats["top1_match"] += int((margin_mask & selector_top1_match).sum().item())
+                        stats["top1_mismatch"] += int((margin_mask & ~selector_top1_match).sum().item())
+                        stats["top8_contains"] += int(
+                            (margin_mask & selector_topk_contains_best).sum().item()
+                        )
+                        stats["top8_miss"] += int((margin_mask & ~selector_topk_contains_best).sum().item())
+
+                first_margin_outside_top8_mask = has_first_margin & (first_margin_idx >= (k_max - 1))
+                if first_margin_outside_top8_mask.any():
+                    margin_mask = first_margin_outside_top8_mask
+                    margin_mask_count = int(margin_mask.sum().item())
+                    large_first_margin_outside_top8_count += margin_mask_count
+                    large_first_margin_outside_top8_contains += int(
+                        (margin_mask & selector_topk_contains_best).sum().item()
+                    )
+                    large_first_margin_outside_top8_miss += int(
+                        (margin_mask & ~selector_topk_contains_best).sum().item()
+                    )
+                    large_first_margin_outside_top8_top1_match += int(
+                        (margin_mask & selector_top1_match).sum().item()
+                    )
+                    large_first_margin_outside_top8_top1_mismatch += int(
+                        (margin_mask & ~selector_top1_match).sum().item()
+                    )
+
             if k_top > 1:
                 gt_top_values = masked_true_scores.topk(k_top, dim=-1).values
                 valid_diff_mask = num_candidates.unsqueeze(1) > (
                     torch.arange(k_top - 1, device=device) + 1
                 )
-                best_norm = best_scores.clamp_min(1e-8).unsqueeze(-1)
-                gt_diffs = (gt_top_values[:, :-1] - gt_top_values[:, 1:]) / best_norm
+                gt_diffs = (gt_top_values[:, :-1] - gt_top_values[:, 1:]) / best_norm.unsqueeze(-1)
 
                 _accumulate_difficulty(
                     gt_diffs,
@@ -210,16 +287,11 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
                     small_gap_mask = top12_valid & (top12_diffs < 1e-4)
                     if small_gap_mask.any():
                         small_top12_gap_count += int(small_gap_mask.sum().item())
-                    very_small_gap_mask = top12_valid & (top12_diffs < 1e-6)
-                    if very_small_gap_mask.any():
-                        very_small_top12_gap_count += int(very_small_gap_mask.sum().item())
 
                     def _update_gap_counts(group_mask, key: str) -> None:
                         valid_group = top12_valid & group_mask
                         if valid_group.any():
-                            group_diffs = top12_diffs[valid_group]
-                            top12_gap_counts[key]["lt1e4"] += int((group_diffs < 1e-4).sum().item())
-                            top12_gap_counts[key]["lt1e6"] += int((group_diffs < 1e-6).sum().item())
+                            top12_gap_counts[key] += int((top12_diffs[valid_group] < 1e-4).sum().item())
 
                     _update_gap_counts(selector_top1_match, "selector_top1_match")
                     _update_gap_counts(~selector_top1_match, "selector_top1_mismatch")
@@ -235,6 +307,77 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
         return [
             (accum_sum[i] / accum_count[i]) if accum_count[i] > 0 else 0.0 for i in range(k_max - 1)
         ]
+
+    def _build_first_margin_metrics(stats: Dict[str, int]) -> Dict[str, object]:
+        top1_total = stats["top1_match"] + stats["top1_mismatch"]
+        top8_total = stats["top8_contains"] + stats["top8_miss"]
+        return {
+            "total": stats["total"],
+            "selector_top1": {
+                "match": {
+                    "count": stats["top1_match"],
+                    "rate": _compute_rates(stats["top1_match"], top1_total),
+                },
+                "mismatch": {
+                    "count": stats["top1_mismatch"],
+                    "rate": _compute_rates(stats["top1_mismatch"], top1_total),
+                },
+            },
+            "selector_top8": {
+                "contains": {
+                    "count": stats["top8_contains"],
+                    "rate": _compute_rates(stats["top8_contains"], top8_total),
+                },
+                "misses": {
+                    "count": stats["top8_miss"],
+                    "rate": _compute_rates(stats["top8_miss"], top8_total),
+                },
+            },
+        }
+
+    outside_top8_first_margin_total = (
+        large_first_margin_outside_top8_contains + large_first_margin_outside_top8_miss
+    )
+    outside_top8_first_margin_top1_total = (
+        large_first_margin_outside_top8_top1_match + large_first_margin_outside_top8_top1_mismatch
+    )
+    first_margin_metrics = {
+        "thresholds": {
+            label: _build_first_margin_metrics(stats) for label, stats in first_margin_stats.items()
+        },
+        "threshold_order": [label for label, _ in first_margin_thresholds],
+        "outside_top8": {
+            "total": large_first_margin_outside_top8_count,
+            "selector_top1": {
+                "match": {
+                    "count": large_first_margin_outside_top8_top1_match,
+                    "rate": _compute_rates(
+                        large_first_margin_outside_top8_top1_match, outside_top8_first_margin_top1_total
+                    ),
+                },
+                "mismatch": {
+                    "count": large_first_margin_outside_top8_top1_mismatch,
+                    "rate": _compute_rates(
+                        large_first_margin_outside_top8_top1_mismatch, outside_top8_first_margin_top1_total
+                    ),
+                },
+            },
+            "selector_top8": {
+                "contains": {
+                    "count": large_first_margin_outside_top8_contains,
+                    "rate": _compute_rates(
+                        large_first_margin_outside_top8_contains, outside_top8_first_margin_total
+                    ),
+                },
+                "misses": {
+                    "count": large_first_margin_outside_top8_miss,
+                    "rate": _compute_rates(
+                        large_first_margin_outside_top8_miss, outside_top8_first_margin_total
+                    ),
+                },
+            },
+        },
+    }
 
     return {
         "holo_consistency": {
@@ -260,8 +403,10 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
             },
         },
         "small_top12_gap_count": small_top12_gap_count,
-        "very_small_top12_gap_count": very_small_top12_gap_count,
+        "small_first_margin_count": first_margin_stats["1e-4"]["total"],
+        "large_first_margin_outside_top8_count": large_first_margin_outside_top8_count,
         "top12_gap_counts": top12_gap_counts,
+        "first_margin": first_margin_metrics,
         "samples": total_graphs,
     }
 
@@ -272,13 +417,31 @@ def _print_results(split: str, metrics: Dict[str, object], duration: float) -> N
     exploration = metrics["holo_exploration"]
     difficulty = metrics["difficulty"]
     small_gap_count = int(metrics["small_top12_gap_count"])
-    very_small_gap_count = int(metrics["very_small_top12_gap_count"])
     top12_gap_counts = metrics["top12_gap_counts"]
+    first_margin = metrics["first_margin"]
+    first_margin_by_threshold = first_margin["thresholds"]
+    first_margin_order = first_margin.get("threshold_order", tuple(first_margin_by_threshold.keys()))
+    outside_top8_first_margin = first_margin["outside_top8"]
+    outside_top8_first_margin_top1 = outside_top8_first_margin["selector_top1"]
 
     def _fmt_gap(key: str) -> str:
-        return (
-            f"<1e-4: {top12_gap_counts[key]['lt1e4']}, "
-            f"<1e-6: {top12_gap_counts[key]['lt1e6']}"
+        return f"<1e-4: {top12_gap_counts[key]}"
+
+    def _print_first_margin_stats(label: str, stats: Dict[str, object]) -> None:
+        print(
+            f"First margin normalized diff < {label} -> "
+            f"total: {stats['total']}, "
+            f"top1 match: {stats['selector_top1']['match']['count']} "
+            f"({_format_rate(stats['selector_top1']['match']['rate'])}), "
+            f"top1 mismatch: {stats['selector_top1']['mismatch']['count']} "
+            f"({_format_rate(stats['selector_top1']['mismatch']['rate'])})"
+        )
+        print(
+            f"First margin < {label} by selector top8 coverage -> "
+            f"contains: {stats['selector_top8']['contains']['count']} "
+            f"({_format_rate(stats['selector_top8']['contains']['rate'])}), "
+            f"misses: {stats['selector_top8']['misses']['count']} "
+            f"({_format_rate(stats['selector_top8']['misses']['rate'])})"
         )
 
     print_dash_str(f"{split.upper()} results")
@@ -309,8 +472,21 @@ def _print_results(split: str, metrics: Dict[str, object], duration: float) -> N
         f"top8 contains: {_fmt_gap('selector_top8_contains')}, "
         f"top8 misses: {_fmt_gap('selector_top8_misses')}"
     )
+    for label in first_margin_order:
+        _print_first_margin_stats(label, first_margin_by_threshold[label])
+    print(
+        "First margin outside top8 -> "
+        f"{outside_top8_first_margin['total']} samples | "
+        f"top1 match: {outside_top8_first_margin_top1['match']['count']} "
+        f"({_format_rate(outside_top8_first_margin_top1['match']['rate'])}), "
+        f"top1 mismatch: {outside_top8_first_margin_top1['mismatch']['count']} "
+        f"({_format_rate(outside_top8_first_margin_top1['mismatch']['rate'])}) | "
+        f"top8 contains: {outside_top8_first_margin['selector_top8']['contains']['count']} "
+        f"({_format_rate(outside_top8_first_margin['selector_top8']['contains']['rate'])}), "
+        f"top8 misses: {outside_top8_first_margin['selector_top8']['misses']['count']} "
+        f"({_format_rate(outside_top8_first_margin['selector_top8']['misses']['rate'])})"
+    )
     print(f"Top1 vs top2 normalized diff < 1e-4: {small_gap_count} samples")
-    print(f"Top1 vs top2 normalized diff < 1e-6: {very_small_gap_count} samples")
     print(f"Split time: {duration:.2f}s")
 
 

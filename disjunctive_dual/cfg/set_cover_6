@@ -26,3 +26,4 @@ eval_every: 10000
 save_every: 10000
 print_every: 10000
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+use_set_transformer: true
