@@ -1,9 +1,6 @@
 # Src
 https://github.com/ds4dm/learn2branch/tree/master
 
-# Modification
-Add a global variable ```SMALL_TOP12_GAP``` in ```02_generate_samples.py``` to control the distinguishability of samples in the dataset.
-
 # SCIP solver
 
 Set-up a desired installation path for SCIP / SoPlex (e.g., `/opt/scip`):
