@@ -21,6 +21,8 @@ from utils import (
     load_checkpoint,
     print_dash_str
 )
+# TODO: try different ltr losses?
+from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2
 
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
@@ -134,6 +136,9 @@ def train(
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                candidates=batch.candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
             )
 
             if score_th < float("inf"):
@@ -144,14 +149,30 @@ def train(
                 batch = batch[select_indices]
                 if len(logits) == 0:
                     continue
-            else:
-                # Index the results by the candidates, and split and pad them
-                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
 
             if loss_option == "classification":
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
                 loss = F.cross_entropy(logits, batch.candidate_choices)
             elif loss_option == "regression":
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
                 loss = F.mse_loss(logits, batch.candidate_scores)
+            elif loss_option == "ranking":
+                # Index the results by the candidates, and split and pad them
+                logits = pad_tensor(logits[batch.candidates], batch.nb_candidates,
+                                    pad_value=0)
+                loss_fn = LambdaNDCGLoss1()
+                padded_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates, 
+                                           pad_value=0)
+                loss = loss_fn(logits, padded_scores, batch.nb_candidates)
+                nan_mask = torch.isnan(loss)
+                if nan_mask.any():
+                    nan_indices = nan_mask.nonzero(as_tuple=False).flatten()
+                    print(f"NaN ranking loss at indices {nan_indices.tolist()}")
+                    print(f"logits: {logits[nan_indices].detach().cpu()}")
+                    print(f"padded_scores: {padded_scores[nan_indices].detach().cpu()}")
+                loss = loss.mean()
             else:
                 raise ValueError(f"Unsupported loss option: {loss_option}")
 
@@ -227,6 +248,9 @@ def evaluate(policy, data_loader, device, writer, num_gradient_steps):
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                candidates=batch.candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
             )
             # Index the results by the candidates, and split and pad them
             logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
@@ -290,14 +314,14 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train the MILP branching policy.")
     parser.add_argument("--dataset", type=str, default="set_cover", help="Dataset key.")
     parser.add_argument("--cfg_idx", type=int, default=0, help="Configuration index.")
-    parser.add_argument("--config_root", type=str, default="./cfg", help="Directory containing configuration files.")
+    parser.add_argument("--config_root", type=str, default="./disjunctive_dual/cfg", help="Directory containing configuration files.")
     parser.add_argument("--model_suffix", type=str, default="", help="Optional suffix appended to model/log directories.")
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.")
     parser.add_argument("--resume_model_dir", type=str, default="", help="Directory containing checkpoints to resume from.")
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=1000,
+        default=10000,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
@@ -309,7 +333,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--print_every",
         type=int,
-        default=1000,
+        default=10000,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     return parser.parse_args(argv)
@@ -350,7 +374,9 @@ def main(argv=None):
     policy = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
     optimizer = get_optimizer(args, policy)
 
-    base_model_dir = Path(getattr(args, "model_dir", "./models"))
+    base_model_dir = Path(getattr(args, "model_dir", "./disjunctive_dual/models"))
+    if getattr(args, "model", None):
+        base_model_dir = base_model_dir / args.model
     base_log_dir = Path(getattr(args, "log_dir", "./logs"))
     model_id = getattr(args, "model_id", None)
     if model_id:

@@ -44,6 +44,9 @@ def evaluate(policy, data_loader, device, stats_filename):
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                candidates=batch.candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
             )
             # Index the results by the candidates, and split and pad them
             logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
@@ -110,7 +113,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Eval the MILP branching policy.")
     parser.add_argument("--dataset", type=str, default="set_cover", help="Dataset key.")
     parser.add_argument("--cfg_idx", type=int, default=0, help="Configuration index.")
-    parser.add_argument("--config_root", type=str, default="./cfg", help="Directory containing configuration files.")
+    parser.add_argument("--config_root", type=str, default="./disjunctive_dual/cfg", help="Directory containing configuration files.")
     parser.add_argument("--model_suffix", type=str, default="", help="Optional suffix appended to model/log directories.")
     parser.add_argument("--parent_test_stats_dir", type=str, default="data/results_summary/", help="Directory to store evaluation statistics.")
     parser.add_argument(
@@ -180,7 +183,9 @@ def main(argv=None):
     policy = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
     print(f"Number of parameters: {sum(p.numel() for p in policy.parameters())}")
     
-    base_model_dir = Path(getattr(args, "model_dir", "./models"))
+    base_model_dir = Path(getattr(args, "model_dir", "./disjunctive_dual/models"))
+    if getattr(args, "model", None):
+        base_model_dir = base_model_dir / args.model
     model_id = getattr(args, "model_id", None)
     if model_id:
         base_model_dir = base_model_dir / model_id

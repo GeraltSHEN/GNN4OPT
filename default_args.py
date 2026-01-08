@@ -1,87 +1,68 @@
 import argparse
 import sys
+from pathlib import Path
+from typing import Optional
 
 import yaml
 
 
-def get_default_args(dataset):
-    defaults = {}
-    # logging related parameters
-    defaults["config_root"] = "./cfg"
-    defaults["resume_model_dir"] = ""
-    defaults["model_suffix"] = ""
-    defaults["model_dir"] = "./models"
-    defaults["log_dir"] = "./logs"
-    # dataset related parameters
-    # layers related parameters
-    defaults["model"] = "holo" # gcn; holo
-    hidden_channels = 64
-    defaults["hidden_channels"] = hidden_channels
-    defaults["num_layers"] = 2
-    defaults["dropout"] = 0.0
-    defaults["n_breakings"] = 8  # for holo
-    """This corresponds to the f_t in the paper"""
-    defaults["symmetry_breaking_model"] = "power_method"  # power_method; gnn
-    defaults["num_heads"] = 0
-    defaults["isab_num_inds"] = None
-    defaults["power"] = 2
-    # training related parameters
-    defaults["seed"] = 42
-    defaults["epochs"] = 2
-    defaults["lr"] = 1e-3
-    defaults["batch_size"] = 32
-    defaults["weight_decay"] = 5e-4
-    defaults["out_dim"] = hidden_channels
-    defaults["loss_option"] = "classification"
-    defaults["resume"] = False
+BASE_DEFAULTS = {
+    "max_samples_per_split": 128,
+    "config_root": "./disjunctive_dual/cfg",
+    "resume_model_dir": "",
+    "model_suffix": "",
+    "model_dir": "./disjunctive_dual/models",
+    "log_dir": "./disjunctive_dual/logs",
+    # model options
+    "model": "raw",  # raw; holo
+    "hidden_channels": 64,
+    "num_layers": 2,
+    "n_breakings": 8,
+    "num_heads": 1,
+    "isab_num_inds": 50,
+    "sym_break_layers": 2,
+    "mp_layers": 2,
+    "use_set_transformer": True,
+    "breaking_selector_model_path": None,
+    "edge_nfeats": 1,
+    "binarize_edge_features": False,
+    "file_pattern": "sample_*.pkl",
+    # training options
+    "seed": 42,
+    "epochs": 1,
+    "lr": 1e-3,
+    "batch_size": 16,
+    "weight_decay": 5e-4,
+    "loss_option": "ranking",
+    "resume": False,
+    "eval_every": 10000,
+    "save_every": 10000,
+    "print_every": 10000,
+}
 
-    if dataset == "set_cover":
-        # logging related parameters
-        defaults["eval_every"] = 1000
-        defaults["save_every"] = 10000
-        defaults["print_every"] = 1000
-        # dataset related parameters
-        defaults["dataset_path"] = "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d"
-        defaults["r"] = 1
-        # layers related parameters
-        # training related parameters
-    elif dataset == "cauctions":
-        # logging related parameters
-        defaults["eval_every"] = 1000
-        defaults["save_every"] = 10000
-        defaults["print_every"] = 1000
-        # dataset related parameters
-        defaults["dataset_path"] = "legacy_code_generator/data/samples/cauctions/100_500"
-        defaults["r"] = 1
-        # layers related parameters
-        # training related parameters
-    elif dataset == "facilities":
-        # logging related parameters
-        defaults["eval_every"] = 1000
-        defaults["save_every"] = 10000
-        defaults["print_every"] = 1000
-        # dataset related parameters
-        defaults["dataset_path"] = "legacy_code_generator/data/samples/facilities/100_100_5"
-        defaults["r"] = 1
-        # layers related parameters
-        # training related parameters
-    elif dataset == "indset":
-        # logging related parameters
-        defaults["eval_every"] = 1000
-        defaults["save_every"] = 10000
-        defaults["print_every"] = 1000
-        # dataset related parameters
-        defaults["dataset_path"] = "legacy_code_generator/data/samples/indset/500_4"
-        defaults["r"] = 1
-        # layers related parameters
-        # training related parameters
-    else:
-        raise NotImplementedError
+DATASET_DEFAULTS = {
+    "set_cover": {
+        "dataset_path": "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d",
+    }
+}
 
-    with open(f"./cfg/{dataset}_0", "w") as yaml_file:
-        yaml.dump(defaults, yaml_file, default_flow_style=False)
 
-    print(f"Default Configuration file saved to ./cfg/{dataset}_0")
+def get_default_args(dataset: str):
+    if dataset not in DATASET_DEFAULTS:
+        raise NotImplementedError(f"Unsupported dataset '{dataset}'.")
+
+    defaults = {**BASE_DEFAULTS, **DATASET_DEFAULTS[dataset]}
+    return defaults
+
+
+def write_config(defaults, config_root: Path, dataset: str, cfg_idx: int) -> Path:
+    config_root.mkdir(parents=True, exist_ok=True)
+    defaults["config_root"] = str(config_root)
+    cfg_path = config_root / f"{dataset}_{cfg_idx}"
+    with open(cfg_path, "w") as yaml_file:
+        yaml.safe_dump(defaults, yaml_file, default_flow_style=False, sort_keys=False)
+    print(f"Default Configuration file saved to {cfg_path}")
+    return cfg_path
 
 
 def parse_args(argv=None):
@@ -90,15 +71,24 @@ def parse_args(argv=None):
     parser.add_argument(
         "--dataset",
         required=True,
-        choices=["set_cover", "cauctions", "facilities", "indset"],
-        help="Dataset name for which to generate defaults."
+        choices=sorted(DATASET_DEFAULTS.keys()),
+        help="Dataset name for which to generate defaults.",
+    )
+    parser.add_argument(
+        "--cfg_idx",
+        type=int,
+        default=0,
+        help="Configuration index appended to the generated file name.",
     )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    get_default_args(args.dataset)
+    defaults = get_default_args(
+        args.dataset,
+    )
+    write_config(defaults, Path(defaults['config_root']), args.dataset, args.cfg_idx)
 
 
 if __name__ == "__main__":

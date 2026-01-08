@@ -1,16 +1,48 @@
 from collections.abc import Sequence
+from contextlib import contextmanager
 from typing import Optional
+import time
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
-from torch_geometric.nn import GCNConv
 from torch_geometric.nn import MessagePassing
-from torch_geometric.nn.conv.gcn_conv import gcn_norm
-from torch_sparse import SparseTensor
 
-# TODO: add dropout option to models
+PERFORMANCE_DEBUG = False  # Toggle to print timing and memory information
+
+
+@contextmanager
+def _perf_timer(label: str):
+    if not PERFORMANCE_DEBUG:
+        yield
+        return
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start)
+        print(f"[Perf] {label}: {elapsed_ms:.3f} s")
+
+
+def _reset_peak_memory(device: torch.device):
+    if not PERFORMANCE_DEBUG:
+        return None
+    if torch.cuda.is_available() and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+        return device
+    if PERFORMANCE_DEBUG:
+        print("[Perf] SetCoverHolo peak memory: skipped (CUDA not available or tensor on CPU).")
+    return None
+
+
+def _log_peak_memory(device: Optional[torch.device]):
+    if device is None or not PERFORMANCE_DEBUG:
+        return
+    peak_bytes = torch.cuda.max_memory_allocated(device)
+    print(
+        f"[Perf] SetCoverHolo peak CUDA memory on {device}: {peak_bytes / (1024 ** 2):.2f} MB"
+    )
+
 
 class MultiheadAttentionBlock(nn.Module):
     """Multihead attention block mirroring Set Transformer MAB."""
@@ -29,16 +61,27 @@ class MultiheadAttentionBlock(nn.Module):
             embed_dim=dim_V, num_heads=num_heads, batch_first=True
         )
 
-    def forward(self, Q, K):
+    def forward(self, Q, K, key_padding_mask):
         Q = self.fc_q(Q)
         K_proj = self.fc_k(K)
         V = self.fc_v(K)
-        attn_out, _ = self.attn(Q, K_proj, V, need_weights=False)
+        attn_out, _ = self.attn(Q, K_proj, V, need_weights=False, 
+                                key_padding_mask=key_padding_mask)
         O = Q + attn_out
         O = O if getattr(self, "ln0", None) is None else self.ln0(O)
         O = O + F.relu(self.fc_o(O))
         O = O if getattr(self, "ln1", None) is None else self.ln1(O)
         return O
+
+
+class SetAttentionBlock(nn.Module):
+    """Set Transformer SAB block implemented with torch MultiheadAttention."""
+    def __init__(self, dim_in, dim_out, num_heads, ln=False):
+        super().__init__()
+        self.mab = MultiheadAttentionBlock(dim_in, dim_in, dim_out, num_heads, ln=ln)
+
+    def forward(self, X, key_padding_mask=None):
+        return self.mab(X, X, key_padding_mask)
 
 
 class InducedSetAttentionBlock(nn.Module):
@@ -53,163 +96,83 @@ class InducedSetAttentionBlock(nn.Module):
         self.mab0 = MultiheadAttentionBlock(dim_out, dim_in, dim_out, num_heads, ln=ln)
         self.mab1 = MultiheadAttentionBlock(dim_in, dim_out, dim_out, num_heads, ln=ln)
 
-    def forward(self, X):
+    def forward(self, X, key_padding_mask):
         # X: (batch, n, dim_in)
         batch_size = X.size(0)
         inducing = self.inducing_points.repeat(batch_size, 1, 1)
-        H = self.mab0(inducing, X)
-        return self.mab1(X, H)
+        H = self.mab0(inducing, X, key_padding_mask)
+        return self.mab1(X, H, key_padding_mask=None)
 
 
-class PowerMethod(nn.Module):
-    """Symmetry breaking model using the power method."""
+class PoolingMultiheadAttention(nn.Module):
+    """Set Transformer PMA block implemented with torch MultiheadAttention."""
 
-    def __init__(self, k, out_dim):
+    def __init__(self, dim, num_heads, num_seeds, ln=False):
         super().__init__()
-        self.k = k
-        self.out_dim = out_dim
+        self.S = nn.Parameter(torch.Tensor(1, num_seeds, dim))
+        nn.init.xavier_uniform_(self.S)
+        self.mab = MultiheadAttentionBlock(dim, dim, dim, num_heads, ln=ln)
+    
+    def forward(self, X, key_padding_mask):
+        # X: (batch, n, dim)
+        batch_size = X.size(0)
+        return self.mab(self.S.repeat(batch_size, 1, 1), X, key_padding_mask)
 
-    def forward(self, v0, adj_t):
-        v = v0
-        for _ in range(self.k):
-            v = adj_t.matmul(v)
-        return v
 
+class StackedBipartiteGNN(torch.nn.Module):
+    """Stack of BipartiteGraphConvolution layers for constraint-variable message passing."""
 
-class SymmetryBreakingGNN(torch.nn.Module):
-    def __init__(self, in_channels, hidden_channels):
+    def __init__(self, hidden_channels, edge_nfeats=1, n_layers=2):
         super().__init__()
-        self.conv1 = GCNConv(
-            in_channels, hidden_channels, normalize=False
-        )  # Note: This assumes the adj matrix is normalized
-        self.conv2 = GCNConv(hidden_channels, hidden_channels, normalize=False)
         self.out_dim = hidden_channels
+        self.edge_nfeats = edge_nfeats
+        self.n_layers = n_layers
 
-    def forward(self, v0, adj_t):
-        x = self.conv1(v0, adj_t).relu()
-        return self.conv2(x, adj_t)
-
-
-class ProductTupleEncoder(torch.nn.Module):
-    """A baseline tuple encoder that takes the element-wise product of node embeddings."""
-
-    def __init__(self, emb_size):
-        super().__init__()
-        self.emb_size = emb_size
-
-    def forward(self, X, adj_t, tuples_coo, **kwargs):
-        return X[tuples_coo].prod(dim=0)
-
-
-class Holo(torch.nn.Module):
-    """The Holo-GNN tuple encoder using symmetry breaking."""
-
-    def __init__(self, *, n_breakings: int, symmetry_breaking_model, 
-                 num_heads: int = 0, isab_num_inds: Optional[int] = None):
-        super().__init__()
-        self.n_breakings = n_breakings
-        self.symmetry_breaking_model = symmetry_breaking_model
-        self.emb_size = self.symmetry_breaking_model.out_dim
-        if num_heads < 0:
-            raise ValueError("num_heads must be >= 0.")
-        self.num_heads = num_heads
-
-        self.ln = torch.nn.LayerNorm(symmetry_breaking_model.out_dim)
-
-        if num_heads > 0:
-            if self.emb_size % num_heads != 0:
-                raise ValueError(
-                    f"symmetry_breaking_model.out_dim ({self.emb_size}) must be divisible by num_heads ({num_heads})."
+        if n_layers == 1:
+            self.conv_v_to_c = BipartiteGraphConvolution(
+                emb_size=hidden_channels, edge_nfeats=edge_nfeats
+            )
+            self.conv_c_to_v = BipartiteGraphConvolution(
+                emb_size=hidden_channels, edge_nfeats=edge_nfeats
+            )
+        else:
+            for i in range(n_layers):
+                setattr(
+                    self,
+                    f"conv_{i}_v_to_c",
+                    BipartiteGraphConvolution(
+                        emb_size=hidden_channels, edge_nfeats=edge_nfeats
+                    ),
                 )
-            num_inds = (
-                isab_num_inds if isab_num_inds is not None else max(1, n_breakings)
+                setattr(
+                    self,
+                    f"conv_{i}_c_to_v",
+                    BipartiteGraphConvolution(
+                        emb_size=hidden_channels, edge_nfeats=edge_nfeats
+                    ),
+                )
+
+    def forward(self, constraint_features, edge_indices, edge_features, variable_features):
+        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+
+        if self.n_layers == 1:
+            constraint_features = self.conv_v_to_c(
+                variable_features, reversed_edge_indices, edge_features, constraint_features
             )
-            if num_inds <= 0:
-                raise ValueError("isab_num_inds must be >= 1 when attention is enabled.")
-            self.cross_tuple_block = InducedSetAttentionBlock(
-                dim_in=self.emb_size,
-                dim_out=self.emb_size,
-                num_heads=num_heads,
-                num_inds=num_inds,
-                ln=True,
-            )
-        else:
-            print("num_heads <= 0.")
-            print("Warning: Holo instantiated without attention module.")
-            self.cross_tuple_block = None
-
-    def tied_topk_indices(self, values, k, expansion=5):
-        """
-        >>> tied_topk_indices(torch.tensor([4,4,4,5,5]), 2, 2).sort()[0]
-        tensor([3, 4])
-        >>> tied_topk_indices(torch.tensor([4,1,4,5,5,1]), 3, 2).sort()[0]
-        tensor([0, 2, 3, 4])
-        """
-        num_values = values.numel()
-        if num_values < k:
-            raise ValueError("Need at least k values to select from.")
-
-        expansion = max(1, expansion)
-        max_expansion = max(expansion, (num_values + k - 1) // k)
-        current_expansion = expansion
-
-        while True:
-            top_n = min(num_values, current_expansion * k)
-            top_values, indices = torch.topk(values, top_n)
-            kth_value = top_values[k - 1]
-            extra = int((top_values[k:] == kth_value).sum().item())
-
-            if extra > 0 and top_n < num_values:
-                if current_expansion == max_expansion:
-                    return indices[: k + extra]
-                current_expansion = min(max_expansion, current_expansion * 2)
-                continue
-
-            return indices[: k + extra]
-
-    def get_nodes_to_break(self, adj_t, n_breakings=8):
-        node_degrees = adj_t.sum(-1)
-        return self.tied_topk_indices(values=node_degrees, k=n_breakings)
-
-    def forward(self, X, adj_t, tuples_coo, group_idx=None):
-        # X: (n, d)
-        break_node_indices = self.get_nodes_to_break(
-            adj_t, n_breakings=self.n_breakings
-        )
-
-        # break_node_indices: (t,)
-        one_hot_breakings = F.one_hot(break_node_indices, X.size(0)).unsqueeze(-1)
-        # one_hot_breakings: (t, n, 1)
-        # expand to holographic node representations
-        holo_repr = self.symmetry_breaking_model(
-            torch.cat(
-                (
-                    X.unsqueeze(0).repeat(one_hot_breakings.size(0), 1, 1),
-                    one_hot_breakings,
-                ),
-                dim=-1,
-            ),  # (t, n, d+1)
-            adj_t,
-        )  # (t, n, d+1), where n includes both movies and users
-        holo_repr = self.ln(holo_repr)
-        # holo_repr: (t, n, d+1=symmetry_breaking_model.out_dim)
-
-        # aggregate (elementwise multiplication) orders, r
-        set_of_link_repr = holo_repr[:, tuples_coo].prod(dim=1)  # (t, r, k, d+1) -> (t, k, d+1)
-        # set_of_link_repr: (t, k=n_tuples, d+1)
-
-        if self.cross_tuple_block is not None and set_of_link_repr.size(1) > 0:
-            set_of_link_repr = self.cross_tuple_block(set_of_link_repr)
-
-        # aggregate (average over) all views, t
-        if group_idx is not None:
-            link_repr = torch_scatter.scatter(
-                set_of_link_repr, group_idx, 0, reduce="mean"
+            variable_features = self.conv_c_to_v(
+                constraint_features, edge_indices, edge_features, variable_features
             )
         else:
-            link_repr = set_of_link_repr.mean(0, keepdim=True)  # (l=1, k, d+1)
-        # flatten to a list if multiple symmetry breakings groups are used
-        return link_repr.transpose(0, 1).flatten(1, 2)  # (k, (d+1)*l)
+            for i in range(self.n_layers):
+                conv_v_to_c = getattr(self, f"conv_{i}_v_to_c")
+                conv_c_to_v = getattr(self, f"conv_{i}_c_to_v")
+                constraint_features = constraint_features + conv_v_to_c(
+                    variable_features, reversed_edge_indices, edge_features, constraint_features
+                )
+                variable_features = variable_features + conv_c_to_v(
+                    constraint_features, edge_indices, edge_features, variable_features
+                )
+        return constraint_features, variable_features
 
 
 class BipartiteGraphConvolution(MessagePassing):
@@ -270,11 +233,11 @@ class GNNPolicy(nn.Module):
     """A wrapper module combining
     - an initial MLP to convert raw features to embeddings in common dimension,
     - a data encoder (BipartiteGraphConvolution) for MILP bipartite graphs, 
-    - a tuple encoder (Holo, or ProductTupleEncoder),
+    - a set-cover-specific module (SetCoverHolo)
     - a final MLP on the variable features for candidate choice/scoring
     """
     def __init__(self, emb_size, cons_nfeats, edge_nfeats, var_nfeats, output_size,
-                 n_layers, tuple_encoder, r=1):
+                 n_layers, holo):
         super().__init__()
 
         # CONSTRAINT EMBEDDING
@@ -302,114 +265,546 @@ class GNNPolicy(nn.Module):
         
         # DATA ENCODER
         self.n_layers = n_layers
-        if n_layers == 1:
-            self.conv_v_to_c = BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats)
-            self.conv_c_to_v = BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats)
-        else:
-            for i in range(n_layers):
-                setattr(self, f"conv_{i}_v_to_c", BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats))
-                setattr(self, f"conv_{i}_c_to_v", BipartiteGraphConvolution(emb_size=emb_size, edge_nfeats=edge_nfeats))
+        self.data_encoder = StackedBipartiteGNN(
+            hidden_channels=emb_size, edge_nfeats=edge_nfeats, n_layers=n_layers
+        )
         
         # TUPLE ENCODER
-        self.r = r
-        self.tuple_encoder = tuple_encoder
+        self.holo = holo
 
         # FINAL MLP
         self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(self.tuple_encoder.emb_size, emb_size),
+            torch.nn.Linear(self.holo.emb_size if self.holo is not None else emb_size, emb_size),
             torch.nn.ReLU(),
             torch.nn.Linear(emb_size, output_size, bias=False),
         )
 
-    def get_holo_input(
+    def forward(
         self,
-        variable_features,
         constraint_features,
         edge_indices,
-        reversed_edge_indices,
+        edge_features,
+        variable_features,
+        candidates=None,
+        n_constraints_per_graph=None,
+        n_variables_per_graph=None,
     ):
-        """
-        X: stacked node features (variable + constraint)
-        adj_t: homogeneous and unweighted adjacency matrix of the bipartite graph
-            make it symmetric to allow power method, i.e., adj_t^k X
-        tuples_coo: batched indices (r=1: node, r=2: edge, r=3: triplet, etc.) for the task
-            as the task's dataset is multi-graphs rather than a single graph, 
-            no CooSampler was used to sample sub-graphs to produce batches. 
-            Instead, PyG default data and loader produces batches.
-        """
-        n_variables = variable_features.size(0)
-        n_constraints = constraint_features.size(0)
-        X = torch.vstack((variable_features, constraint_features))
-
-        var_to_cons = reversed_edge_indices.clone()
-        var_to_cons[1] = var_to_cons[1] + n_variables
-        cons_to_var = edge_indices.clone()
-        cons_to_var[0] = cons_to_var[0] + n_variables
-        homogeneous_edge_index = torch.hstack((var_to_cons, cons_to_var))
-        adj_t = SparseTensor(
-                row=homogeneous_edge_index[0],
-                col=homogeneous_edge_index[1],
-                sparse_sizes=(n_variables + n_constraints, n_variables + n_constraints),
-            )
-        adj_t = gcn_norm(adj_t, add_self_loops=True)
-
-        if self.r == 1:
-            # tuples_coo is the variable indices, i.e., the first n_variables rows of X
-            tuples_coo = torch.arange(n_variables).unsqueeze(0)
-            # tuples_coo: (r=1, k=n_variables)
-        elif self.r == 2:
-            # tuples_coo is the reversed_edge_indices with offset
-            new_entity_index = []
-            reversed_relation_schema = ("variable", "constraint")
-            for entity, entity_index in zip(reversed_relation_schema, reversed_edge_indices):
-                offset = 0 if entity == "variable" else n_variables
-                new_entity_index.append(entity_index + offset)
-            tuples_coo = torch.vstack(new_entity_index)
-            # tuples_coo: (r=2, k=n_edges)
-            raise ValueError(f"r should be 1 for branching task")
-        else:
-            raise NotImplementedError(f"get_tuples_coo for `r={self.r}` not implemented yet.")
-
-        return X, adj_t, tuples_coo
-
-    def forward(
-        self, constraint_features, edge_indices, edge_features, variable_features
-    ):
-        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
-
         # 1. raw features to embeddings in common dimension
-        constraint_features = self.cons_embedding(constraint_features)
-        edge_features = self.edge_embedding(edge_features)
-        variable_features = self.var_embedding(variable_features)
+        with _perf_timer("GNNPolicy step 1: embed raw features"):
+            Y = self.cons_embedding(constraint_features)
+            edge_features = self.edge_embedding(edge_features)
+            X = self.var_embedding(variable_features)
 
-        # 2. two half convolutions
-        if self.n_layers == 1:
-            constraint_features = self.conv_v_to_c(
-                variable_features, reversed_edge_indices, edge_features, constraint_features
-            )
-            variable_features = self.conv_c_to_v(
-                constraint_features, edge_indices, edge_features, variable_features
-            )
-        else:
-            for i in range(self.n_layers):
-                conv_v_to_c = getattr(self, f"conv_{i}_v_to_c")
-                conv_c_to_v = getattr(self, f"conv_{i}_c_to_v")
-                constraint_features = constraint_features + conv_v_to_c(
-                    variable_features, reversed_edge_indices, edge_features, constraint_features
-                )
-                variable_features = variable_features + conv_c_to_v(
-                    constraint_features, edge_indices, edge_features, variable_features
-                )
+        # 2. constraint-variable message passing
+        with _perf_timer("GNNPolicy step 2: constraint-variable message passing"):
+            Y, X = self.data_encoder(Y, edge_indices, edge_features, X)
         
         # 3. break symmetry
-        X, adj_t, tuples_coo = self.get_holo_input(
-            variable_features,
-            constraint_features,
-            edge_indices,
-            reversed_edge_indices,
-        )
-        variable_features = self.tuple_encoder(X, adj_t, tuples_coo, group_idx=None)
+        if self.holo is not None:
+            with _perf_timer("GNNPolicy step 3: symmetry breaking / SetCoverHolo"):
+                X = self.holo(
+                    Y,
+                    X,
+                    constraint_features,
+                    edge_indices,
+                    edge_features,
+                    variable_features,
+                    candidates=candidates,
+                    n_constraints_per_graph=n_constraints_per_graph,
+                    n_variables_per_graph=n_variables_per_graph,
+                )
 
         # 4. transform variable features to strong branching decision
-        output = self.output_module(variable_features).squeeze(-1)
+        with _perf_timer("GNNPolicy step 4: output head"):
+            output = self.output_module(X).squeeze(-1)
         return output
+
+
+class SetCoverHolo(torch.nn.Module):
+    """
+    A Set-Cover-specific Holo-GNN tuple encoder using symmetry breaking.
+    1. oracle or heuristic (customized get_nodes_to_break method) to select n_breakings (n_branching) candidates, say t in total
+    
+    2. add one-hot encodings in the form of 2-element-set to nodes, i.e. 
+    Y:= {[Y, 0, 0], [Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
+    X:= {[X, 1_v, 0], [X, 0, 1_v]} in R^{2t * n_variables * (d+2)}
+    
+    3. r-gated constraint embeddings. The forward pass takes the original graph input, whose first constraint feature is the r-gate (extra constraint features may follow),
+    Y:= {[r * Y, 0, 0], [Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
+    The forward pass will take the original graph input, edge_index:=[constraint_indices, variable_indices] in R^{2 * n_edges},
+    for each v in n_breaking, find the constraint_indices_connected_to_v, and 
+    get revised r' by setting r[constraint_indices_connected_to_v] = 0
+    Y:= {[r * Y, 0, 0], [r' * Y, 0, 0]} in R^{2t * n_constraints * (d+2)}
+    
+    4. break symmetry. 
+    Y, X:= symmetry_breaking_model(Y, X, adj_t) 
+
+    5. Y go into set transformer and let constraint nodes talk to each other, problem channels also talk to each other
+    Y:= setTransformer(Y) in R^{2t * n_constraints * (d+2)} where n_constraints get mixed information from each other, sub-problems get mixed information from each other
+    
+    6. X and Y get updated through message passing, i.e. let constraint nodes talk to variable nodes
+    Y or X:= BipartiteGraphConvolution(X, edge_index, Y) in R^{2t * n_constraints or n_variables * (d+2)} for a few rounds
+    X:= setTransformer(X) in R^{t * n_variables * (d+2)} let sub-problems get mixed information by learned pooling
+    
+    7. X go into set transformer again, allowing breaking views to talk to each other, 
+    X:= setTransformer(X) in R^{n_variables * (d+2)}
+    """
+
+    def __init__(
+        self,
+        n_breakings: int,
+        breaking_selector_model,
+        symmetry_breaking_model,
+        num_heads: int = 0,
+        isab_num_inds: int = 0,
+        mp_layers: int = 1,
+        edge_nfeats: int = 1,
+        use_set_transformer: bool = True,
+    ):
+        super().__init__()
+
+        # select and break
+        self.n_breakings = n_breakings
+        self.breaking_selector_model = breaking_selector_model
+        if self.breaking_selector_model is not None:
+            for param in self.breaking_selector_model.parameters():
+                param.requires_grad = False
+            self.breaking_selector_model.eval()
+        self.symmetry_breaking_model = symmetry_breaking_model
+        self.emb_size = self.symmetry_breaking_model.out_dim
+        self.edge_nfeats = edge_nfeats
+        self.num_heads = num_heads
+        self.use_set_transformer = use_set_transformer
+        # self.ln = torch.nn.LayerNorm(self.emb_size)
+
+        # set transformer: constraint talks to constraint
+        if self.use_set_transformer and num_heads > 0:
+            if self.emb_size % num_heads != 0:
+                raise ValueError(
+                    f"symmetry_breaking_model.out_dim ({self.emb_size}) "
+                    f"must be divisible by num_heads ({num_heads})."
+                )
+            num_inds = isab_num_inds
+            if num_inds <= 0:
+                raise ValueError("isab_num_inds must be >= 1 when attention is enabled.")
+            self.constraint_set_block = InducedSetAttentionBlock(
+                dim_in=self.emb_size,
+                dim_out=self.emb_size,
+                num_heads=num_heads,
+                num_inds=num_inds,
+                ln=True,
+            )
+        else:
+            self.constraint_set_block = None
+
+        # GNN: constraint talks to variable
+        self.mp_layers = mp_layers
+        if self.use_set_transformer and self.mp_layers > 0:
+            self.constraint_variable_gnn = StackedBipartiteGNN(
+                hidden_channels=self.emb_size,
+                edge_nfeats=self.edge_nfeats,
+                n_layers=self.mp_layers,
+            )
+        else:
+            self.constraint_variable_gnn = None
+        
+        # set transformer: sub-problem talks to sub-problem (two dual LP)
+        self.constraint_sab = (
+            SetAttentionBlock(dim_in=self.emb_size, dim_out=self.emb_size, num_heads=1, ln=True)
+            if self.use_set_transformer
+            else None
+        )
+        # set transformer: sub-problems are mixed (primal aspect)
+        self.variable_problem_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
+        # set transformer: views are mixed (primal aspect)
+        self.variable_view_pma = PoolingMultiheadAttention(dim=self.emb_size, num_heads=1, num_seeds=1, ln=True)
+
+    def get_nodes_to_break(
+        self,
+        constraint_features,
+        variable_features,
+        edge_indices,
+        edge_features,
+        candidates=None,
+        n_variables_per_graph=None,
+    ):
+        """Select variable nodes to break using an external selector model
+        return (bsz, t) and (bsz, t) where indices at the second dim are 
+        local indices and global indices
+        """
+        k = self.n_breakings
+        with torch.no_grad():
+            scores = self.breaking_selector_model(
+                constraint_features, edge_indices, edge_features, variable_features
+            )
+        if n_variables_per_graph is None:
+            n_variables_per_graph = torch.tensor(
+                [variable_features.size(0)], device=scores.device, dtype=torch.long
+            )
+
+        variable_offsets = torch.cumsum(
+            torch.cat(
+                (
+                    torch.zeros(1, device=scores.device, dtype=torch.long),
+                    n_variables_per_graph[:-1],
+                )
+            ),
+            dim=0,
+        )
+
+        selected_local = []
+        selected_global = []
+        for offset, n_vars in zip(variable_offsets.tolist(), n_variables_per_graph.tolist()):
+            start = int(offset)
+            n_vars = int(n_vars)
+            end = start + n_vars
+
+            if candidates is not None:
+                mask = (candidates >= start) & (candidates < end)
+                graph_candidates = candidates[mask]
+                num_avail = graph_candidates.numel()
+                if num_avail < k:
+                    raise ValueError(f"No candidates available = {num_avail}, "
+                                     f"but requested to break k = {k} variables in the current graph.")
+                scores_local = scores[graph_candidates]
+                chosen_local = graph_candidates[torch.topk(scores_local, k=k).indices] - start
+                chosen_global = graph_candidates[torch.topk(scores_local, k=k).indices]
+            else:
+                scores_local = scores[start:end]
+                num_avail = scores_local.numel()
+                if num_avail < k:
+                    raise ValueError(f"Number of variables in the graph = {num_avail}, "
+                                     f"but requested to break k = {k} variables.")
+                chosen_local = torch.topk(scores_local, k=k).indices
+                chosen_global = torch.topk(scores_local, k=k).indices + start
+            selected_local.append(chosen_local)
+            selected_global.append(chosen_global)
+        return torch.stack(selected_local, dim=0), torch.stack(selected_global, dim=0)
+    
+    def revise_r(
+            self, r, edge_indices, branching_variable_indices):
+        """
+        r: base r gating column (n_constraints_total, 1)
+        edge_indices: (2, E)
+        branching_variable_indices: (t, bsz) where indices at the second dim 
+        must be global indices
+
+        Returns:
+        r_after_branching: (t, n_constraints_total, 1)
+            where r_after_branching[k] is r updated with branching_variable_indices[k] fixed to 1
+        """
+        constraint_indices, variable_indices = edge_indices
+        n_constraints_total = r.size(0)
+        device = r.device
+        dtype= r.dtype
+
+        t, bsz = branching_variable_indices.size(0), branching_variable_indices.size(1)
+        r_after_branching = r.unsqueeze(0).repeat(t, 1, 1) # (t, n_constraints_total, 1)
+
+        #  branching_variable_indices -> (t, bsz, 1)
+        #  variable_indices           -> (1, 1, E)
+        #  mask                       -> (t, bsz, E) -> (t, E)
+        mask = (branching_variable_indices.view(t, bsz, 1) == 
+                variable_indices.view(1, 1, -1)).any(dim=1).to(dtype)
+        # Scatter the mask
+        row_idx = constraint_indices.unsqueeze(0).expand_as(mask)
+        connected = torch.zeros((t, n_constraints_total), dtype=dtype, device=device)
+        connected.scatter_add_(1, row_idx, mask)
+        r_after_branching[connected > 0] = 0.0
+        return r_after_branching
+    
+
+    def remove_edges_via_r(self, r, edge_indices):
+        """
+        r: base r gating column (t, n_constraints_total, 1)
+            or r_after_branching: (t, n_constraints_total, 1)
+            Note: remember to repeat base r t times to make it in shape of (t, n_constraints_total, 1) in forward
+        edge_indices: (2, t * E) original edges repeated t times
+
+        Returns:
+        reduced_edge_indices: (2, E'_1 + E'_'2 + ... + E'_t)
+            for each view, the original E_l is reduced to E'_l in this manner:
+            when r_i = 0, all edges connected to node i are removed. 
+            Note that edge_indices[0] are constraint nodes and edge_indices[1] are variable nodes (correct?)
+        """
+        constraint_gate = r.squeeze(-1)  # (t, n_constraints_total)
+        flat_gate = constraint_gate.reshape(-1)  # (t * n_constraints_total,)
+
+        constraint_nodes = edge_indices[0]
+        edge_mask = flat_gate[constraint_nodes] > 0
+        reduced_edge_indices = edge_indices[:, edge_mask]
+        return reduced_edge_indices, edge_mask
+
+
+    def format_for_stacked_bipartite(self, Y, X, edge_indices, edge_features):
+        """
+        (t, n, d) nodes -> (t * n, d) nodes
+        (2, E) edge indices -> (2, t * E) edge indices
+        """
+        num_views, n_constraints, _ = Y.shape
+        _, n_variables, _ = X.shape
+
+        formatted_Y = Y.reshape(num_views * n_constraints, -1)
+        formatted_X = X.reshape(num_views * n_variables, -1)
+
+        constraint_offsets = torch.arange(num_views, device=Y.device).unsqueeze(1) * n_constraints
+        variable_offsets = torch.arange(num_views, device=Y.device).unsqueeze(1) * n_variables
+        constraint_edges = edge_indices[0].unsqueeze(0) + constraint_offsets
+        variable_edges = edge_indices[1].unsqueeze(0) + variable_offsets
+        formatted_edge_indices = torch.stack(
+            (constraint_edges.reshape(-1), variable_edges.reshape(-1)), dim=0
+        )
+        formatted_edge_features = (
+                edge_features.unsqueeze(0)
+                .expand(num_views, edge_features.size(0), -1)
+                .reshape(num_views * edge_features.size(0), -1)
+            )
+        shape_info = {"num_views": num_views, "n_constraints": n_constraints, "n_variables": n_variables}
+
+        return formatted_Y, formatted_X, formatted_edge_indices, formatted_edge_features, shape_info
+
+    def format_from_stacked_bipartite(self, Y, X, shape_info):
+        """
+        (t * n, d) nodes -> (t, n, d) nodes
+        edges are not changing over time so no need to format them back
+        """
+        num_views = shape_info["num_views"]
+        n_constraints = shape_info["n_constraints"]
+        n_variables = shape_info["n_variables"]
+        Y = Y.reshape(num_views, n_constraints, -1)
+        X = X.reshape(num_views, n_variables, -1)
+        return Y, X
+    
+    def format_for_batched_and_padded_nodes(self, nodes, n_per_graph):
+        """
+        nodes: (t, n_total, d)
+        n_per_graph: (num_graphs, ) sizes per graph
+
+        return
+        nodes: (t * num_graphs, n_max, d)
+        key_padding_mask: None if all graphs share the same size, otherwise
+            (t * num_graphs, n_max) where True marks padding to ignore in attention
+        """
+        device, dtype = nodes.device, nodes.dtype
+        num_graphs = n_per_graph.numel()
+        t, _, d = nodes.shape
+
+        n_max = int(n_per_graph.max().item())
+        is_consistent = bool((n_per_graph == n_max).all().item())
+        if is_consistent:
+            nodes = nodes.view(t, num_graphs, n_max, d)
+            return nodes.reshape(t * num_graphs, n_max, d), None
+
+        offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_per_graph[:-1])),
+            dim=0,
+        )
+
+        padded_nodes = []
+        key_padding_masks = []
+
+        for g in range(num_graphs):
+            n_current = int(n_per_graph[g].item())
+            start = int(offsets[g].item())
+            end = start + n_current
+
+            nodes_slice = nodes[:, start:end, :]
+
+            pad_len = n_max - n_current
+            if pad_len > 0:
+                pad = torch.zeros((t, pad_len, d), device=device, dtype=dtype)
+                nodes_slice = torch.cat([nodes_slice, pad], dim=1)
+                mask = torch.cat(
+                    [
+                        torch.zeros((t, n_current), device=device, dtype=torch.bool),
+                        torch.ones((t, pad_len), device=device, dtype=torch.bool),
+                    ],
+                    dim=1,
+                )
+            else:
+                mask = torch.zeros((t, n_max), device=device, dtype=torch.bool)
+
+            padded_nodes.append(nodes_slice)
+            key_padding_masks.append(mask)
+
+        padded_nodes = torch.cat(padded_nodes, dim=0)
+        key_padding_mask = torch.cat(key_padding_masks, dim=0)
+
+        return padded_nodes, key_padding_mask
+
+    def format_from_batched_and_padded_nodes(self, nodes, n_per_graph):
+        """
+        nodes: (t * num_graphs, n_max, d)
+        n_per_graph: (num_graphs, ) sizes per graph
+
+        return
+        nodes: (t, n_total, d)
+        """
+        num_graphs = n_per_graph.numel()
+        t = nodes.size(0) // num_graphs
+        n_max = nodes.size(1)
+        n_total = int(n_per_graph.sum().item())
+
+        is_consistent = bool((n_per_graph == n_max).all().item())
+        if is_consistent:
+            nodes = nodes.view(num_graphs, t, n_max, -1).transpose(0, 1)
+            nodes = nodes.reshape(t, num_graphs * n_max, -1)
+            return nodes
+
+        restored_nodes = []
+
+        for g in range(num_graphs):
+            n_current = int(n_per_graph[g].item())
+
+            start = g * t
+            end = (g + 1) * t
+
+            nodes_slice = nodes[start:end, :n_current, :]
+            restored_nodes.append(nodes_slice)
+
+        restored_nodes = torch.cat(restored_nodes, dim=1)
+        return restored_nodes
+
+    def forward(
+        self,
+        Y,
+        X,
+        constraint_features, # first column is r-gate; remaining columns are extra features
+        edge_indices,
+        edge_features,
+        variable_features, # [c, is_fixed_to_1, is_fixed_to_0, is_not_fixed]
+        candidates=None,
+        n_constraints_per_graph=None,
+        n_variables_per_graph=None,
+    ):
+        device = Y.device
+        dtype = Y.dtype
+        if n_constraints_per_graph is None:
+            n_constraints_per_graph = torch.tensor(
+                [Y.size(0)], device=device, dtype=torch.long
+            )
+        if n_variables_per_graph is None:
+            n_variables_per_graph = torch.tensor(
+                [X.size(0)], device=device, dtype=torch.long
+            )
+        num_graphs = n_constraints_per_graph.numel()
+        n_constraints_total = n_constraints_per_graph.sum().int()
+        n_variables_every = n_variables_per_graph.sum().int() // num_graphs
+
+        peak_mem_device = _reset_peak_memory(Y.device)
+
+        break_node_indices_local, break_node_indices_global = self.get_nodes_to_break(
+            constraint_features=constraint_features,
+            variable_features=variable_features,
+            edge_indices=edge_indices,
+            edge_features=edge_features,
+            candidates=candidates,
+            n_variables_per_graph=n_variables_per_graph,
+        )  # (bsz, t)
+        bsz, t = break_node_indices_local.shape
+        # add one-hot encodings to X
+        with _perf_timer("SetCoverHolo step 1: add one-hot encodings to X"):
+            one_hot_breakings = F.one_hot(break_node_indices_local.T, 
+                                          n_variables_every).reshape(t, -1).unsqueeze(-1)
+            # (t, bsz * n_variables_every, 1)
+            all_zeros = torch.zeros_like(one_hot_breakings)
+            one_hot_breakings_a = torch.cat([one_hot_breakings, all_zeros], dim=-1)
+            one_hot_breakings_b = torch.cat([all_zeros, one_hot_breakings], dim=-1) # (t, bsz * n_variables_every, 2)
+            X_a = torch.cat([X.unsqueeze(0).expand(t, X.size(0), X.size(1)), 
+                             one_hot_breakings_a], dim=-1)  # (t, bsz * n_variables_every, d+2)
+            X_b = torch.cat([X.unsqueeze(0).expand(t, X.size(0), X.size(1)), 
+                             one_hot_breakings_b], dim=-1) # (t, bsz * n_variables_every, d+2)
+        # add r-gating to Y
+        with _perf_timer("SetCoverHolo step 2: apply r-gating to Y"):
+            # Use only the original r-gating column; extra features remain available in constraint_features
+            r = constraint_features[:, :1]
+            r_after_branching = self.revise_r(r=r, 
+                                              edge_indices=edge_indices, 
+                                              branching_variable_indices=break_node_indices_global.T)
+            # (t, n_constraints_total, 1)
+            r_base_views = r.unsqueeze(0).expand(t, n_constraints_total, 1)
+            Y_a = torch.cat([r_base_views * Y.unsqueeze(0),
+                             torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
+                             dim=-1) # (t, n_constraints_total, d+2)
+            Y_b = torch.cat([r_after_branching * Y.unsqueeze(0),
+                             torch.zeros((t, n_constraints_total, 2), device=device, dtype=dtype)], 
+                             dim=-1) # (t, n_constraints_total, d+2)
+
+        # break symmetry
+        with _perf_timer("SetCoverHolo step 3: break symmetry"):
+            Y_a, X_a, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
+            formatted_edge_indices_a, edge_mask_a = self.remove_edges_via_r(
+                r_base_views, formatted_edge_indices
+            )
+            formatted_edge_features_a = formatted_edge_features[edge_mask_a]
+            Y_a, X_a = self.symmetry_breaking_model(
+                Y_a, formatted_edge_indices_a, formatted_edge_features_a, X_a
+            )
+            Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
+
+            Y_b, X_b, formatted_edge_indices, formatted_edge_features, shape_info = \
+                self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
+            formatted_edge_indices_b, edge_mask_b = self.remove_edges_via_r(
+                r_after_branching, formatted_edge_indices
+            )
+            formatted_edge_features_b = formatted_edge_features[edge_mask_b]
+            Y_b, X_b = self.symmetry_breaking_model(
+                Y_b, formatted_edge_indices_b, formatted_edge_features_b, X_b
+            )
+            Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
+        # holo_repr: (t, n, d+2)
+
+        # set transformer: constraint talks to constraint
+        if self.use_set_transformer:
+            with _perf_timer("SetCoverHolo step 4: constraint set transformer"):
+                Y_a, key_padding_mask_a = \
+                    self.format_for_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
+                Y_b, key_padding_mask_b = \
+                    self.format_for_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
+                # (bsz*t, n_constraints_max, d+2)
+                if self.constraint_set_block is not None:
+                    Y_a = self.constraint_set_block(Y_a, key_padding_mask_a)
+                    Y_b = self.constraint_set_block(Y_b, key_padding_mask_b) 
+                # (bsz*t, n_constraints_max, d+2)
+                Y_a = self.format_from_batched_and_padded_nodes(Y_a, n_constraints_per_graph)
+                Y_b = self.format_from_batched_and_padded_nodes(Y_b, n_constraints_per_graph)
+        # (t, n_constraints_total, d+2)
+        
+        # set transformer: constraint's 2 problems talk to each other
+        if self.constraint_sab is not None:
+            with _perf_timer("SetCoverHolo step 5: cross-problem constraint attention"):
+                Y = self.constraint_sab(
+                                torch.stack((Y_a, Y_b), dim=2).reshape(-1, 2, Y_a.size(-1)),
+                                key_padding_mask=None).reshape(
+                                                t, n_constraints_total, 2, -1
+                                            )
+                Y_a, Y_b = Y[:,:,0], Y[:,:,1]
+        # (t, n_constraints, d+2)
+
+        # gnn: constraint talks to variable
+        if self.constraint_variable_gnn is not None:
+            with _perf_timer("SetCoverHolo step 6: constraint-variable message passing"):
+                Y_a, X_a, _, __, shape_info = \
+                    self.format_for_stacked_bipartite(Y_a, X_a, edge_indices, edge_features)
+                Y_a, X_a = self.constraint_variable_gnn(
+                    Y_a, formatted_edge_indices_a, formatted_edge_features_a, X_a
+                )
+                Y_a, X_a = self.format_from_stacked_bipartite(Y_a, X_a, shape_info)
+
+                Y_b, X_b, _, __, shape_info = \
+                    self.format_for_stacked_bipartite(Y_b, X_b, edge_indices, edge_features)
+                Y_b, X_b = self.constraint_variable_gnn(
+                    Y_b, formatted_edge_indices_b, formatted_edge_features_b, X_b
+                )
+                Y_b, X_b = self.format_from_stacked_bipartite(Y_b, X_b, shape_info)
+        X = self.variable_problem_pma(
+                        torch.stack((X_a, X_b), dim=2).reshape(-1, 2, X_a.size(-1)),
+                        key_padding_mask=None).reshape(
+                                        t, n_variables_every * num_graphs, -1
+                                    )
+        # (t, n_variables, d+2)
+        X = self.variable_view_pma(X.transpose(0, 1), key_padding_mask=None).squeeze(1)
+        # (n_variables, d+2)
+        _log_peak_memory(peak_mem_device)
+        return X
