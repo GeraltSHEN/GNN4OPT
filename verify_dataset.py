@@ -20,7 +20,7 @@ def _format_scores(values: List[float]) -> List[str]:
 def _build_args() -> argparse.Namespace:
     dataset = "set_cover"
     cfg_idx = 1
-    config_root = Path("./disjunctive_dual/cfg")
+    config_root = Path("./cfg")
     cfg = _load_config(config_root, dataset, cfg_idx)
     init_args = argparse.Namespace(
         dataset=dataset,
@@ -40,8 +40,8 @@ def _build_args() -> argparse.Namespace:
 
 def _load_models(args: argparse.Namespace, cons_nfeats: int, edge_nfeats: int, var_nfeats: int):
     device = args.device
-    holo_model_dir = Path("./disjunctive_dual/models/holo/set_cover_cfg1")
-    selector_model_dir = Path("./disjunctive_dual/models/raw/set_cover_cfg0")
+    holo_model_dir = Path("./models/holo/set_cover_cfg1")
+    selector_model_dir = Path("./models/raw/set_cover_cfg0")
 
     holo_model = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
     load_checkpoint(holo_model, None, step="max", save_dir=str(holo_model_dir), device=device)

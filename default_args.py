@@ -8,11 +8,11 @@ import yaml
 
 BASE_DEFAULTS = {
     "max_samples_per_split": 128,
-    "config_root": "./disjunctive_dual/cfg",
+    "config_root": "./cfg",
     "resume_model_dir": "",
     "model_suffix": "",
-    "model_dir": "./disjunctive_dual/models",
-    "log_dir": "./disjunctive_dual/logs",
+    "model_dir": "./models",
+    "log_dir": "./logs",
     # model options
     "model": "raw",  # raw; holo
     "hidden_channels": 64,
@@ -30,8 +30,8 @@ BASE_DEFAULTS = {
     # training options
     "seed": 42,
     "epochs": 1,
-    "lr": 1e-3,
-    "batch_size": 16,
+    "lr": 1e-4,
+    "batch_size": 8,
     "weight_decay": 5e-4,
     "loss_option": "ranking",
     "resume": False,

@@ -1,6 +1,0 @@
-cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accuracy,test_eval_acc_Score_diff,test_eval_acc_Normalized_score_diff,test_eval_acc_n_samples,all_eval_acc_Loss,all_eval_acc_Accuracy,all_eval_acc_Top5_Accuracy,all_eval_acc_Score_diff,all_eval_acc_Normalized_score_diff,all_eval_acc_n_samples,train_eval_acc_Loss,train_eval_acc_Accuracy,train_eval_acc_Top5_Accuracy,train_eval_acc_Score_diff,train_eval_acc_Normalized_score_diff,train_eval_acc_n_samples,val_eval_acc_Loss,val_eval_acc_Accuracy,val_eval_acc_Top5_Accuracy,val_eval_acc_Score_diff,val_eval_acc_Normalized_score_diff,val_eval_acc_n_samples
-1,facilities_cfg1_resume_from_facilities_cfg1,0.95,68.55%,98.11%,42.18,0.17,20000,,,,,,,,,,,,,,,,,,
-1,facilities_cfg1,0.97,66.72%,98.06%,47.57,0.18,20000,0.94,67.90%,98.12%,45.36,0.18,140000,0.93,68.08%,98.10%,44.78,0.17,100000,0.93,68.17%,98.31%,46.04,0.18,20000
-2,facilities_cfg2,0.96,67.85%,97.98%,45.00,0.17,20000,0.93,68.64%,98.09%,44.57,0.17,140000,0.92,68.79%,98.07%,44.25,0.17,100000,0.91,68.67%,98.27%,45.73,0.17,20000
-3,facilities_cfg3_resume_from_facilities_cfg3,0.96,67.86%,98.08%,43.88,0.17,20000,,,,,,,,,,,,,,,,,,
-3,facilities_cfg3,1.00,67.14%,97.90%,47.04,0.18,20000,,,,,,,,,,,,,,,,,,

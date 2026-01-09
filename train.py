@@ -314,7 +314,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train the MILP branching policy.")
     parser.add_argument("--dataset", type=str, default="set_cover", help="Dataset key.")
     parser.add_argument("--cfg_idx", type=int, default=0, help="Configuration index.")
-    parser.add_argument("--config_root", type=str, default="./disjunctive_dual/cfg", help="Directory containing configuration files.")
+    parser.add_argument("--config_root", type=str, default="./cfg", help="Directory containing configuration files.")
     parser.add_argument("--model_suffix", type=str, default="", help="Optional suffix appended to model/log directories.")
     parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.")
     parser.add_argument("--resume_model_dir", type=str, default="", help="Directory containing checkpoints to resume from.")
@@ -374,7 +374,7 @@ def main(argv=None):
     policy = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
     optimizer = get_optimizer(args, policy)
 
-    base_model_dir = Path(getattr(args, "model_dir", "./disjunctive_dual/models"))
+    base_model_dir = Path(getattr(args, "model_dir", "./models"))
     if getattr(args, "model", None):
         base_model_dir = base_model_dir / args.model
     base_log_dir = Path(getattr(args, "log_dir", "./logs"))

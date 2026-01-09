@@ -13,4 +13,4 @@
 module load anaconda
 conda activate opt-ml-env
 
-python disjunctive_dual/verify_dataset.py
+python verify_dataset.py

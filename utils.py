@@ -1,510 +1,429 @@
-import argparse
+import gzip
+import json
+import os
+import random
+import pickle
 from pathlib import Path
-from typing import Dict, List
-import time
+from typing import Dict, Sequence, Union
+
+import numpy as np
 import torch
+from torch_geometric.data import Data, Dataset
+from torch_geometric.loader import DataLoader
 
-from eval import _infer_feature_dimensions, _load_config, _merge_args_with_config, pad_tensor
-from utils import load_checkpoint, load_data, load_model, print_dash_str, set_seed
-
-# TODO: Top1 vs top2 normalized diff < 1e-4 has a total count printout, but First margin < 1e-4 and First margin < 1e-3 do not have?
-
-def _format_rate(rate: float) -> str:
-    return f"{rate * 100:.2f}%"
+from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
 
 
-def _format_scores(values: List[float]) -> List[str]:
-    return [f"{value:.4f}" for value in values]
+def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
+    if isinstance(sample_files, (str, Path)):
+        return [str(sample_files)]
+    if isinstance(sample_files, np.ndarray):
+        return [str(x) for x in sample_files.tolist()]
+    return [str(x) for x in sample_files]
 
 
-def _build_args() -> argparse.Namespace:
-    dataset = "set_cover"
-    cfg_idx = 1
-    config_root = Path("./disjunctive_dual/cfg")
-    cfg = _load_config(config_root, dataset, cfg_idx)
-    init_args = argparse.Namespace(
-        dataset=dataset,
-        cfg_idx=cfg_idx,
-        config_root=str(config_root),
-        model_suffix="",
-        parent_test_stats_dir=".",
-        eval_split="all",
-        eval_batch_size=cfg.get("batch_size", 8),
-        eval_train_batch_size=None,
-        eval_val_batch_size=None,
-        eval_test_batch_size=None,
-        max_samples_per_split=100,
-    )
-    return _merge_args_with_config(init_args, cfg)
+class BipartiteNodeData(Data):
+    """
+    This class encode a node bipartite graph observation as returned by the `ecole.observation.NodeBipartite`
+    observation function in a format understood by the pytorch geometric data handlers.
+    """
+    def __init__(
+        self,
+        constraint_features: torch.Tensor,
+        edge_indices: torch.Tensor,
+        edge_features: torch.Tensor,
+        variable_features: torch.Tensor,
+        candidates: torch.Tensor,
+        nb_candidates: int,
+        candidate_choices: int,
+        candidate_scores: torch.Tensor,
+        n_variables_per_graph: int,
+        n_constraints_per_graph: int,
+    ):
+        super().__init__()
+        self.constraint_features = constraint_features
+        self.edge_index = edge_indices
+        self.edge_attr = edge_features
+        self.variable_features = variable_features
+        self.candidates = candidates
+        self.nb_candidates = nb_candidates
+        self.candidate_choices = candidate_choices
+        self.candidate_scores = candidate_scores
+        self.n_variables_per_graph = n_variables_per_graph
+        self.n_constraints_per_graph = n_constraints_per_graph
+
+    def __inc__(self, key, value, *args, **kwargs):
+        if key == "edge_index":
+            return torch.tensor(
+                [[self.constraint_features.size(0)], [self.variable_features.size(0)]]
+            )
+        elif key == "candidates":
+            return self.variable_features.size(0)
+        return super().__inc__(key, value, *args, **kwargs)
 
 
-def _load_models(args: argparse.Namespace, cons_nfeats: int, edge_nfeats: int, var_nfeats: int):
-    device = args.device
-    holo_model_dir = Path("./disjunctive_dual/models/holo/set_cover_cfg1")
-    selector_model_dir = Path("./disjunctive_dual/models/raw/set_cover_cfg0")
+class GraphDataset(Dataset):
+    """
+    This class encodes a collection of graphs, as well as a method to load such graphs from the disk.
+    It can be used in turn by the data loaders provided by pytorch geometric.
+    """
+    def __init__(
+        self,
+        sample_files: Sequence[Union[str, Path]],
+        edge_nfeats: int = 1,
+        binarize_edge_features: bool = True,
+    ):
+        super().__init__(root=None, transform=None, pre_transform=None)
+        self.sample_files = [str(path) for path in _ensure_sequence(sample_files)]
+        self.edge_nfeats = edge_nfeats
+        self.binarize_edge_features = binarize_edge_features
 
-    holo_model = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
-    load_checkpoint(holo_model, None, step="max", save_dir=str(holo_model_dir), device=device)
-    holo_model.eval()
+    def len(self):
+        return len(self.sample_files)
 
-    selector_args = argparse.Namespace(**vars(args))
-    selector_args.model = "raw"
-    selector_model = load_model(selector_args, cons_nfeats, edge_nfeats, var_nfeats)
-    load_checkpoint(selector_model, None, step="max", save_dir=str(selector_model_dir), device=device)
-    selector_model.eval()
-    return holo_model, selector_model
+    def get(self, index):
+        """
+        This method loads a node bipartite graph observation as saved on the disk during data collection.
+        """
+        sample = load_gzip(self.sample_files[index])
+        sample_state, _, sample_action, sample_action_set, sample_scores = sample["data"]
 
-
-def _update_norm_scores(
-    scores: torch.Tensor,
-    nb_candidates: torch.Tensor,
-    accum_sum: List[float],
-    accum_count: List[int],
-) -> None:
-    max_k = min(5, scores.size(1))
-    device = scores.device
-    position_mask = torch.arange(max_k, device=device).unsqueeze(0) < nb_candidates.unsqueeze(1)
-    for idx in range(max_k):
-        valid_mask = position_mask[:, idx]
-        if valid_mask.any():
-            accum_sum[idx] += scores[:, idx][valid_mask].sum().item()
-            accum_count[idx] += int(valid_mask.sum().item())
-
-
-def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str, object]:
-    holo_model.eval()
-    selector_model.eval()
-
-    total_graphs = 0
-    k_max = 8
-
-    consistency_count = 0.0
-    consistency_correct = 0.0
-    correction_count = 0.0
-    correction_correct = 0.0
-    exploration_count = 0.0
-    exploration_correct = 0.0
-
-    top1_match_diff_sum = [0.0 for _ in range(k_max - 1)]
-    top1_match_diff_count = [0 for _ in range(k_max - 1)]
-    top1_mismatch_diff_sum = [0.0 for _ in range(k_max - 1)]
-    top1_mismatch_diff_count = [0 for _ in range(k_max - 1)]
-    topk_contains_diff_sum = [0.0 for _ in range(k_max - 1)]
-    topk_contains_diff_count = [0 for _ in range(k_max - 1)]
-    topk_miss_diff_sum = [0.0 for _ in range(k_max - 1)]
-    topk_miss_diff_count = [0 for _ in range(k_max - 1)]
-    small_top12_gap_count = 0
-    first_margin_thresholds = (("1e-4", 1e-4), ("1e-3", 1e-3))
-    first_margin_stats = {
-        label: {
-            "total": 0,
-            "top1_match": 0,
-            "top1_mismatch": 0,
-            "top8_contains": 0,
-            "top8_miss": 0,
+        constraint_dict, edge_dict, variable_dict = sample_state
+        constraint_default_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
+        edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
+        edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
+        variable_names = variable_dict["names"]
+        variable_values = np.asarray(variable_dict["values"], dtype=np.float32)
+        variable_default_features = torch.as_tensor(variable_values, dtype=torch.float32)
+        # pick the relevant variable features
+        feature_indices = {
+            name: variable_names.index(name)
+            for name in ("coef_normalized", "sol_is_at_lb", "sol_is_at_ub", "sol_val")
         }
-        for label, _ in first_margin_thresholds
-    }
-    large_first_margin_outside_top8_count = 0
-    large_first_margin_outside_top8_contains = 0
-    large_first_margin_outside_top8_miss = 0
-    large_first_margin_outside_top8_top1_match = 0
-    large_first_margin_outside_top8_top1_mismatch = 0
-    top12_gap_counts = {
-        "selector_top1_match": 0,
-        "selector_top1_mismatch": 0,
-        "selector_top8_contains": 0,
-        "selector_top8_misses": 0,
-    }
+        coef_normalized = variable_values[:, feature_indices["coef_normalized"]]
+        sol_is_at_lb = variable_values[:, feature_indices["sol_is_at_lb"]]
+        sol_is_at_ub = variable_values[:, feature_indices["sol_is_at_ub"]]
+        sol_val = variable_values[:, feature_indices["sol_val"]]
+        fixed_mask = (sol_is_at_lb == 1) & (sol_is_at_ub == 1)
+        is_fixed_to_1 = (fixed_mask & (sol_val == 1)).astype(np.float32)
+        is_fixed_to_0 = (fixed_mask & (sol_val == 0)).astype(np.float32)
+        is_not_fixed = 1.0 - is_fixed_to_1 - is_fixed_to_0
+        variable_features = torch.as_tensor(
+            np.stack(
+                [coef_normalized, is_fixed_to_1, is_fixed_to_0, is_not_fixed],
+                axis=-1,
+            ),
+            dtype=torch.float32,
+        )
+        variable_features = torch.cat(
+            (variable_features, variable_default_features),
+            dim=-1,
+        )
 
-    def _accumulate_difficulty(
-        diffs: torch.Tensor,
-        valid_mask: torch.Tensor,
-        group_mask: torch.Tensor,
-        accum_sum: List[float],
-        accum_count: List[int],
-    ) -> None:
-        for idx in range(diffs.size(1)):
-            pos_mask = group_mask & valid_mask[:, idx]
-            if pos_mask.any():
-                accum_sum[idx] += diffs[pos_mask, idx].sum().item()
-                accum_count[idx] += int(pos_mask.sum().item())
+        # mark constraints that touch any variable fixed to 1
+        f1_mask = torch.as_tensor(is_fixed_to_1, dtype=torch.bool)
+        n_constraints = len(constraint_dict["values"])
+        r = torch.ones(n_constraints, dtype=torch.float32)
+        if f1_mask.any():
+            constraint_indices, variable_indices = edge_indices
+            f1_edge_mask = f1_mask[variable_indices]
+            if f1_edge_mask.any():
+                connected_constraints = constraint_indices[f1_edge_mask]
+                r[connected_constraints] = 0
+        constraint_features = r.unsqueeze(-1)
+        constraint_features = torch.cat(
+            (constraint_features, constraint_default_features),
+            dim=-1,
+        )
 
-    with torch.no_grad():
-        for batch in data_loader:
-            batch = batch.to(device)
-            holo_logits = holo_model(
-                batch.constraint_features,
-                batch.edge_index,
-                batch.edge_attr,
-                batch.variable_features,
-                candidates=batch.candidates,
-                n_constraints_per_graph=batch.n_constraints_per_graph,
-                n_variables_per_graph=batch.n_variables_per_graph,
-            )
-            selector_logits = selector_model(
-                batch.constraint_features,
-                batch.edge_index,
-                batch.edge_attr,
-                batch.variable_features,
-                candidates=batch.candidates,
-                n_constraints_per_graph=batch.n_constraints_per_graph,
-                n_variables_per_graph=batch.n_variables_per_graph,
+        if self.binarize_edge_features:
+            non_zero_mask = edge_features != 0
+            edge_features = torch.where(
+                non_zero_mask,
+                torch.ones_like(edge_features),
+                torch.zeros_like(edge_features),
             )
 
-            holo_logits = pad_tensor(holo_logits[batch.candidates], batch.nb_candidates)
-            selector_logits = pad_tensor(selector_logits[batch.candidates], batch.nb_candidates)
-            true_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates).clip(0)
+        if self.edge_nfeats == 2:
+            norm = torch.linalg.norm(edge_features)
+            ef_norm = torch.where(norm > 0, edge_features / norm, torch.zeros_like(edge_features))
+            edge_features = torch.cat((edge_features, ef_norm), dim=-1)
+        
+        candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
+        candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
+        candidate_choices = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
 
-            num_candidates = batch.nb_candidates
-            candidate_mask = (
-                torch.arange(true_scores.size(1), device=device).unsqueeze(0) < num_candidates.unsqueeze(1)
-            )
-            masked_true_scores = true_scores.masked_fill(~candidate_mask, -1e9)
+        graph = BipartiteNodeData(
+            constraint_features,
+            edge_indices,
+            edge_features,
+            variable_features,
+            candidates,
+            len(candidates),
+            candidate_choices,
+            candidate_scores,
+            variable_features.size(0),
+            constraint_features.size(0),
+        )
+        graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
+        return graph
 
-            best_scores = masked_true_scores.max(dim=-1).values
-            best_scores_unsqueezed = best_scores.unsqueeze(-1)
-            k_top = min(k_max, true_scores.size(1))
 
-            holo_top1_idx = holo_logits.argmax(dim=-1)
-            selector_topk_idx = selector_logits.topk(k_top, dim=-1).indices
-            selector_top1_idx = selector_topk_idx[:, 0]
+def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
+    """Load train/val/test splits as torch_geometric DataLoaders based on CLI args."""
+    dataset_root = Path(f"{args.dataset_path}")
+    print(f'load dataset from {dataset_root}')
+    file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
+    edge_nfeats = getattr(args, "edge_nfeats", 1)
+    binarize_edge_features = getattr(args, "binarize_edge_features", True)
 
-            selector_top1_scores = masked_true_scores.gather(-1, selector_top1_idx.unsqueeze(-1)).squeeze(-1)
-            selector_topk_scores = masked_true_scores.gather(-1, selector_topk_idx)
-            holo_top1_scores = masked_true_scores.gather(-1, holo_top1_idx.unsqueeze(-1)).squeeze(-1)
-
-            selector_top1_match = selector_top1_scores == best_scores
-            selector_topk_contains_best = (selector_topk_scores == best_scores_unsqueezed).any(dim=-1)
-            holo_top1_match = holo_top1_scores == best_scores
-
-            consistency_count += selector_top1_match.float().sum().item()
-            consistency_correct += (selector_top1_match & holo_top1_match).float().sum().item()
-
-            correction_mask = (~selector_top1_match) & selector_topk_contains_best
-            correction_count += correction_mask.float().sum().item()
-            correction_correct += (correction_mask & holo_top1_match).float().sum().item()
-
-            exploration_mask = ~selector_topk_contains_best
-            exploration_count += exploration_mask.float().sum().item()
-            exploration_correct += (exploration_mask & holo_top1_match).float().sum().item()
-
-            best_norm = best_scores.clamp_min(1e-8)
-            if masked_true_scores.size(1) > 1:
-                sorted_true_scores, _ = masked_true_scores.sort(dim=1, descending=True)
-                full_score_diffs = (sorted_true_scores[:, :-1] - sorted_true_scores[:, 1:]) / best_norm.unsqueeze(-1)
-                valid_full_margin_mask = (
-                    torch.arange(full_score_diffs.size(1), device=device).unsqueeze(0)
-                    < (num_candidates - 1).unsqueeze(1)
-                )
-                positive_margin_mask = (full_score_diffs > 0) & valid_full_margin_mask
-                margin_indices = (
-                    torch.arange(full_score_diffs.size(1), device=device)
-                    .unsqueeze(0)
-                    .expand_as(full_score_diffs)
-                )
-                first_margin_idx = torch.where(
-                    positive_margin_mask,
-                    margin_indices,
-                    torch.full_like(margin_indices, full_score_diffs.size(1)),
-                ).min(dim=1).values
-                has_first_margin = first_margin_idx < full_score_diffs.size(1)
-                first_margin_values = torch.zeros_like(best_scores)
-                if has_first_margin.any():
-                    margin_rows = has_first_margin.nonzero(as_tuple=False).squeeze(-1)
-                    chosen_idx = first_margin_idx[margin_rows].long()
-                    first_margin_values[margin_rows] = full_score_diffs[margin_rows, chosen_idx]
-
-                for label, threshold in first_margin_thresholds:
-                    margin_mask = has_first_margin & (first_margin_values < threshold)
-                    if margin_mask.any():
-                        stats = first_margin_stats[label]
-                        stats["total"] += int(margin_mask.sum().item())
-                        stats["top1_match"] += int((margin_mask & selector_top1_match).sum().item())
-                        stats["top1_mismatch"] += int((margin_mask & ~selector_top1_match).sum().item())
-                        stats["top8_contains"] += int(
-                            (margin_mask & selector_topk_contains_best).sum().item()
-                        )
-                        stats["top8_miss"] += int((margin_mask & ~selector_topk_contains_best).sum().item())
-
-                first_margin_outside_top8_mask = has_first_margin & (first_margin_idx >= (k_max - 1))
-                if first_margin_outside_top8_mask.any():
-                    margin_mask = first_margin_outside_top8_mask
-                    margin_mask_count = int(margin_mask.sum().item())
-                    large_first_margin_outside_top8_count += margin_mask_count
-                    large_first_margin_outside_top8_contains += int(
-                        (margin_mask & selector_topk_contains_best).sum().item()
-                    )
-                    large_first_margin_outside_top8_miss += int(
-                        (margin_mask & ~selector_topk_contains_best).sum().item()
-                    )
-                    large_first_margin_outside_top8_top1_match += int(
-                        (margin_mask & selector_top1_match).sum().item()
-                    )
-                    large_first_margin_outside_top8_top1_mismatch += int(
-                        (margin_mask & ~selector_top1_match).sum().item()
-                    )
-
-            if k_top > 1:
-                gt_top_values = masked_true_scores.topk(k_top, dim=-1).values
-                valid_diff_mask = num_candidates.unsqueeze(1) > (
-                    torch.arange(k_top - 1, device=device) + 1
-                )
-                gt_diffs = (gt_top_values[:, :-1] - gt_top_values[:, 1:]) / best_norm.unsqueeze(-1)
-
-                _accumulate_difficulty(
-                    gt_diffs,
-                    valid_diff_mask,
-                    selector_top1_match,
-                    top1_match_diff_sum,
-                    top1_match_diff_count,
-                )
-                _accumulate_difficulty(
-                    gt_diffs,
-                    valid_diff_mask,
-                    ~selector_top1_match,
-                    top1_mismatch_diff_sum,
-                    top1_mismatch_diff_count,
-                )
-                _accumulate_difficulty(
-                    gt_diffs,
-                    valid_diff_mask,
-                    selector_topk_contains_best,
-                    topk_contains_diff_sum,
-                    topk_contains_diff_count,
-                )
-                _accumulate_difficulty(
-                    gt_diffs,
-                    valid_diff_mask,
-                    ~selector_topk_contains_best,
-                    topk_miss_diff_sum,
-                    topk_miss_diff_count,
-                )
-
-                top12_valid = valid_diff_mask[:, 0]
-                if top12_valid.any():
-                    top12_diffs = gt_diffs[:, 0]
-                    small_gap_mask = top12_valid & (top12_diffs < 1e-4)
-                    if small_gap_mask.any():
-                        small_top12_gap_count += int(small_gap_mask.sum().item())
-
-                    def _update_gap_counts(group_mask, key: str) -> None:
-                        valid_group = top12_valid & group_mask
-                        if valid_group.any():
-                            top12_gap_counts[key] += int((top12_diffs[valid_group] < 1e-4).sum().item())
-
-                    _update_gap_counts(selector_top1_match, "selector_top1_match")
-                    _update_gap_counts(~selector_top1_match, "selector_top1_mismatch")
-                    _update_gap_counts(selector_topk_contains_best, "selector_top8_contains")
-                    _update_gap_counts(~selector_topk_contains_best, "selector_top8_misses")
-
-            total_graphs += batch.num_graphs
-
-    def _compute_rates(correct: float, count: float) -> float:
-        return (correct / count) if count > 0 else 0.0
-
-    def _compute_avg(accum_sum: List[float], accum_count: List[int]) -> List[float]:
-        return [
-            (accum_sum[i] / accum_count[i]) if accum_count[i] > 0 else 0.0 for i in range(k_max - 1)
-        ]
-
-    def _build_first_margin_metrics(stats: Dict[str, int]) -> Dict[str, object]:
-        top1_total = stats["top1_match"] + stats["top1_mismatch"]
-        top8_total = stats["top8_contains"] + stats["top8_miss"]
-        return {
-            "total": stats["total"],
-            "selector_top1": {
-                "match": {
-                    "count": stats["top1_match"],
-                    "rate": _compute_rates(stats["top1_match"], top1_total),
-                },
-                "mismatch": {
-                    "count": stats["top1_mismatch"],
-                    "rate": _compute_rates(stats["top1_mismatch"], top1_total),
-                },
+    if for_training:
+        splits = {
+            "train": {
+                "subdir": getattr(args, "train_split", "train"),
+                "batch_size": getattr(args, "train_batch_size", getattr(args, "batch_size", 32)),
+                "shuffle": getattr(args, "train_shuffle", True),
             },
-            "selector_top8": {
-                "contains": {
-                    "count": stats["top8_contains"],
-                    "rate": _compute_rates(stats["top8_contains"], top8_total),
-                },
-                "misses": {
-                    "count": stats["top8_miss"],
-                    "rate": _compute_rates(stats["top8_miss"], top8_total),
-                },
+            "val": {
+                "subdir": getattr(args, "val_split", "valid"),
+                "batch_size": getattr(args, "val_batch_size", getattr(args, "batch_size", 32)),
+                "shuffle": getattr(args, "val_shuffle", False),
+            },
+            "test": {
+                "subdir": getattr(args, "test_split", "test"),
+                "batch_size": getattr(args, "test_batch_size", getattr(args, "batch_size", 32)),
+                "shuffle": getattr(args, "test_shuffle", False),
+            },
+        }
+    else:
+        splits = {
+            "train": {
+                "subdir": getattr(args, "train_split", "train"),
+                "batch_size": getattr(args, "eval_batch_size"),
+                "shuffle": False,
+            },
+            "val": {
+                "subdir": getattr(args, "val_split", "valid"),
+                "batch_size": getattr(args, "eval_batch_size"),
+                "shuffle": False,
+            },
+            "test": {
+                "subdir": getattr(args, "test_split", "test"),
+                "batch_size": getattr(args, "eval_batch_size"),
+                "shuffle": False,
             },
         }
 
-    outside_top8_first_margin_total = (
-        large_first_margin_outside_top8_contains + large_first_margin_outside_top8_miss
-    )
-    outside_top8_first_margin_top1_total = (
-        large_first_margin_outside_top8_top1_match + large_first_margin_outside_top8_top1_mismatch
-    )
-    first_margin_metrics = {
-        "thresholds": {
-            label: _build_first_margin_metrics(stats) for label, stats in first_margin_stats.items()
-        },
-        "threshold_order": [label for label, _ in first_margin_thresholds],
-        "outside_top8": {
-            "total": large_first_margin_outside_top8_count,
-            "selector_top1": {
-                "match": {
-                    "count": large_first_margin_outside_top8_top1_match,
-                    "rate": _compute_rates(
-                        large_first_margin_outside_top8_top1_match, outside_top8_first_margin_top1_total
-                    ),
-                },
-                "mismatch": {
-                    "count": large_first_margin_outside_top8_top1_mismatch,
-                    "rate": _compute_rates(
-                        large_first_margin_outside_top8_top1_mismatch, outside_top8_first_margin_top1_total
-                    ),
-                },
-            },
-            "selector_top8": {
-                "contains": {
-                    "count": large_first_margin_outside_top8_contains,
-                    "rate": _compute_rates(
-                        large_first_margin_outside_top8_contains, outside_top8_first_margin_total
-                    ),
-                },
-                "misses": {
-                    "count": large_first_margin_outside_top8_miss,
-                    "rate": _compute_rates(
-                        large_first_margin_outside_top8_miss, outside_top8_first_margin_total
-                    ),
-                },
-            },
-        },
-    }
 
-    return {
-        "holo_consistency": {
-            "rate": _compute_rates(consistency_correct, consistency_count),
-            "count": consistency_count,
-        },
-        "holo_correction": {
-            "rate": _compute_rates(correction_correct, correction_count),
-            "count": correction_count,
-        },
-        "holo_exploration": {
-            "rate": _compute_rates(exploration_correct, exploration_count),
-            "count": exploration_count,
-        },
-        "difficulty": {
-            "selector_top1_match": {
-                "match": _compute_avg(top1_match_diff_sum, top1_match_diff_count),
-                "mismatch": _compute_avg(top1_mismatch_diff_sum, top1_mismatch_diff_count),
-            },
-            "selector_top8_contains_gt": {
-                "contains": _compute_avg(topk_contains_diff_sum, topk_contains_diff_count),
-                "misses": _compute_avg(topk_miss_diff_sum, topk_miss_diff_count),
-            },
-        },
-        "small_top12_gap_count": small_top12_gap_count,
-        "small_first_margin_count": first_margin_stats["1e-4"]["total"],
-        "large_first_margin_outside_top8_count": large_first_margin_outside_top8_count,
-        "top12_gap_counts": top12_gap_counts,
-        "first_margin": first_margin_metrics,
-        "samples": total_graphs,
-    }
-
-
-def _print_results(split: str, metrics: Dict[str, object], duration: float) -> None:
-    consistency = metrics["holo_consistency"]
-    correction = metrics["holo_correction"]
-    exploration = metrics["holo_exploration"]
-    difficulty = metrics["difficulty"]
-    small_gap_count = int(metrics["small_top12_gap_count"])
-    top12_gap_counts = metrics["top12_gap_counts"]
-    first_margin = metrics["first_margin"]
-    first_margin_by_threshold = first_margin["thresholds"]
-    first_margin_order = first_margin.get("threshold_order", tuple(first_margin_by_threshold.keys()))
-    outside_top8_first_margin = first_margin["outside_top8"]
-    outside_top8_first_margin_top1 = outside_top8_first_margin["selector_top1"]
-
-    def _fmt_gap(key: str) -> str:
-        return f"<1e-4: {top12_gap_counts[key]}"
-
-    def _print_first_margin_stats(label: str, stats: Dict[str, object]) -> None:
-        print(
-            f"First margin normalized diff < {label} -> "
-            f"total: {stats['total']}, "
-            f"top1 match: {stats['selector_top1']['match']['count']} "
-            f"({_format_rate(stats['selector_top1']['match']['rate'])}), "
-            f"top1 mismatch: {stats['selector_top1']['mismatch']['count']} "
-            f"({_format_rate(stats['selector_top1']['mismatch']['rate'])})"
+    data: Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]] = {}
+    metadata: Dict[str, Sequence[Path]] = {}
+    for split_name, cfg in splits.items():
+        split_dir = dataset_root / cfg["subdir"]
+        sample_files = sorted(split_dir.glob(file_pattern))
+        max_split_samples = getattr(
+            args,
+            f"max_{split_name}_samples",
+            getattr(args, "max_samples_per_split", None),
         )
-        print(
-            f"First margin < {label} by selector top8 coverage -> "
-            f"contains: {stats['selector_top8']['contains']['count']} "
-            f"({_format_rate(stats['selector_top8']['contains']['rate'])}), "
-            f"misses: {stats['selector_top8']['misses']['count']} "
-            f"({_format_rate(stats['selector_top8']['misses']['rate'])})"
+        if max_split_samples is not None:
+            max_split_samples = int(max_split_samples)
+            sample_files = sample_files[:max_split_samples]
+        metadata[f"{split_name}_files"] = sample_files
+        if sample_files:
+            dataset = GraphDataset(
+                sample_files,
+                edge_nfeats=edge_nfeats,
+                binarize_edge_features=binarize_edge_features,
+            )
+            data[split_name] = DataLoader(dataset, 
+                                          batch_size=cfg["batch_size"], 
+                                          shuffle=cfg["shuffle"], 
+                                          num_workers=0, pin_memory=False)
+        else:
+            data[split_name] = None
+    data.update(metadata)
+    return data
+
+
+def get_optimizer(args, model):
+    params = model.parameters()
+    optimizer = torch.optim.Adam(params, lr=args.lr, weight_decay=args.weight_decay)
+    return optimizer
+
+
+def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
+    emb_size = args.hidden_channels
+    n_layers = args.num_layers
+    num_heads = args.num_heads
+    isab_num_inds = args.isab_num_inds
+    use_set_transformer = getattr(args, "use_set_transformer", True)
+    output_size = 1
+
+    def _load_breaking_selector_model(model, selector_path: Union[str, Path]):
+        if not selector_path:
+            raise ValueError("`breaking_selector_model_path` must be provided when using the holo model.")
+        selector_path = Path(selector_path)
+        if not selector_path.exists():
+            raise FileNotFoundError(f"breaking selector checkpoint not found: {selector_path}")
+        checkpoints = [x for x in os.listdir(selector_path) 
+                       if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
+        if checkpoints:
+            last_checkpoint = max(checkpoints, key=lambda x: int(x.split('.')[0]))
+            selector_path = selector_path / last_checkpoint
+
+        state = torch.load(selector_path, map_location=args.device)
+        state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
+        model.load_state_dict(state_dict)
+        print(f"load {selector_path} for breaking selector model.")
+        return model
+
+    if args.model == "raw":
+        model = GNNPolicy(
+            emb_size,
+            cons_nfeats,
+            edge_nfeats,
+            var_nfeats,
+            output_size,
+            n_layers,
+            holo=None,
+        )
+    elif args.model == "holo":
+        selector_layers = n_layers
+        selector_path = getattr(args, "breaking_selector_model_path", None)
+        breaking_selector_model = GNNPolicy(emb_size, 
+                                            cons_nfeats, 
+                                            edge_nfeats, 
+                                            var_nfeats,
+                                            output_size,
+                                            selector_layers,
+                                            holo=None)
+        breaking_selector_model = _load_breaking_selector_model(breaking_selector_model, 
+                                                                selector_path)
+        breaking_selector_model = breaking_selector_model.to(args.device)
+        breaking_selector_model.eval()
+        for param in breaking_selector_model.parameters():
+            param.requires_grad_(False)
+
+        sym_break_layers = getattr(args, "sym_break_layers", 2)
+        symmetry_breaking_model = StackedBipartiteGNN(
+            hidden_channels=emb_size + 2,
+            edge_nfeats=edge_nfeats,
+            n_layers=sym_break_layers,
         )
 
-    print_dash_str(f"{split.upper()} results")
-    print(
-        f"Holo consistency (selector top1 matches GT): {_format_rate(consistency['rate'])} "
-        f"over {int(consistency['count'])} samples"
-    )
-    print(
-        f"Holo correction (selector top8 includes GT, top1 wrong): {_format_rate(correction['rate'])} "
-        f"over {int(correction['count'])} samples"
-    )
-    print(
-        f"Holo exploration (selector top8 misses GT): {_format_rate(exploration['rate'])} "
-        f"over {int(exploration['count'])} samples"
-    )
-    print(
-        f"Difficulty by selector top1 match -> \nmatch: {_format_scores(difficulty['selector_top1_match']['match'])}, "
-        f"\nmismatch: {_format_scores(difficulty['selector_top1_match']['mismatch'])}"
-    )
-    print(
-        f"Difficulty by selector top8 coverage -> \ncontains: {_format_scores(difficulty['selector_top8_contains_gt']['contains'])}, "
-        f"\nmisses: {_format_scores(difficulty['selector_top8_contains_gt']['misses'])}"
-    )
-    print(
-        "Top1 vs top2 normalized diff counts -> "
-        f"top1 match: {_fmt_gap('selector_top1_match')}, "
-        f"top1 mismatch: {_fmt_gap('selector_top1_mismatch')}, "
-        f"top8 contains: {_fmt_gap('selector_top8_contains')}, "
-        f"top8 misses: {_fmt_gap('selector_top8_misses')}"
-    )
-    for label in first_margin_order:
-        _print_first_margin_stats(label, first_margin_by_threshold[label])
-    print(
-        "First margin outside top8 -> "
-        f"{outside_top8_first_margin['total']} samples | "
-        f"top1 match: {outside_top8_first_margin_top1['match']['count']} "
-        f"({_format_rate(outside_top8_first_margin_top1['match']['rate'])}), "
-        f"top1 mismatch: {outside_top8_first_margin_top1['mismatch']['count']} "
-        f"({_format_rate(outside_top8_first_margin_top1['mismatch']['rate'])}) | "
-        f"top8 contains: {outside_top8_first_margin['selector_top8']['contains']['count']} "
-        f"({_format_rate(outside_top8_first_margin['selector_top8']['contains']['rate'])}), "
-        f"top8 misses: {outside_top8_first_margin['selector_top8']['misses']['count']} "
-        f"({_format_rate(outside_top8_first_margin['selector_top8']['misses']['rate'])})"
-    )
-    print(f"Top1 vs top2 normalized diff < 1e-4: {small_gap_count} samples")
-    print(f"Split time: {duration:.2f}s")
+        holo = SetCoverHolo(
+            n_breakings=args.n_breakings,
+            breaking_selector_model=breaking_selector_model,
+            symmetry_breaking_model=symmetry_breaking_model,
+            num_heads=num_heads,
+            isab_num_inds=isab_num_inds,
+            mp_layers=getattr(args, "mp_layers", 2),
+            edge_nfeats=edge_nfeats,
+            use_set_transformer=use_set_transformer,
+        )
+        model = GNNPolicy(emb_size, 
+                          cons_nfeats, 
+                          edge_nfeats, 
+                          var_nfeats,
+                          output_size,
+                          n_layers,
+                          holo=holo)
+    else:
+        raise NotImplementedError(f"Unknown model type '{args.model}'.")
+
+    return model.to(args.device)
 
 
-if __name__ == "__main__":
-    args = _build_args()
-    print(f"Using device: {args.device}")
-    set_seed(args.seed)
-    data = load_data(args, for_training=False)
-    cons_nfeats, edge_nfeats, var_nfeats = _infer_feature_dimensions(data.get("train"))
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
-    device = args.device
-    holo_model, selector_model = _load_models(args, cons_nfeats, edge_nfeats, var_nfeats)
+"""
+Utility functions to load and save files
+"""
+def load_gzip(path: Union[str, Path]):
+    """Load a gzip-compressed pickle file"""
+    path = Path(path)
+    with gzip.open(path, "rb") as fh:
+        return pickle.load(fh)
 
-    for split in ("train", "val", "test"):
-        loader = data.get(split)
-        if loader is None:
-            continue
-        start = time.time()
-        metrics = evaluate_split(loader, holo_model, selector_model, device)
-        elapsed = time.time() - start
-        _print_results(split, metrics, elapsed)
+def save_json(path, d):
+    dir_path, file_name = os.path.split(path)
+    os.makedirs(dir_path, exist_ok=True)
+    
+    with open(path, 'w') as file:
+        json.dump(d, file, indent=4)
+
+def load_json(path, default=[]):
+    if not os.path.exists(path):
+        return default
+    with open(path, 'r') as f:
+        d = json.load(f)
+    return d
+
+
+"""
+Utility functions to load and save torch model checkpoints 
+"""
+def load_checkpoint(model, optimizer=None, step='max', save_dir='checkpoints', device='cpu', exclude_keys=[]):
+    os.makedirs(save_dir, exist_ok=True)
+
+    checkpoints = [x for x in os.listdir(save_dir) if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
+
+    if step == 'max':
+        step = 0
+        if checkpoints:
+            step, last_checkpoint = max([(int(x.split('.')[0]), x) for x in checkpoints])
+    else:
+        last_checkpoint = str(step) + '.pth'
+    
+    if step:
+        save_path = os.path.join(save_dir, last_checkpoint)
+        state = torch.load(save_path, map_location=device)
+
+        if len(exclude_keys) > 0:
+            model_state = state['model'] if 'model' in state else state
+            model_state = {k: v for k, v in model_state.items() if not any(k.startswith(exclude_key) for exclude_key in exclude_keys)}
+            model.load_state_dict(model_state, strict=False)
+            
+            if optimizer and 'optimizer' in state:
+                optimizer_state_dict = state['optimizer']
+                excluded_param_ids = {
+                    id(param) for name, param in model.named_parameters() if any(name.startswith(exclude_key) for exclude_key in exclude_keys)
+                }
+                optimizer_state_dict['state'] = {k: v for k, v in optimizer_state_dict['state'].items() if k not in excluded_param_ids}
+                optimizer.load_state_dict(optimizer_state_dict)
+        else:
+            model_state = state['model'] if 'model' in state else state
+            model.load_state_dict(model_state)
+            if optimizer and 'optimizer' in state:
+                optimizer.load_state_dict(state['optimizer'])
+        
+        print('Loaded checkpoint %s' % save_path)
+    
+    return step
+
+def save_checkpoint(model, step, optimizer=None, save_dir='checkpoints'):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(save_dir, str(step) + '.pth')
+
+    if optimizer is None:
+        torch.save(dict(model=model.state_dict()), save_path)
+    else:
+        torch.save(dict(model=model.state_dict(), optimizer=optimizer.state_dict()), save_path)
+    print('Saved checkpoint %s' % save_path)
+
+
+def print_dash_str(message: str = "", width: int = 120) -> None:
+    if not message:
+        print("-" * width)
+        return
+    if len(message) + 2 >= width:
+        print(message)
+        return
+    pad_total = width - len(message) - 2
+    left_pad = pad_total // 2
+    right_pad = pad_total - left_pad
+    print(f"{'-' * left_pad} {message} {'-' * right_pad}")
