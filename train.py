@@ -164,7 +164,9 @@ def train(
                                     pad_value=0)
                 loss_fn = LambdaNDCGLoss1()
                 padded_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates, 
-                                           pad_value=0)
+                                           pad_value=0).clip(0)
+                true_bestscore = padded_scores.max(dim=-1, keepdims=True).values
+                padded_scores = padded_scores / true_bestscore
                 loss = loss_fn(logits, padded_scores, batch.nb_candidates)
                 nan_mask = torch.isnan(loss)
                 if nan_mask.any():

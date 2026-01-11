@@ -35,14 +35,23 @@ BASE_DEFAULTS = {
     "weight_decay": 5e-4,
     "loss_option": "ranking",
     "resume": False,
-    "eval_every": 10000,
-    "save_every": 10000,
-    "print_every": 10000,
+    "eval_every": 100000,
+    "save_every": 100000,
+    "print_every": 100000,
 }
 
 DATASET_DEFAULTS = {
     "set_cover": {
         "dataset_path": "legacy_code_generator/data/samples/setcover/500r_1000c_0.05d",
+    },
+    "cauctions": {
+        "dataset_path": "legacy_code_generator/data/samples/cauctions/100_500",
+    },
+    "facilities": {
+        "dataset_path": "legacy_code_generator/data/samples/facilities/100_100_5",
+    },
+    "indset": {
+        "dataset_path": "legacy_code_generator/data/samples/indset/500_4",
     }
 }
 

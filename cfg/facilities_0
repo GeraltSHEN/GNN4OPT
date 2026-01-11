@@ -26,4 +26,4 @@ resume: false
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
