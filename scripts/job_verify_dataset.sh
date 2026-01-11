@@ -13,4 +13,5 @@
 module load anaconda
 conda activate opt-ml-env
 
-python verify_dataset.py
+python disjunctive_dual/verify_dataset.py
+# python check_data_dist.py --root data/data_dist/set_cover

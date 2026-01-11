@@ -1,13 +1,26 @@
 import argparse
+import csv
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import time
 import torch
 
 from eval import _infer_feature_dimensions, _load_config, _merge_args_with_config, pad_tensor
 from utils import load_checkpoint, load_data, load_model, print_dash_str, set_seed
 
-# TODO: Top1 vs top2 normalized diff < 1e-4 has a total count printout, but First margin < 1e-4 and First margin < 1e-3 do not have?
+AnnotationRow = Tuple[int, int, float]
+
+
+def _write_split_csv(split: str, samples: List[AnnotationRow], output_dir: Path) -> None:
+    if not samples:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / f"{split}_samples.csv"
+    with csv_path.open("w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["sample_type", "tied_best_scores", "first_margin"])
+        writer.writerows(samples)
+
 
 def _format_rate(rate: float) -> str:
     return f"{rate * 100:.2f}%"
@@ -27,13 +40,13 @@ def _build_args() -> argparse.Namespace:
         cfg_idx=cfg_idx,
         config_root=str(config_root),
         model_suffix="",
-        parent_test_stats_dir=".",
+        parent_test_stats_dir="data/data_dist/set_cover",
         eval_split="all",
         eval_batch_size=cfg.get("batch_size", 8),
         eval_train_batch_size=None,
         eval_val_batch_size=None,
         eval_test_batch_size=None,
-        max_samples_per_split=100,
+        max_samples_per_split=None,
     )
     return _merge_args_with_config(init_args, cfg)
 
@@ -71,12 +84,15 @@ def _update_norm_scores(
             accum_count[idx] += int(valid_mask.sum().item())
 
 
-def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str, object]:
+def evaluate_split(
+    data_loader, holo_model, selector_model, device, record_samples: bool = False
+) -> Tuple[Dict[str, object], List[AnnotationRow]]:
     holo_model.eval()
     selector_model.eval()
 
     total_graphs = 0
     k_max = 8
+    sample_records: List[AnnotationRow] = []
 
     consistency_count = 0.0
     consistency_correct = 0.0
@@ -190,6 +206,7 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
             exploration_correct += (exploration_mask & holo_top1_match).float().sum().item()
 
             best_norm = best_scores.clamp_min(1e-8)
+            first_margin_values = torch.zeros_like(best_scores)
             if masked_true_scores.size(1) > 1:
                 sorted_true_scores, _ = masked_true_scores.sort(dim=1, descending=True)
                 full_score_diffs = (sorted_true_scores[:, :-1] - sorted_true_scores[:, 1:]) / best_norm.unsqueeze(-1)
@@ -209,7 +226,6 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
                     torch.full_like(margin_indices, full_score_diffs.size(1)),
                 ).min(dim=1).values
                 has_first_margin = first_margin_idx < full_score_diffs.size(1)
-                first_margin_values = torch.zeros_like(best_scores)
                 if has_first_margin.any():
                     margin_rows = has_first_margin.nonzero(as_tuple=False).squeeze(-1)
                     chosen_idx = first_margin_idx[margin_rows].long()
@@ -299,6 +315,18 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
                     _update_gap_counts(~selector_topk_contains_best, "selector_top8_misses")
 
             total_graphs += batch.num_graphs
+            if record_samples:
+                tied_best = ((masked_true_scores == best_scores_unsqueezed) & candidate_mask).sum(dim=1)
+                sample_type = torch.ones_like(best_scores, dtype=torch.int64)
+                sample_type = sample_type + ((~selector_top1_match) & selector_topk_contains_best).to(torch.int64)
+                sample_type = sample_type + (~selector_topk_contains_best).to(torch.int64) * 2
+                sample_records.extend(
+                    zip(
+                        sample_type.cpu().tolist(),
+                        tied_best.cpu().tolist(),
+                        first_margin_values.cpu().tolist(),
+                    )
+                )
 
     def _compute_rates(correct: float, count: float) -> float:
         return (correct / count) if count > 0 else 0.0
@@ -379,7 +407,7 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
         },
     }
 
-    return {
+    metrics = {
         "holo_consistency": {
             "rate": _compute_rates(consistency_correct, consistency_count),
             "count": consistency_count,
@@ -409,6 +437,7 @@ def evaluate_split(data_loader, holo_model, selector_model, device) -> Dict[str,
         "first_margin": first_margin_metrics,
         "samples": total_graphs,
     }
+    return metrics, sample_records
 
 
 def _print_results(split: str, metrics: Dict[str, object], duration: float) -> None:
@@ -500,11 +529,13 @@ if __name__ == "__main__":
     device = args.device
     holo_model, selector_model = _load_models(args, cons_nfeats, edge_nfeats, var_nfeats)
 
+    output_dir = Path(args.parent_test_stats_dir)
     for split in ("train", "val", "test"):
         loader = data.get(split)
         if loader is None:
             continue
         start = time.time()
-        metrics = evaluate_split(loader, holo_model, selector_model, device)
+        metrics, sample_records = evaluate_split(loader, holo_model, selector_model, device, record_samples=True)
         elapsed = time.time() - start
         _print_results(split, metrics, elapsed)
+        _write_split_csv(split, sample_records, output_dir)
