@@ -1,0 +1,20 @@
+Counts
+sample_type,# no tied,# tied = 2,# tied <= 3,# tied <= 4,# tied <= 5,# tied <= 6,# tied <= 7,# tied <= 8,# tied <= 9 or more
+selector=1 & holo=1,20259,2183,3983,5617,7269,8821,10276,11686,57563
+selector=1 & holo!=1,5548,415,697,902,1061,1188,1300,1405,1789
+selector=2 & holo=1,8892,731,1229,1585,1878,2108,2284,2423,3200
+selector=2 & holo!=1,31138,1308,1950,2359,2669,2856,3000,3096,3433
+
+"Row-wise percentage (of sample_type total, %)"
+sample_type,# no tied,# tied = 2,# tied <= 3,# tied <= 4,# tied <= 5,# tied <= 6,# tied <= 7,# tied <= 8,# tied <= 9 or more
+selector=1 & holo=1,26.03,2.81,5.12,7.22,9.34,11.33,13.20,15.02,73.97
+selector=1 & holo!=1,75.62,5.66,9.50,12.29,14.46,16.19,17.72,19.15,24.38
+selector=2 & holo=1,73.54,6.05,10.16,13.11,15.53,17.43,18.89,20.04,26.46
+selector=2 & holo!=1,90.07,3.78,5.64,6.82,7.72,8.26,8.68,8.96,9.93
+
+Total percentage (overall % of all samples)
+sample_type,# no tied,# tied = 2,# tied <= 3,# tied <= 4,# tied <= 5,# tied <= 6,# tied <= 7,# tied <= 8,# tied <= 9 or more
+selector=1 & holo=1,15.37,1.66,3.02,4.26,5.51,6.69,7.80,8.86,43.67
+selector=1 & holo!=1,4.21,0.31,0.53,0.68,0.80,0.90,0.99,1.07,1.36
+selector=2 & holo=1,6.75,0.55,0.93,1.20,1.42,1.60,1.73,1.84,2.43
+selector=2 & holo!=1,23.62,0.99,1.48,1.79,2.02,2.17,2.28,2.35,2.60

@@ -6,7 +6,6 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 
-
 CSV_FILES = ("train_samples.csv", "val_samples.csv", "test_samples.csv")
 MARGIN_THRESHOLDS = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 MARGIN_LABELS = (
@@ -17,6 +16,19 @@ MARGIN_LABELS = (
     "1e-4~1e-5",
     "1e-5~",
 )
+
+HOLO_GROUP_KEYS = (
+    "sel1_holo1",
+    "sel1_holo_not1",
+    "sel2_holo1",
+    "sel2_holo_not1",
+)
+HOLO_GROUP_LABELS = {
+    "sel1_holo1": "selector=1 & holo=1",
+    "sel1_holo_not1": "selector=1 & holo!=1",
+    "sel2_holo1": "selector=2 & holo=1",
+    "sel2_holo_not1": "selector=2 & holo!=1",
+}
 
 
 def _select_tie_field(fieldnames) -> str:
@@ -33,6 +45,21 @@ def _select_field(fieldnames: Iterable[str], target: str) -> str:
         if name.lower() == target_lower:
             return name
     raise ValueError(f"No `{target}` column found in CSV.")
+
+
+def _select_sample_type_field(fieldnames: Iterable[str]) -> str:
+    lower_map = {name.lower(): name for name in fieldnames or []}
+    for candidate in ("sample_type_selector", "sample_type"):
+        if candidate in lower_map:
+            return lower_map[candidate]
+    raise ValueError("No sample type column found in CSV.")
+
+
+def _select_optional_field(fieldnames: Iterable[str], target: str) -> Optional[str]:
+    try:
+        return _select_field(fieldnames, target)
+    except ValueError:
+        return None
 
 
 def _bin_margins(values: Iterable[float]) -> Tuple[str, ...]:
@@ -55,9 +82,17 @@ def _bin_margins(values: Iterable[float]) -> Tuple[str, ...]:
 
 def collect_distributions(
     root: Path,
-) -> Tuple[Dict[int, Counter], Dict[int, list], Dict[str, Dict[str, int]]]:
+) -> Tuple[
+    Dict[int, Counter],
+    Dict[int, list],
+    Dict[str, Dict[str, int]],
+    Dict[str, Counter],
+    Dict[str, list],
+]:
     tie_counts: Dict[int, Counter] = {1: Counter(), 2: Counter(), 3: Counter()}
     margins: Dict[int, list] = {1: [], 2: [], 3: []}
+    holo_tie_counts: Dict[str, Counter] = {key: Counter() for key in HOLO_GROUP_KEYS}
+    holo_margins: Dict[str, list] = {key: [] for key in HOLO_GROUP_KEYS}
     summaries: Dict[str, Dict[str, int]] = {}
 
     for name in CSV_FILES:
@@ -71,13 +106,19 @@ def collect_distributions(
             reader = csv.DictReader(handle)
             tie_field = _select_tie_field(reader.fieldnames)
             margin_field = _select_field(reader.fieldnames, "first_margin")
-            sample_type_field = _select_field(reader.fieldnames, "sample_type")
+            sample_type_field = _select_sample_type_field(reader.fieldnames)
+            selector_field = _select_optional_field(reader.fieldnames, "sample_type_selector")
+            holo_field = _select_optional_field(reader.fieldnames, "sample_type_holo")
 
             for row in reader:
                 try:
                     ties = int(float(row[tie_field]))
                     margin = float(row[margin_field])
                     sample_type = int(float(row[sample_type_field]))
+                    selector_type = (
+                        int(float(row[selector_field])) if selector_field else None
+                    )
+                    holo_type = int(float(row[holo_field])) if holo_field else None
                 except (TypeError, ValueError, KeyError):
                     continue
 
@@ -91,14 +132,27 @@ def collect_distributions(
                     tie_counts[sample_type][ties] += 1
                     margins[sample_type].append(margin)
 
+                if selector_type is not None and holo_type is not None:
+                    if selector_type == 1:
+                        holo_key = "sel1_holo1" if holo_type == 1 else "sel1_holo_not1"
+                    elif selector_type == 2:
+                        holo_key = "sel2_holo1" if holo_type == 1 else "sel2_holo_not1"
+                    else:
+                        holo_key = None
+                    if holo_key:
+                        holo_tie_counts[holo_key][ties] += 1
+                        holo_margins[holo_key].append(margin)
+
         summaries[name] = {"total": total, "le_8": le_8, "gt_8": gt_8}
 
-    return tie_counts, margins, summaries
+    return tie_counts, margins, summaries, holo_tie_counts, holo_margins
 
 
 def _build_tie_accum_table(
-    tie_counts: Dict[int, Counter],
-) -> Tuple[list, list, Dict[int, int], int]:
+    tie_counts: Dict,
+    key_order: Optional[Sequence] = None,
+    label_map: Optional[Dict] = None,
+) -> Tuple[list, list, Dict[str, int], int]:
     headers = [
         "sample_type",
         "# no tied",
@@ -113,9 +167,10 @@ def _build_tie_accum_table(
     ]
 
     rows: list = []
-    sample_totals: Dict[int, int] = {}
-    for sample_type in sorted(tie_counts.keys()):
-        counter = tie_counts[sample_type]
+    sample_totals: Dict[str, int] = {}
+    keys = key_order or sorted(tie_counts.keys())
+    for sample_type in keys:
+        counter = tie_counts.get(sample_type, Counter())
         sample_total = sum(counter.values())
         counts = [
             counter.get(1, 0),
@@ -124,9 +179,10 @@ def _build_tie_accum_table(
         for upper in range(3, 9):
             counts.append(sum(v for tie, v in counter.items() if 2 <= tie <= upper))
         counts.append(sum(v for tie, v in counter.items() if tie >= 2))
-        row = [sample_type] + counts
+        display_key = label_map.get(sample_type, sample_type) if label_map else sample_type
+        row = [str(display_key)] + counts
         rows.append(row)
-        sample_totals[sample_type] = sample_total
+        sample_totals[str(display_key)] = sample_total
     total_samples = sum(sample_totals.values())
     return headers, rows, sample_totals, total_samples
 
@@ -159,7 +215,7 @@ def _percent_values(values: list, denom: int) -> list:
 def _save_table_csv(
     headers: list,
     rows: list,
-    sample_totals: Dict[int, int],
+    sample_totals: Dict[str, int],
     total_samples: int,
     output_path: Path,
 ) -> None:
@@ -189,8 +245,8 @@ def _save_table_csv(
 
 
 def plot_distributions(
-    tie_counts: Dict[int, Counter],
-    margins: Dict[int, list],
+    tie_counts: Dict,
+    margins: Dict,
     output_path: Path,
     tie_axis_override: Optional[Sequence[int]] = None,
     show: bool = False,
@@ -207,10 +263,13 @@ def plot_distributions(
         )
         tie_axis = list(range(max_ties + 1))
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    n_rows = len(tie_counts)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(14, 4 * n_rows))
+    if n_rows == 1:
+        axes = [axes]
 
-    for idx, sample_type in enumerate(sorted(tie_counts.keys())):
-        ax_tie = axes[idx, 0]
+    for idx, sample_type in enumerate(tie_counts.keys()):
+        ax_tie = axes[idx][0]
         tie_values = [tie_counts[sample_type].get(x, 0) for x in tie_axis]
         ax_tie.bar(tie_axis, tie_values, color="#4C72B0")
         ax_tie.set_ylabel(f"sample_type {sample_type}")
@@ -221,7 +280,7 @@ def plot_distributions(
         if idx == 0:
             ax_tie.set_title("Tied best scores distribution")
 
-        ax_margin = axes[idx, 1]
+        ax_margin = axes[idx][1]
         margin_counts = _bin_margins(margins[sample_type])
         positions = range(len(MARGIN_LABELS))
         ax_margin.bar(positions, margin_counts, color="#55A868")
@@ -253,7 +312,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    tie_counts, margins, summaries = collect_distributions(args.root)
+    tie_counts, margins, summaries, holo_tie_counts, holo_margins = collect_distributions(
+        args.root
+    )
     for name in CSV_FILES:
         stats = summaries.get(name)
         if stats is None:
@@ -272,6 +333,23 @@ def main() -> None:
         tie_counts,
         margins,
         zoom_output_path,
+        tie_axis_override=range(1, 11),
+        show=True,
+    )
+    holo_headers, holo_rows, holo_sample_totals, holo_total_samples = _build_tie_accum_table(
+        holo_tie_counts, key_order=HOLO_GROUP_KEYS, label_map=HOLO_GROUP_LABELS
+    )
+    holo_table_path = args.root / "holo_data_distribution_table.csv"
+    _save_table_csv(
+        holo_headers, holo_rows, holo_sample_totals, holo_total_samples, holo_table_path
+    )
+    holo_output_path = args.root / "holo_data_distribution.png"
+    plot_distributions(holo_tie_counts, holo_margins, holo_output_path)
+    holo_zoom_output_path = args.root / "holo_data_distribution_zoomed.png"
+    plot_distributions(
+        holo_tie_counts,
+        holo_margins,
+        holo_zoom_output_path,
         tie_axis_override=range(1, 11),
         show=True,
     )

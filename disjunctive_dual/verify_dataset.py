@@ -8,7 +8,9 @@ import torch
 from eval import _infer_feature_dimensions, _load_config, _merge_args_with_config, pad_tensor
 from utils import load_checkpoint, load_data, load_model, print_dash_str, set_seed
 
-AnnotationRow = Tuple[int, int, float]
+
+AnnotationRow = Tuple[int, int, int, float]
+
 
 
 def _write_split_csv(split: str, samples: List[AnnotationRow], output_dir: Path) -> None:
@@ -18,7 +20,7 @@ def _write_split_csv(split: str, samples: List[AnnotationRow], output_dir: Path)
     csv_path = output_dir / f"{split}_samples.csv"
     with csv_path.open("w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["sample_type", "tied_best_scores", "first_margin"])
+        writer.writerow(["sample_type_selector", "sample_type_holo", "tied_best_scores", "first_margin"])
         writer.writerows(samples)
 
 
@@ -182,17 +184,20 @@ def evaluate_split(
             best_scores_unsqueezed = best_scores.unsqueeze(-1)
             k_top = min(k_max, true_scores.size(1))
 
-            holo_top1_idx = holo_logits.argmax(dim=-1)
+            holo_topk_idx = holo_logits.topk(k_top, dim=-1).indices
+            holo_top1_idx = holo_topk_idx[:, 0]
             selector_topk_idx = selector_logits.topk(k_top, dim=-1).indices
             selector_top1_idx = selector_topk_idx[:, 0]
 
             selector_top1_scores = masked_true_scores.gather(-1, selector_top1_idx.unsqueeze(-1)).squeeze(-1)
             selector_topk_scores = masked_true_scores.gather(-1, selector_topk_idx)
             holo_top1_scores = masked_true_scores.gather(-1, holo_top1_idx.unsqueeze(-1)).squeeze(-1)
+            holo_topk_scores = masked_true_scores.gather(-1, holo_topk_idx)
 
             selector_top1_match = selector_top1_scores == best_scores
             selector_topk_contains_best = (selector_topk_scores == best_scores_unsqueezed).any(dim=-1)
             holo_top1_match = holo_top1_scores == best_scores
+            holo_topk_contains_best = (holo_topk_scores == best_scores_unsqueezed).any(dim=-1)
 
             consistency_count += selector_top1_match.float().sum().item()
             consistency_correct += (selector_top1_match & holo_top1_match).float().sum().item()
@@ -317,12 +322,19 @@ def evaluate_split(
             total_graphs += batch.num_graphs
             if record_samples:
                 tied_best = ((masked_true_scores == best_scores_unsqueezed) & candidate_mask).sum(dim=1)
-                sample_type = torch.ones_like(best_scores, dtype=torch.int64)
-                sample_type = sample_type + ((~selector_top1_match) & selector_topk_contains_best).to(torch.int64)
-                sample_type = sample_type + (~selector_topk_contains_best).to(torch.int64) * 2
+                sample_type_selector = torch.ones_like(best_scores, dtype=torch.int64)
+                sample_type_selector = sample_type_selector + (
+                    (~selector_top1_match) & selector_topk_contains_best
+                ).to(torch.int64)
+                sample_type_selector = sample_type_selector + (~selector_topk_contains_best).to(torch.int64) * 2
+
+                sample_type_holo = torch.ones_like(best_scores, dtype=torch.int64)
+                sample_type_holo = sample_type_holo + ((~holo_top1_match) & holo_topk_contains_best).to(torch.int64)
+                sample_type_holo = sample_type_holo + (~holo_topk_contains_best).to(torch.int64) * 2
                 sample_records.extend(
                     zip(
-                        sample_type.cpu().tolist(),
+                        sample_type_selector.cpu().tolist(),
+                        sample_type_holo.cpu().tolist(),
                         tied_best.cpu().tolist(),
                         first_margin_values.cpu().tolist(),
                     )
