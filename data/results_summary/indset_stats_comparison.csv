@@ -1,0 +1,3 @@
+cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accuracy,test_eval_acc_Score_diff,test_eval_acc_Normalized_score_diff,test_eval_acc_n_samples
+0,indset_cfg0,5.08,55.55%,76.20%,0.09,0.10,20000
+2,indset_cfg2,4.96,54.50%,75.59%,0.09,0.10,20000

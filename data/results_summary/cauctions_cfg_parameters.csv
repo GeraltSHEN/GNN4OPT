@@ -1,0 +1,31 @@
+parameter,cauctions_cfg0,cauctions_cfg2,variation
+use_normalized_scores_as_relevance,False,true # -> true,different
+batch_size,8,8,persistent
+binarize_edge_features,False,False,persistent
+breaking_selector_model_path,,,persistent
+config_root,cfg,cfg,persistent
+dataset_path,legacy_code_generator/data/samples/cauctions/100_500,legacy_code_generator/data/samples/cauctions/100_500,persistent
+edge_nfeats,1,1,persistent
+epochs,2 # -> 2,2 # -> 2,persistent
+eval_every,100000,100000,persistent
+file_pattern,sample_*.pkl,sample_*.pkl,persistent
+hidden_channels,64,64,persistent
+isab_num_inds,50,50,persistent
+log_dir,./logs,./logs,persistent
+loss_option,ranking,ranking,persistent
+lr,0.0001,0.0001,persistent
+model,raw # -> raw,raw # -> raw,persistent
+model_dir,./models,./models,persistent
+model_suffix,,,persistent
+mp_layers,2,2,persistent
+n_breakings,8,8,persistent
+num_heads,1,1,persistent
+num_layers,2,2,persistent
+print_every,100000,100000,persistent
+resume,False,False,persistent
+resume_model_dir,,,persistent
+save_every,100000,100000,persistent
+seed,42,42,persistent
+sym_break_layers,2,2,persistent
+use_set_transformer,True,True,persistent
+weight_decay,0.0005,0.0005,persistent

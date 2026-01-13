@@ -37,6 +37,7 @@ class BipartiteNodeData(Data):
         nb_candidates: int,
         candidate_choices: int,
         candidate_scores: torch.Tensor,
+        candidate_relevance: torch.Tensor,
         n_variables_per_graph: int,
         n_constraints_per_graph: int,
     ):
@@ -49,6 +50,7 @@ class BipartiteNodeData(Data):
         self.nb_candidates = nb_candidates
         self.candidate_choices = candidate_choices
         self.candidate_scores = candidate_scores
+        self.candidate_relevance = candidate_relevance
         self.n_variables_per_graph = n_variables_per_graph
         self.n_constraints_per_graph = n_constraints_per_graph
 
@@ -151,6 +153,7 @@ class GraphDataset(Dataset):
         
         candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
         candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
+        candidate_relevance = (candidate_scores == candidate_scores.max()).float()
         candidate_choices = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
 
         graph = BipartiteNodeData(
@@ -162,6 +165,7 @@ class GraphDataset(Dataset):
             len(candidates),
             candidate_choices,
             candidate_scores,
+            candidate_relevance,
             variable_features.size(0),
             constraint_features.size(0),
         )

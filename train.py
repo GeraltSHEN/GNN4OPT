@@ -66,6 +66,7 @@ def train(
     save_every = args.save_every
     print_every = args.print_every
     loss_option = args.loss_option
+    use_normalized_scores_as_relevance = args.use_normalized_scores_as_relevance
     score_th = float('inf')
 
     model_dir = Path(model_dir)
@@ -163,17 +164,19 @@ def train(
                 logits = pad_tensor(logits[batch.candidates], batch.nb_candidates,
                                     pad_value=0)
                 loss_fn = LambdaNDCGLoss1()
-                padded_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates, 
-                                           pad_value=0).clip(0)
-                true_bestscore = padded_scores.max(dim=-1, keepdims=True).values
-                padded_scores = padded_scores / true_bestscore
-                loss = loss_fn(logits, padded_scores, batch.nb_candidates)
+                if use_normalized_scores_as_relevance:
+                    padded_relevance = pad_tensor(batch.candidate_scores, batch.nb_candidates, pad_value=0).clip(0)
+                    true_bestscore = padded_relevance.max(dim=-1, keepdims=True).values
+                    padded_relevance = padded_relevance / true_bestscore
+                else:
+                    padded_relevance = pad_tensor(batch.candidate_relevance, batch.nb_candidates, pad_value=0)
+                loss = loss_fn(logits, padded_relevance, batch.nb_candidates)
                 nan_mask = torch.isnan(loss)
                 if nan_mask.any():
                     nan_indices = nan_mask.nonzero(as_tuple=False).flatten()
                     print(f"NaN ranking loss at indices {nan_indices.tolist()}")
                     print(f"logits: {logits[nan_indices].detach().cpu()}")
-                    print(f"padded_scores: {padded_scores[nan_indices].detach().cpu()}")
+                    print(f"padded_relevance: {padded_relevance[nan_indices].detach().cpu()}")
                 loss = loss.mean()
             else:
                 raise ValueError(f"Unsupported loss option: {loss_option}")
@@ -323,19 +326,19 @@ def parse_args(argv=None):
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=10000,
+        default=100000,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--save_every",
         type=int,
-        default=10000,
+        default=100000,
         help="Checkpoint frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--print_every",
         type=int,
-        default=10000,
+        default=100000,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     return parser.parse_args(argv)

@@ -22,9 +22,9 @@ lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
 loss_option: ranking
-use_normalized_scores_as_relevance: false
+use_normalized_scores_as_relevance: true # -> true
 resume: false
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dataset_path: legacy_code_generator/data/samples/indset/500_4

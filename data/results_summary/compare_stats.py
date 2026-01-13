@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def discover_config_dirs(base_dir: Path, dataset: str) -> List[ConfigInfo]:
-    """Return ordered config directories for the dataset (skipping cfg0)."""
+    """Return ordered config directories for the dataset."""
     prefix = f"{dataset.lower()}_cfg"
     configs: List[ConfigInfo] = []
     for candidate in base_dir.iterdir():
@@ -54,8 +54,8 @@ def discover_config_dirs(base_dir: Path, dataset: str) -> List[ConfigInfo]:
         if not match:
             continue
         index = int(match.group(1))
-        if index == 0:
-            continue
+        # if index == 0:
+        #     continue
         configs.append(ConfigInfo(index=index, name=candidate.name, path=candidate))
     configs.sort(key=lambda cfg: cfg.index)
     return configs

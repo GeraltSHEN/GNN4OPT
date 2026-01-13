@@ -34,6 +34,7 @@ BASE_DEFAULTS = {
     "batch_size": 8,
     "weight_decay": 5e-4,
     "loss_option": "ranking",
+    "use_normalized_scores_as_relevance": True,
     "resume": False,
     "eval_every": 100000,
     "save_every": 100000,

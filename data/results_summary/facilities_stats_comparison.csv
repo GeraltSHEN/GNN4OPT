@@ -1,0 +1,3 @@
+cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accuracy,test_eval_acc_Score_diff,test_eval_acc_Normalized_score_diff,test_eval_acc_n_samples
+0,facilities_cfg0,0.94,68.83%,98.22%,40.44,0.16,20000
+2,facilities_cfg2,0.94,68.90%,98.23%,40.55,0.16,20000

@@ -13,17 +13,17 @@
 module load anaconda
 conda activate opt-ml-env
 
-python train.py --dataset set_cover --cfg_idx 0
-python eval.py --dataset set_cover --cfg_idx 0 --eval_split test
+python train.py --dataset set_cover --cfg_idx 2
+python eval.py --dataset set_cover --cfg_idx 2 --eval_split test
 
 echo "** cauctions dataset **"
-python train.py --dataset cauctions --cfg_idx 0
-python eval.py --dataset cauctions --cfg_idx 0 --eval_split test
+python train.py --dataset cauctions --cfg_idx 2
+python eval.py --dataset cauctions --cfg_idx 2 --eval_split test
 
 echo "** facilities dataset **"
-python train.py --dataset facilities --cfg_idx 0
-python eval.py --dataset facilities --cfg_idx 0 --eval_split test
+python train.py --dataset facilities --cfg_idx 2
+python eval.py --dataset facilities --cfg_idx 2 --eval_split test
 
 echo "** indset dataset **"
-python train.py --dataset indset --cfg_idx 0
-python eval.py --dataset indset --cfg_idx 0 --eval_split test
+python train.py --dataset indset --cfg_idx 2
+python eval.py --dataset indset --cfg_idx 2 --eval_split test
