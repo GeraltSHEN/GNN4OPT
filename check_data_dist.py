@@ -6,6 +6,9 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 
+from default_args import DATASET_DEFAULTS
+from eval import _load_config, _merge_args_with_config
+
 CSV_FILES = ("train_samples.csv", "val_samples.csv", "test_samples.csv")
 MARGIN_THRESHOLDS = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 MARGIN_LABELS = (
@@ -17,18 +20,43 @@ MARGIN_LABELS = (
     "1e-5~",
 )
 
-HOLO_GROUP_KEYS = (
-    "sel1_holo1",
-    "sel1_holo_not1",
-    "sel2_holo1",
-    "sel2_holo_not1",
-)
+HOLO_VALUES = (1, 2, 3)
+HOLO_GROUP_KEYS = tuple(f"sel{sel}_holo{holo}" for sel in HOLO_VALUES for holo in HOLO_VALUES)
 HOLO_GROUP_LABELS = {
-    "sel1_holo1": "selector=1 & holo=1",
-    "sel1_holo_not1": "selector=1 & holo!=1",
-    "sel2_holo1": "selector=2 & holo=1",
-    "sel2_holo_not1": "selector=2 & holo!=1",
+    key: f"selector={sel} & holo={holo}"
+    for sel in HOLO_VALUES
+    for holo in HOLO_VALUES
+    for key in (f"sel{sel}_holo{holo}",)
 }
+
+
+def _resolve_model_dir(args: argparse.Namespace) -> Path:
+    base_dir = Path(getattr(args, "model_dir", "./models"))
+    model_name = getattr(args, "model", None)
+    if model_name:
+        base_dir = base_dir / model_name
+    model_id = getattr(args, "model_id", None)
+    if model_id:
+        base_dir = base_dir / model_id
+    model_suffix = getattr(args, "model_suffix", "")
+    if model_suffix:
+        base_dir = Path(f"{base_dir}_{model_suffix}")
+    return base_dir
+
+
+def _build_run_root(
+    dataset: str, cfg_idx: int, config_root: Path, parent_dir: Path, model_suffix: str
+) -> Path:
+    cfg = _load_config(config_root, dataset, cfg_idx)
+    init_args = argparse.Namespace(
+        dataset=dataset,
+        cfg_idx=cfg_idx,
+        config_root=str(config_root),
+        model_suffix=model_suffix,
+    )
+    args = _merge_args_with_config(init_args, cfg)
+    run_name = _resolve_model_dir(args).name
+    return parent_dir / dataset / run_name
 
 
 def _select_tie_field(fieldnames) -> str:
@@ -88,12 +116,14 @@ def collect_distributions(
     Dict[str, Dict[str, int]],
     Dict[str, Counter],
     Dict[str, list],
+    bool,
 ]:
     tie_counts: Dict[int, Counter] = {1: Counter(), 2: Counter(), 3: Counter()}
     margins: Dict[int, list] = {1: [], 2: [], 3: []}
     holo_tie_counts: Dict[str, Counter] = {key: Counter() for key in HOLO_GROUP_KEYS}
     holo_margins: Dict[str, list] = {key: [] for key in HOLO_GROUP_KEYS}
     summaries: Dict[str, Dict[str, int]] = {}
+    has_holo_data = False
 
     for name in CSV_FILES:
         csv_path = root / name
@@ -133,19 +163,15 @@ def collect_distributions(
                     margins[sample_type].append(margin)
 
                 if selector_type is not None and holo_type is not None:
-                    if selector_type == 1:
-                        holo_key = "sel1_holo1" if holo_type == 1 else "sel1_holo_not1"
-                    elif selector_type == 2:
-                        holo_key = "sel2_holo1" if holo_type == 1 else "sel2_holo_not1"
-                    else:
-                        holo_key = None
-                    if holo_key:
+                    holo_key = f"sel{selector_type}_holo{holo_type}"
+                    if holo_key in holo_tie_counts:
+                        has_holo_data = True
                         holo_tie_counts[holo_key][ties] += 1
                         holo_margins[holo_key].append(margin)
 
         summaries[name] = {"total": total, "le_8": le_8, "gt_8": gt_8}
 
-    return tie_counts, margins, summaries, holo_tie_counts, holo_margins
+    return tie_counts, margins, summaries, holo_tie_counts, holo_margins, has_holo_data
 
 
 def _build_tie_accum_table(
@@ -164,6 +190,7 @@ def _build_tie_accum_table(
         "# tied <= 7",
         "# tied <= 8",
         "# tied <= 9 or more",
+        "# no tied & # tied",
     ]
 
     rows: list = []
@@ -171,7 +198,6 @@ def _build_tie_accum_table(
     keys = key_order or sorted(tie_counts.keys())
     for sample_type in keys:
         counter = tie_counts.get(sample_type, Counter())
-        sample_total = sum(counter.values())
         counts = [
             counter.get(1, 0),
             counter.get(2, 0),
@@ -180,9 +206,10 @@ def _build_tie_accum_table(
             counts.append(sum(v for tie, v in counter.items() if 2 <= tie <= upper))
         counts.append(sum(v for tie, v in counter.items() if tie >= 2))
         display_key = label_map.get(sample_type, sample_type) if label_map else sample_type
-        row = [str(display_key)] + counts
+        row_total = sum(counter.values())
+        row = [str(display_key)] + counts + [row_total]
         rows.append(row)
-        sample_totals[str(display_key)] = sample_total
+        sample_totals[str(display_key)] = row_total
     total_samples = sum(sample_totals.values())
     return headers, rows, sample_totals, total_samples
 
@@ -305,54 +332,111 @@ def main() -> None:
         description="Compute tie distribution stats for sample CSV files."
     )
     parser.add_argument(
-        "--root",
+        "--dataset",
+        type=str,
+        default="set_cover",
+        choices=sorted(DATASET_DEFAULTS.keys()),
+        help="Dataset to load configurations from.",
+    )
+    parser.add_argument(
+        "--cfg_idx",
+        type=int,
+        nargs="+",
+        help="Configuration indices to analyze (one directory per cfg).",
+    )
+    parser.add_argument(
+        "--config_root",
         type=Path,
-        default=Path("."),
-        help="Directory containing *_samples.csv files (train/val/test).",
+        default=Path("./cfg"),
+        help="Root directory containing configuration files.",
+    )
+    parser.add_argument(
+        "--parent_dir",
+        type=Path,
+        default=Path("data/data_dist"),
+        help="Parent directory where verify_dataset outputs are stored.",
+    )
+    parser.add_argument(
+        "--model_suffix",
+        type=str,
+        default="",
+        help="Optional model suffix used when generating the stats.",
+    )
+    parser.add_argument(
+        "--roots",
+        type=Path,
+        nargs="*",
+        help="Explicit directories containing *_samples.csv files. Overrides cfg_idx if provided.",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Display plots interactively in addition to saving them.",
     )
     args = parser.parse_args()
 
-    tie_counts, margins, summaries, holo_tie_counts, holo_margins = collect_distributions(
-        args.root
-    )
-    for name in CSV_FILES:
-        stats = summaries.get(name)
-        if stats is None:
-            print(f"{name}: missing ({args.root / name})")
-        else:
-            print(
-                f"{name}: total={stats['total']}, <=8 ties={stats['le_8']}, >8 ties={stats['gt_8']}"
+    if args.roots:
+        run_roots = list(args.roots)
+    else:
+        if not args.cfg_idx:
+            raise ValueError("Provide at least one --cfg_idx or explicit --roots.")
+        run_roots = [
+            _build_run_root(
+                args.dataset,
+                cfg_idx,
+                args.config_root,
+                args.parent_dir,
+                args.model_suffix,
             )
-    headers, rows, sample_totals, total_samples = _build_tie_accum_table(tie_counts)
-    table_output_path = args.root / "data_distribution_table.csv"
-    _save_table_csv(headers, rows, sample_totals, total_samples, table_output_path)
-    output_path = args.root / "data_distribution.png"
-    plot_distributions(tie_counts, margins, output_path)
-    zoom_output_path = args.root / "data_distribution_zoomed.png"
-    plot_distributions(
-        tie_counts,
-        margins,
-        zoom_output_path,
-        tie_axis_override=range(1, 11),
-        show=True,
-    )
-    holo_headers, holo_rows, holo_sample_totals, holo_total_samples = _build_tie_accum_table(
-        holo_tie_counts, key_order=HOLO_GROUP_KEYS, label_map=HOLO_GROUP_LABELS
-    )
-    holo_table_path = args.root / "holo_data_distribution_table.csv"
-    _save_table_csv(
-        holo_headers, holo_rows, holo_sample_totals, holo_total_samples, holo_table_path
-    )
-    holo_output_path = args.root / "holo_data_distribution.png"
-    plot_distributions(holo_tie_counts, holo_margins, holo_output_path)
-    holo_zoom_output_path = args.root / "holo_data_distribution_zoomed.png"
-    plot_distributions(
-        holo_tie_counts,
-        holo_margins,
-        holo_zoom_output_path,
-        tie_axis_override=range(1, 11),
-        show=True,
-    )
+            for cfg_idx in args.cfg_idx
+        ]
+
+    for run_root in run_roots:
+        print(f"Processing: {run_root}")
+        tie_counts, margins, summaries, holo_tie_counts, holo_margins, has_holo = collect_distributions(
+            run_root
+        )
+        for name in CSV_FILES:
+            stats = summaries.get(name)
+            if stats is None:
+                print(f"{name}: missing ({run_root / name})")
+            else:
+                print(
+                    f"{name}: total={stats['total']}, <=8 ties={stats['le_8']}, >8 ties={stats['gt_8']}"
+                )
+
+        headers, rows, sample_totals, total_samples = _build_tie_accum_table(tie_counts)
+        table_output_path = run_root / "data_distribution_table.csv"
+        _save_table_csv(headers, rows, sample_totals, total_samples, table_output_path)
+        output_path = run_root / "data_distribution.png"
+        plot_distributions(tie_counts, margins, output_path, show=args.show)
+        zoom_output_path = run_root / "data_distribution_zoomed.png"
+        plot_distributions(
+            tie_counts,
+            margins,
+            zoom_output_path,
+            tie_axis_override=range(1, 11),
+            show=args.show,
+        )
+
+        if has_holo:
+            holo_headers, holo_rows, holo_sample_totals, holo_total_samples = _build_tie_accum_table(
+                holo_tie_counts, key_order=HOLO_GROUP_KEYS, label_map=HOLO_GROUP_LABELS
+            )
+            holo_table_path = run_root / "holo_data_distribution_table.csv"
+            _save_table_csv(
+                holo_headers, holo_rows, holo_sample_totals, holo_total_samples, holo_table_path
+            )
+            holo_output_path = run_root / "holo_data_distribution.png"
+            plot_distributions(holo_tie_counts, holo_margins, holo_output_path, show=args.show)
+            holo_zoom_output_path = run_root / "holo_data_distribution_zoomed.png"
+            plot_distributions(
+                holo_tie_counts,
+                holo_margins,
+                holo_zoom_output_path,
+                tie_axis_override=range(1, 11),
+                show=args.show,
+            )
 
 
 if __name__ == "__main__":

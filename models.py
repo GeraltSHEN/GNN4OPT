@@ -8,6 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 
+# from extensions import repeat_interleave, vrange
+
 PERFORMANCE_DEBUG = False  # Toggle to print timing and memory information
 
 
@@ -808,3 +810,69 @@ class SetCoverHolo(torch.nn.Module):
         # (n_variables, d+2)
         _log_peak_memory(peak_mem_device)
         return X
+
+
+
+# # End-to-end learned selection policy subgraph GNN
+# class GumbelModel(torch.nn.Module):
+#     def __init__(
+#         self,
+#         selection_model: GumbelSelection,
+#         prediction_model: DSnetwork,
+#         num_subgraphs: int,
+#     ):
+#         super().__init__()
+#         self.selection_model = selection_model
+#         self.prediction_model = prediction_model
+#         self.num_subgraphs = num_subgraphs
+
+#     @contextmanager
+#     def with_dataset(self, dataset: AdjAndFeats):
+#         with self.selection_model.with_dataset(dataset):
+#             yield
+
+#     def mark_subgraphs(self, batched_data, samples, detach=False):
+#         # NOTE(first_node_id_is_1): for nodes of the subgraph of the original
+#         #  graph the marking is on no node and it does not carry gradient
+#         original = torch.zeros_like(samples[0])
+
+#         max_nodes = original.size(2)
+#         num_marked = original.size(-1)
+#         samples = torch.cat((original, *samples), dim=1).reshape(-1, num_marked)
+#         marking = samples[
+#             vrange(
+#                 lengths=batched_data.num_nodes_per_subgraph,
+#                 starts=torch.arange(
+#                     batched_data.num_total_subgraphs, device=samples.device
+#                 )
+#                 * max_nodes,
+#             )
+#         ]
+        
+#         if detach:
+#             marking = marking.detach()
+
+#         # NOTE: Use the marking to attach gradient
+#         node_repr = batched_data.v_features[:, num_marked:]
+#         return batched_data.replace(v_features=torch.cat((marking, node_repr), dim=-1))
+
+#     def forward(self, obs: Observation):
+#         samples = []
+#         for t in range(self.num_subgraphs - 1):
+#             batched_data = self.selection_model.preprocess_observation(obs)
+
+#             if len(samples) > 0:
+#                 batched_data = self.mark_subgraphs(batched_data, samples)
+
+#             subgraphs, curr_samples = self.selection_model(batched_data, t)
+
+#             update_observation_inplace_no_replace(
+#                 obs, subgraphs + 1
+#             )  # NOTE(first_node_id_is_1): 0 subgraph is the graph itself
+
+#             samples.append(curr_samples.unsqueeze(1))
+
+#         batched_data = self.selection_model.preprocess_observation(obs)
+#         batched_data = self.mark_subgraphs(batched_data, samples)
+#         out, _ = self.prediction_model(batched_data)
+#         return out
