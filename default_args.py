@@ -1,9 +1,11 @@
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
 import yaml
+from distutils.util import strtobool
+
+NONE_ALIASES = {"none", "null", "nil"}
 
 
 BASE_DEFAULTS = {
@@ -33,8 +35,9 @@ BASE_DEFAULTS = {
     "lr": 1e-4,
     "batch_size": 8,
     "weight_decay": 5e-4,
-    "loss_option": "ranking",
-    "use_normalized_scores_as_relevance": True,
+    "loss_option": "LambdaNDCGLoss1",
+    "tier1_ub": 0.0,
+    "relevance_type": "linear",
     "resume": False,
     "eval_every": 100000,
     "save_every": 100000,
@@ -65,6 +68,52 @@ def get_default_args(dataset: str):
     return defaults
 
 
+def is_none_token(value) -> bool:
+    return value is None or (isinstance(value, str) and value.strip().lower() in NONE_ALIASES)
+
+
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(strtobool(str(value)))
+    except Exception as exc:
+        raise argparse.ArgumentTypeError(f"Expected a boolean value for '{value}'.") from exc
+
+
+def register_override_arguments(parser: argparse.ArgumentParser, defaults: dict):
+    """Dynamically register CLI flags for each configurable default key."""
+
+    def none_or(parser_fn):
+        def wrapper(raw):
+            if is_none_token(raw):
+                return None
+            return parser_fn(raw)
+
+        return wrapper
+
+    for key, default_value in defaults.items():
+        # Skip required positional arguments that are handled separately
+        if key in {"dataset", "cfg_idx"}:
+            continue
+
+        arg_kwargs = {
+            "default": argparse.SUPPRESS,
+            "help": f"Override default for '{key}' (default: {default_value}).",
+        }
+
+        if isinstance(default_value, bool):
+            arg_kwargs["type"] = none_or(parse_bool)
+        elif isinstance(default_value, int):
+            arg_kwargs["type"] = none_or(int)
+        elif isinstance(default_value, float):
+            arg_kwargs["type"] = none_or(float)
+        else:
+            arg_kwargs["type"] = none_or(str)
+
+        parser.add_argument(f"--{key}", **arg_kwargs)
+
+
 def write_config(defaults, config_root: Path, dataset: str, cfg_idx: int) -> Path:
     config_root.mkdir(parents=True, exist_ok=True)
     defaults["config_root"] = str(config_root)
@@ -90,6 +139,11 @@ def parse_args(argv=None):
         default=0,
         help="Configuration index appended to the generated file name.",
     )
+    # Allow overriding any default values via CLI
+    all_defaults = {**BASE_DEFAULTS}
+    for dataset_defaults in DATASET_DEFAULTS.values():
+        all_defaults.update(dataset_defaults)
+    register_override_arguments(parser, all_defaults)
     return parser.parse_args(argv)
 
 
@@ -98,7 +152,12 @@ def main(argv=None):
     defaults = get_default_args(
         args.dataset,
     )
-    write_config(defaults, Path(defaults['config_root']), args.dataset, args.cfg_idx)
+    # Apply any CLI overrides (only for flags that were explicitly provided)
+    for key in defaults.keys():
+        if hasattr(args, key):
+            defaults[key] = getattr(args, key)
+
+    write_config(defaults, Path(defaults["config_root"]), args.dataset, args.cfg_idx)
 
 
 if __name__ == "__main__":

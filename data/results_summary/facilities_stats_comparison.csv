@@ -1,3 +1,9 @@
 cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accuracy,test_eval_acc_Score_diff,test_eval_acc_Normalized_score_diff,test_eval_acc_n_samples
 0,facilities_cfg0,0.94,68.83%,98.22%,40.44,0.16,20000
 2,facilities_cfg2,0.94,68.90%,98.23%,40.55,0.16,20000
+10,facilities_cfg10,0.95,68.45%,98.17%,39.65,0.17,20000
+11,facilities_cfg11,0.95,69.01%,98.19%,39.83,0.16,20000
+12,facilities_cfg12,0.95,68.55%,98.20%,40.05,0.17,20000
+13,facilities_cfg13,0.96,68.64%,98.27%,39.78,0.16,20000
+14,facilities_cfg14,0.96,68.38%,98.33%,39.67,0.17,20000
+15,facilities_cfg15,0.96,69.06%,98.30%,39.21,0.16,20000

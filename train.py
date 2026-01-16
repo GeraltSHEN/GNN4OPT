@@ -21,8 +21,8 @@ from utils import (
     load_checkpoint,
     print_dash_str
 )
-# TODO: try different ltr losses?
-from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2
+from losses import NormalizedPairwiseLogisticLoss, TierNormalizedLambdaARP2
+from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2, PairwiseLogisticLoss
 
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
@@ -66,7 +66,17 @@ def train(
     save_every = args.save_every
     print_every = args.print_every
     loss_option = args.loss_option
-    use_normalized_scores_as_relevance = args.use_normalized_scores_as_relevance
+    ranking_loss_factories = {
+        "LambdaNDCGLoss1": LambdaNDCGLoss1,
+        "LambdaNDCGLoss2": LambdaNDCGLoss2,
+        "LambdaARPLoss1": LambdaARPLoss1,
+        "LambdaARPLoss2": LambdaARPLoss2,
+        "PairwiseLogisticLoss": PairwiseLogisticLoss,
+        "NormalizedPairwiseLogisticLoss": NormalizedPairwiseLogisticLoss,
+        "TierNormalizedLambdaARP2": TierNormalizedLambdaARP2,
+    }
+    ranking_loss_cls = ranking_loss_factories.get(loss_option)
+    ranking_loss_fn = ranking_loss_cls() if ranking_loss_cls else None
     score_th = float('inf')
 
     model_dir = Path(model_dir)
@@ -159,17 +169,12 @@ def train(
                 # Index the results by the candidates, and split and pad them
                 logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
                 loss = F.mse_loss(logits, batch.candidate_scores)
-            elif loss_option == "ranking":
+            elif ranking_loss_fn is not None:
                 # Index the results by the candidates, and split and pad them
                 logits = pad_tensor(logits[batch.candidates], batch.nb_candidates,
                                     pad_value=0)
-                loss_fn = LambdaNDCGLoss1()
-                if use_normalized_scores_as_relevance:
-                    padded_relevance = pad_tensor(batch.candidate_scores, batch.nb_candidates, pad_value=0).clip(0)
-                    true_bestscore = padded_relevance.max(dim=-1, keepdims=True).values
-                    padded_relevance = padded_relevance / true_bestscore
-                else:
-                    padded_relevance = pad_tensor(batch.candidate_relevance, batch.nb_candidates, pad_value=0)
+                loss_fn = ranking_loss_fn
+                padded_relevance = pad_tensor(batch.candidate_relevance, batch.nb_candidates, pad_value=0)
                 loss = loss_fn(logits, padded_relevance, batch.nb_candidates)
                 nan_mask = torch.isnan(loss)
                 if nan_mask.any():

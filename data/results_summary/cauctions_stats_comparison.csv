@@ -1,3 +1,9 @@
 cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accuracy,test_eval_acc_Score_diff,test_eval_acc_Normalized_score_diff,test_eval_acc_n_samples
 0,cauctions_cfg0,2.75,60.65%,89.83%,252.69,0.14,20000
 2,cauctions_cfg2,2.72,60.54%,89.97%,257.66,0.14,20000
+10,cauctions_cfg10,2.91,59.57%,88.58%,269.07,0.15,20000
+11,cauctions_cfg11,2.85,59.69%,88.52%,268.01,0.15,20000
+12,cauctions_cfg12,2.95,59.59%,88.92%,269.94,0.15,20000
+13,cauctions_cfg13,2.91,57.69%,87.17%,312.31,0.17,20000
+14,cauctions_cfg14,2.91,59.91%,88.96%,265.56,0.15,20000
+15,cauctions_cfg15,2.93,57.34%,86.48%,311.95,0.17,20000

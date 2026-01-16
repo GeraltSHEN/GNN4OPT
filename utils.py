@@ -74,11 +74,13 @@ class GraphDataset(Dataset):
         sample_files: Sequence[Union[str, Path]],
         edge_nfeats: int = 1,
         binarize_edge_features: bool = True,
+        args=None,
     ):
         super().__init__(root=None, transform=None, pre_transform=None)
         self.sample_files = [str(path) for path in _ensure_sequence(sample_files)]
         self.edge_nfeats = edge_nfeats
         self.binarize_edge_features = binarize_edge_features
+        self.args = args
 
     def len(self):
         return len(self.sample_files)
@@ -153,7 +155,7 @@ class GraphDataset(Dataset):
         
         candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
         candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
-        candidate_relevance = (candidate_scores == candidate_scores.max()).float()
+        candidate_relevance = self.assign_candidate_relevance(candidate_scores)
         candidate_choices = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
 
         graph = BipartiteNodeData(
@@ -171,6 +173,58 @@ class GraphDataset(Dataset):
         )
         graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
         return graph
+    
+    def assign_candidate_relevance(self, candidate_scores: torch.Tensor) -> torch.Tensor:
+        args = getattr(self, "args", None)
+        loss_option = getattr(args, "loss_option", None) if args is not None else None
+        tier1_ub = float(getattr(args, "tier1_ub", 0.0)) if args is not None else 0.0
+        relevance_type = getattr(args, "relevance_type", "linear") if args is not None else "linear"
+
+        max_score = candidate_scores.max()
+        score_gap = max_score - candidate_scores
+        tier1_mask = score_gap <= tier1_ub
+
+        if loss_option != "TierNormalizedLambdaARP2":
+            return tier1_mask.to(torch.long)
+
+        tiers = [tier1_mask]
+        remaining_mask = ~tier1_mask
+
+        if remaining_mask.any():
+            unique_scores = torch.unique(candidate_scores[remaining_mask], sorted=True)
+            unique_scores = torch.flip(unique_scores, dims=[0])
+            for score in unique_scores:
+                if len(tiers) >= 4:
+                    break
+                score_mask = remaining_mask & (candidate_scores == score)
+                tiers.append(score_mask)
+                remaining_mask = remaining_mask & ~score_mask
+                if not remaining_mask.any():
+                    break
+
+        tiers.append(remaining_mask)
+
+        if relevance_type not in ("linear", "exponential"):
+            relevance_type = "linear"
+
+        tier_values = []
+        for idx in range(len(tiers)):
+            tier_idx = idx + 1
+            if relevance_type == "linear":
+                tier_values.append(5 - tier_idx)
+            else:
+                tier_values.append(2 ** (5 - tier_idx))
+
+        if len(tiers) < 5:
+            tier_values[-1] = 0
+
+        relevance = torch.zeros_like(candidate_scores, dtype=torch.long)
+        for mask, value in zip(tiers, tier_values):
+            if value == 0:
+                continue
+            relevance = relevance + (mask.to(torch.long) * int(value))
+
+        return relevance
 
 
 def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
@@ -238,6 +292,7 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
                 sample_files,
                 edge_nfeats=edge_nfeats,
                 binarize_edge_features=binarize_edge_features,
+                args=args,
             )
             data[split_name] = DataLoader(dataset, 
                                           batch_size=cfg["batch_size"], 
