@@ -1,5 +1,5 @@
 ** set_cover dataset **
-Training set_cover cfg 10
+Training set_cover cfg 16
 /home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
   return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
 max_samples_per_split: None
@@ -26,30 +26,30 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: PairwiseLogisticLoss
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: linear
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dataset: set_cover
-cfg_idx: 10
-model_id: set_cover_cfg10
+cfg_idx: 16
+model_id: set_cover_cfg16
 device: cuda
 load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg10, logs are saved to logs/set_cover_cfg10.
-[Epoch 1] CPU Memory - RSS: 0.93 GB
+Model is saved to models/raw/set_cover_cfg16, logs are saved to logs/set_cover_cfg16.
+[Epoch 1] CPU Memory - RSS: 0.92 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
 -------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg10/0.pth
-Epoch 1: Train loss 109.944, accuracy 0.534, top 5 accuracy 0.795, [absolute] 1.663 [relative] 0.177
-[Epoch 2] CPU Memory - RSS: 1.68 GB
-Epoch 2: Train loss 91.508, accuracy 0.577, top 5 accuracy 0.844, [absolute] 1.316 [relative] 0.143
-Saved checkpoint models/raw/set_cover_cfg10/25000.pth
-Training completed in 83.87 minutes.
-Evaluating set_cover cfg 10
+Saved checkpoint models/raw/set_cover_cfg16/0.pth
+Epoch 1: Train loss 12.019, accuracy 0.527, top 5 accuracy 0.763, [absolute] 1.579 [relative] 0.201
+[Epoch 2] CPU Memory - RSS: 1.73 GB
+Epoch 2: Train loss 7.828, accuracy 0.488, top 5 accuracy 0.677, [absolute] 1.744 [relative] 0.291
+Saved checkpoint models/raw/set_cover_cfg16/25000.pth
+Training completed in 86.08 minutes.
+Evaluating set_cover cfg 16
 max_samples_per_split: None
 config_root: ./cfg
 resume_model_dir: 
@@ -74,128 +74,32 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: PairwiseLogisticLoss
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: linear
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dataset: set_cover
-cfg_idx: 10
+cfg_idx: 16
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: set_cover_cfg10
+model_id: set_cover_cfg16
 device: cuda
 load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg10/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg10/test ----------------------------
-[test] loss 3.2778, acc 0.5808, top5 0.8546, score_diff 1.1776, normalized 0.1345
-Total eval time: 11.30 minutes
-Training set_cover cfg 11
-max_samples_per_split: None
-config_root: ./cfg
-resume_model_dir: 
-model_suffix: 
-model_dir: ./models
-log_dir: ./logs
-model: raw
-hidden_channels: 64
-num_layers: 2
-n_breakings: 8
-num_heads: 1
-isab_num_inds: 50
-sym_break_layers: 2
-mp_layers: 2
-use_set_transformer: True
-breaking_selector_model_path: None
-edge_nfeats: 1
-binarize_edge_features: False
-file_pattern: sample_*.pkl
-seed: 42
-epochs: 2
-lr: 0.0001
-batch_size: 8
-weight_decay: 0.0005
-loss_option: NormalizedPairwiseLogisticLoss
-tier1_ub: 0.0
-relevance_type: linear
-resume: False
-eval_every: 100000
-save_every: 100000
-print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 11
-model_id: set_cover_cfg11
-device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg11, logs are saved to logs/set_cover_cfg11.
-[Epoch 1] CPU Memory - RSS: 0.93 GB
--------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg11/0.pth
-Epoch 1: Train loss 3.404, accuracy 0.540, top 5 accuracy 0.796, [absolute] 1.603 [relative] 0.175
-[Epoch 2] CPU Memory - RSS: 1.68 GB
-Epoch 2: Train loss 3.102, accuracy 0.580, top 5 accuracy 0.843, [absolute] 1.275 [relative] 0.140
-Saved checkpoint models/raw/set_cover_cfg11/25000.pth
-Training completed in 33.13 minutes.
-Evaluating set_cover cfg 11
-max_samples_per_split: None
-config_root: ./cfg
-resume_model_dir: 
-model_suffix: 
-model_dir: ./models
-log_dir: ./logs
-model: raw
-hidden_channels: 64
-num_layers: 2
-n_breakings: 8
-num_heads: 1
-isab_num_inds: 50
-sym_break_layers: 2
-mp_layers: 2
-use_set_transformer: True
-breaking_selector_model_path: None
-edge_nfeats: 1
-binarize_edge_features: False
-file_pattern: sample_*.pkl
-seed: 42
-epochs: 2
-lr: 0.0001
-batch_size: 8
-weight_decay: 0.0005
-loss_option: NormalizedPairwiseLogisticLoss
-tier1_ub: 0.0
-relevance_type: linear
-resume: False
-eval_every: 100000
-save_every: 100000
-print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 11
-parent_test_stats_dir: data/results_summary/
-eval_split: test
-eval_batch_size: 32
-eval_train_batch_size: None
-eval_val_batch_size: None
-eval_test_batch_size: None
-model_id: set_cover_cfg11
-device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg11/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg11/test ----------------------------
-[test] loss 3.3119, acc 0.5799, top5 0.8571, score_diff 1.1663, normalized 0.1350
-Total eval time: 1.69 minutes
-Training set_cover cfg 12
+Loaded checkpoint models/raw/set_cover_cfg16/25000.pth
+--------------------------- [test] Save stats to: data/results_summary/set_cover_cfg16/test ----------------------------
+[test] loss 3.2238, acc 0.6089, top5 0.8852, score_diff 0.9985, normalized 0.1157
+Total eval time: 8.83 minutes
+** cauctions dataset **
+Training cauctions cfg 16
 /home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
   return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
 max_samples_per_split: None
@@ -222,129 +126,30 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: LambdaARPLoss2
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: linear
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 12
-model_id: set_cover_cfg12
+dataset_path: legacy_code_generator/data/samples/cauctions/100_500
+dataset: cauctions
+cfg_idx: 16
+model_id: cauctions_cfg16
 device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg12, logs are saved to logs/set_cover_cfg12.
-[Epoch 1] CPU Memory - RSS: 0.93 GB
+load dataset from legacy_code_generator/data/samples/cauctions/100_500
+Model is saved to models/raw/cauctions_cfg16, logs are saved to logs/cauctions_cfg16.
+[Epoch 1] CPU Memory - RSS: 0.92 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg12/0.pth
-Epoch 1: Train loss 109.601, accuracy 0.536, top 5 accuracy 0.797, [absolute] 1.652 [relative] 0.175
-[Epoch 2] CPU Memory - RSS: 1.68 GB
-Epoch 2: Train loss 91.030, accuracy 0.579, top 5 accuracy 0.845, [absolute] 1.308 [relative] 0.142
-Saved checkpoint models/raw/set_cover_cfg12/25000.pth
-Training completed in 26.22 minutes.
-Evaluating set_cover cfg 12
-max_samples_per_split: None
-config_root: ./cfg
-resume_model_dir: 
-model_suffix: 
-model_dir: ./models
-log_dir: ./logs
-model: raw
-hidden_channels: 64
-num_layers: 2
-n_breakings: 8
-num_heads: 1
-isab_num_inds: 50
-sym_break_layers: 2
-mp_layers: 2
-use_set_transformer: True
-breaking_selector_model_path: None
-edge_nfeats: 1
-binarize_edge_features: False
-file_pattern: sample_*.pkl
-seed: 42
-epochs: 2
-lr: 0.0001
-batch_size: 8
-weight_decay: 0.0005
-loss_option: LambdaARPLoss2
-tier1_ub: 0.0
-relevance_type: linear
-resume: False
-eval_every: 100000
-save_every: 100000
-print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 12
-parent_test_stats_dir: data/results_summary/
-eval_split: test
-eval_batch_size: 32
-eval_train_batch_size: None
-eval_val_batch_size: None
-eval_test_batch_size: None
-model_id: set_cover_cfg12
-device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg12/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg12/test ----------------------------
-[test] loss 3.3345, acc 0.5851, top5 0.8554, score_diff 1.1722, normalized 0.1327
-Total eval time: 1.69 minutes
-Training set_cover cfg 13
-/home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
-  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
-max_samples_per_split: None
-config_root: ./cfg
-resume_model_dir: 
-model_suffix: 
-model_dir: ./models
-log_dir: ./logs
-model: raw
-hidden_channels: 64
-num_layers: 2
-n_breakings: 8
-num_heads: 1
-isab_num_inds: 50
-sym_break_layers: 2
-mp_layers: 2
-use_set_transformer: True
-breaking_selector_model_path: None
-edge_nfeats: 1
-binarize_edge_features: False
-file_pattern: sample_*.pkl
-seed: 42
-epochs: 2
-lr: 0.0001
-batch_size: 8
-weight_decay: 0.0005
-loss_option: TierNormalizedLambdaARP2
-tier1_ub: 0.0
-relevance_type: linear
-resume: False
-eval_every: 100000
-save_every: 100000
-print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 13
-model_id: set_cover_cfg13
-device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg13, logs are saved to logs/set_cover_cfg13.
-[Epoch 1] CPU Memory - RSS: 0.93 GB
--------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg13/0.pth
-Epoch 1: Train loss 11.322, accuracy 0.521, top 5 accuracy 0.785, [absolute] 1.743 [relative] 0.187
+------ Valid loss: 4.810, accuracy 0.120, top 5 accuracy 0.406, score difference [abs] 1093.231 [relative] 0.761 -------
+Saved checkpoint models/raw/cauctions_cfg16/0.pth
+Epoch 1: Train loss 8.257, accuracy 0.577, top 5 accuracy 0.856, [absolute] 299.032 [relative] 0.168
 [Epoch 2] CPU Memory - RSS: 1.72 GB
-Epoch 2: Train loss 10.791, accuracy 0.560, top 5 accuracy 0.827, [absolute] 1.448 [relative] 0.155
-Saved checkpoint models/raw/set_cover_cfg13/25000.pth
-Training completed in 29.76 minutes.
-Evaluating set_cover cfg 13
+Epoch 2: Train loss 6.347, accuracy 0.596, top 5 accuracy 0.871, [absolute] 266.804 [relative] 0.152
+Saved checkpoint models/raw/cauctions_cfg16/25000.pth
+Training completed in 59.43 minutes.
+Evaluating cauctions cfg 16
 max_samples_per_split: None
 config_root: ./cfg
 resume_model_dir: 
@@ -369,31 +174,32 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TierNormalizedLambdaARP2
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: linear
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 13
+dataset_path: legacy_code_generator/data/samples/cauctions/100_500
+dataset: cauctions
+cfg_idx: 16
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: set_cover_cfg13
+model_id: cauctions_cfg16
 device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+load dataset from legacy_code_generator/data/samples/cauctions/100_500
 Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg13/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg13/test ----------------------------
-[test] loss 3.2667, acc 0.5587, top5 0.8294, score_diff 1.3407, normalized 0.1521
-Total eval time: 1.75 minutes
-Training set_cover cfg 14
+Loaded checkpoint models/raw/cauctions_cfg16/25000.pth
+--------------------------- [test] Save stats to: data/results_summary/cauctions_cfg16/test ----------------------------
+[test] loss 2.9273, acc 0.6048, top5 0.8891, score_diff 255.5821, normalized 0.1426
+Total eval time: 9.44 minutes
+** facilities dataset **
+Training facilities cfg 16
 /home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
   return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
 max_samples_per_split: None
@@ -420,30 +226,30 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: LambdaARPLoss2
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: exponential
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 14
-model_id: set_cover_cfg14
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dataset: facilities
+cfg_idx: 16
+model_id: facilities_cfg16
 device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg14, logs are saved to logs/set_cover_cfg14.
+load dataset from legacy_code_generator/data/samples/facilities/100_100_5
+Model is saved to models/raw/facilities_cfg16, logs are saved to logs/facilities_cfg16.
 [Epoch 1] CPU Memory - RSS: 0.93 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg14/0.pth
-Epoch 1: Train loss 109.668, accuracy 0.535, top 5 accuracy 0.795, [absolute] 1.660 [relative] 0.176
-[Epoch 2] CPU Memory - RSS: 1.79 GB
-Epoch 2: Train loss 91.394, accuracy 0.580, top 5 accuracy 0.845, [absolute] 1.302 [relative] 0.140
-Saved checkpoint models/raw/set_cover_cfg14/25000.pth
-Training completed in 24.92 minutes.
-Evaluating set_cover cfg 14
+------- Valid loss: 3.610, accuracy 0.105, top 5 accuracy 0.533, score difference [abs] 185.713 [relative] 0.880 -------
+Saved checkpoint models/raw/facilities_cfg16/0.pth
+Epoch 1: Train loss 0.753, accuracy 0.603, top 5 accuracy 0.877, [absolute] 49.388 [relative] 0.260
+[Epoch 2] CPU Memory - RSS: 1.87 GB
+Epoch 2: Train loss 0.632, accuracy 0.562, top 5 accuracy 0.798, [absolute] 52.281 [relative] 0.317
+Saved checkpoint models/raw/facilities_cfg16/25000.pth
+Training completed in 167.15 minutes.
+Evaluating facilities cfg 16
 max_samples_per_split: None
 config_root: ./cfg
 resume_model_dir: 
@@ -468,31 +274,32 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: LambdaARPLoss2
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: exponential
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 14
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dataset: facilities
+cfg_idx: 16
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: set_cover_cfg14
+model_id: facilities_cfg16
 device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+load dataset from legacy_code_generator/data/samples/facilities/100_100_5
 Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg14/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg14/test ----------------------------
-[test] loss 3.3189, acc 0.5819, top5 0.8561, score_diff 1.1737, normalized 0.1337
-Total eval time: 1.70 minutes
-Training set_cover cfg 15
+Loaded checkpoint models/raw/facilities_cfg16/25000.pth
+--------------------------- [test] Save stats to: data/results_summary/facilities_cfg16/test ---------------------------
+[test] loss 0.9477, acc 0.6858, top5 0.9827, score_diff 40.5207, normalized 0.1652
+Total eval time: 17.26 minutes
+** indset dataset **
+Training indset cfg 16
 /home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
   return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
 max_samples_per_split: None
@@ -519,30 +326,30 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TierNormalizedLambdaARP2
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: exponential
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 15
-model_id: set_cover_cfg15
+dataset_path: legacy_code_generator/data/samples/indset/500_4
+dataset: indset
+cfg_idx: 16
+model_id: indset_cfg16
 device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg15, logs are saved to logs/set_cover_cfg15.
-[Epoch 1] CPU Memory - RSS: 0.93 GB
+load dataset from legacy_code_generator/data/samples/indset/500_4
+Model is saved to models/raw/indset_cfg16, logs are saved to logs/indset_cfg16.
+[Epoch 1] CPU Memory - RSS: 0.90 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg15/0.pth
-Epoch 1: Train loss 45.770, accuracy 0.493, top 5 accuracy 0.733, [absolute] 1.942 [relative] 0.229
-[Epoch 2] CPU Memory - RSS: 1.72 GB
-Epoch 2: Train loss 43.818, accuracy 0.541, top 5 accuracy 0.793, [absolute] 1.553 [relative] 0.181
-Saved checkpoint models/raw/set_cover_cfg15/25000.pth
-Training completed in 31.99 minutes.
-Evaluating set_cover cfg 15
+-------- Valid loss: 6.144, accuracy 0.097, top 5 accuracy 0.248, score difference [abs] 0.439 [relative] 0.757 --------
+Saved checkpoint models/raw/indset_cfg16/0.pth
+Epoch 1: Train loss 216.302, accuracy 0.467, top 5 accuracy 0.627, [absolute] 0.145 [relative] 0.192
+[Epoch 2] CPU Memory - RSS: 1.81 GB
+Epoch 2: Train loss 154.131, accuracy 0.530, top 5 accuracy 0.717, [absolute] 0.104 [relative] 0.123
+Saved checkpoint models/raw/indset_cfg16/25000.pth
+Training completed in 64.46 minutes.
+Evaluating indset cfg 16
 max_samples_per_split: None
 config_root: ./cfg
 resume_model_dir: 
@@ -567,27 +374,27 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TierNormalizedLambdaARP2
+loss_option: LiPO
 tier1_ub: 0.0
-relevance_type: exponential
+relevance_type: true_score
 resume: False
 eval_every: 100000
 save_every: 100000
 print_every: 100000
-dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-dataset: set_cover
-cfg_idx: 15
+dataset_path: legacy_code_generator/data/samples/indset/500_4
+dataset: indset
+cfg_idx: 16
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: set_cover_cfg15
+model_id: indset_cfg16
 device: cuda
-load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
+load dataset from legacy_code_generator/data/samples/indset/500_4
 Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg15/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg15/test ----------------------------
-[test] loss 3.3117, acc 0.5476, top5 0.8166, score_diff 1.3939, normalized 0.1588
-Total eval time: 1.75 minutes
+Loaded checkpoint models/raw/indset_cfg16/25000.pth
+----------------------------- [test] Save stats to: data/results_summary/indset_cfg16/test -----------------------------
+[test] loss 5.0761, acc 0.5473, top5 0.7365, score_diff 0.0918, normalized 0.1021
+Total eval time: 9.25 minutes

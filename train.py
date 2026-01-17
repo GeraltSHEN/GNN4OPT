@@ -21,9 +21,8 @@ from utils import (
     load_checkpoint,
     print_dash_str
 )
-from losses import NormalizedPairwiseLogisticLoss, TierNormalizedLambdaARP2
+from losses import NormalizedPairwiseLogisticLoss, TierNormalizedLambdaARP2, LiPO
 from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2, PairwiseLogisticLoss
-
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
     """Report CPU memory usage at coarse intervals."""
@@ -74,6 +73,7 @@ def train(
         "PairwiseLogisticLoss": PairwiseLogisticLoss,
         "NormalizedPairwiseLogisticLoss": NormalizedPairwiseLogisticLoss,
         "TierNormalizedLambdaARP2": TierNormalizedLambdaARP2,
+        "LiPO": LiPO,
     }
     ranking_loss_cls = ranking_loss_factories.get(loss_option)
     ranking_loss_fn = ranking_loss_cls() if ranking_loss_cls else None

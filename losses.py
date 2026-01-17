@@ -249,3 +249,35 @@ class TierNormalizedLambdaARP2(LambdaLoss):
         tier_weight = 1.0 / (count_i * count_j)
 
         return rel_diffs * loss * tier_weight
+
+
+class LiPO(LambdaLoss):
+    r"""LiPO loss."""
+
+    def _loss_per_doc_pair(self, score_pairs, rel_pairs, n):
+        score_diffs = score_pairs[:, :, :, 0] - score_pairs[:, :, :, 1]
+        rel_i = rel_pairs[:, :, :, 0].float()
+        rel_j = rel_pairs[:, :, :, 1].float()
+
+        # CHANGED: LiPO weighting with gain differences and inverse discount gaps.
+        gain_i = _torch.pow(2.0, rel_i) - 1.0
+        gain_j = _torch.pow(2.0, rel_j) - 1.0
+
+        batch_size, list_size, _ = rel_i.shape
+        device = score_pairs.device
+        positions = _torch.arange(list_size, device=device,
+                                  dtype=_torch.float) + 1.0
+        inv_discount = 1.0 / _torch.log2(1.0 + positions)
+        inv_d_i = inv_discount.view(1, list_size, 1).expand(batch_size,
+                                                            list_size,
+                                                            list_size)
+        inv_d_j = inv_discount.view(1, 1, list_size).expand(batch_size,
+                                                            list_size,
+                                                            list_size)
+
+        weight = _torch.abs(gain_i - gain_j) * _torch.abs(inv_d_i - inv_d_j)
+
+        loss = _torch.log2(1.0 + _torch.exp(-self.sigma * score_diffs))
+        loss = loss * (rel_i > rel_j).float()
+
+        return loss * weight

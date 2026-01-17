@@ -184,6 +184,12 @@ class GraphDataset(Dataset):
         score_gap = max_score - candidate_scores
         tier1_mask = score_gap <= tier1_ub
 
+        if relevance_type == "true_score":
+            true_scores = candidate_scores.clamp(min=0)
+            denom = true_scores.max().clamp(min=1e-8)
+            normalized_scores = true_scores / denom
+            return normalized_scores
+
         if loss_option != "TierNormalizedLambdaARP2":
             return tier1_mask.to(torch.long)
 
@@ -204,7 +210,7 @@ class GraphDataset(Dataset):
 
         tiers.append(remaining_mask)
 
-        if relevance_type not in ("linear", "exponential"):
+        if relevance_type not in ("linear", "exponential", "true_score"):
             relevance_type = "linear"
 
         tier_values = []
