@@ -7,3 +7,4 @@ cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accur
 13,indset_cfg13,4.79,54.23%,77.10%,0.11,0.13,20000
 14,indset_cfg14,5.27,53.71%,69.28%,0.14,0.14,20000
 15,indset_cfg15,4.84,53.16%,76.18%,0.11,0.14,20000
+16,indset_cfg16,5.08,54.73%,73.65%,0.09,0.10,20000
