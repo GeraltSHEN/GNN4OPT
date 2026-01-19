@@ -231,14 +231,14 @@ def _build_tie_accum_table(
     headers = [
         "sample_type",
         "# no tied",
-        "# tied = 2",
-        "# tied <= 3",
-        "# tied <= 4",
-        "# tied <= 5",
-        "# tied <= 6",
-        "# tied <= 7",
-        "# tied <= 8",
-        "# tied <= 9 or more",
+        "# 1 < tied <= 2",
+        "# 1 < tied <= 3",
+        "# 1 < tied <= 4",
+        "# 1 < tied <= 5",
+        "# 1 < tied <= 6",
+        "# 1 < tied <= 7",
+        "# 1 < tied <= 8",
+        "# 1 < tied <= 9 or more",
         "# no tied & # tied",
     ]
 
