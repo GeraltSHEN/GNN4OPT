@@ -9,6 +9,35 @@ import matplotlib.pyplot as plt
 from default_args import DATASET_DEFAULTS
 from eval import _load_config, _merge_args_with_config
 
+
+def _count_tier_two(tiers: str) -> int:
+    if not tiers:
+        return 0
+    return sum(1 for tier in tiers.split("|") if tier.strip() == "2")
+
+
+def _save_no_tie_table(stats: Dict[int, Dict[str, float]], output_path: Path) -> None:
+    headers = [
+        "sample_type",
+        "avg_tier2_in_expected_top8",
+        "avg_first_margin",
+        "num_samples",
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(headers)
+        for sample_type in (1, 2):
+            sample_stats = stats.get(sample_type, {})
+            count = int(sample_stats.get("count", 0))
+            tier2_total = float(sample_stats.get("tier2_total", 0.0))
+            margin_total = float(sample_stats.get("margin_total", 0.0))
+            avg_tier2 = tier2_total / count if count else 0.0
+            avg_margin = margin_total / count if count else 0.0
+            writer.writerow(
+                [sample_type, f"{avg_tier2:.4f}", f"{avg_margin:.6f}", count]
+            )
+
 CSV_FILES = ("train_samples.csv", "val_samples.csv", "test_samples.csv")
 MARGIN_THRESHOLDS = (1e-1, 1e-2, 1e-3, 1e-4, 1e-5)
 MARGIN_LABELS = (
@@ -117,12 +146,17 @@ def collect_distributions(
     Dict[str, Counter],
     Dict[str, list],
     bool,
+    Dict[int, Dict[str, float]],
 ]:
     tie_counts: Dict[int, Counter] = {1: Counter(), 2: Counter(), 3: Counter()}
     margins: Dict[int, list] = {1: [], 2: [], 3: []}
     holo_tie_counts: Dict[str, Counter] = {key: Counter() for key in HOLO_GROUP_KEYS}
     holo_margins: Dict[str, list] = {key: [] for key in HOLO_GROUP_KEYS}
     summaries: Dict[str, Dict[str, int]] = {}
+    no_tie_stats: Dict[int, Dict[str, float]] = {
+        1: {"count": 0, "tier2_total": 0.0, "margin_total": 0.0},
+        2: {"count": 0, "tier2_total": 0.0, "margin_total": 0.0},
+    }
     has_holo_data = False
 
     for name in CSV_FILES:
@@ -137,6 +171,7 @@ def collect_distributions(
             tie_field = _select_tie_field(reader.fieldnames)
             margin_field = _select_field(reader.fieldnames, "first_margin")
             sample_type_field = _select_sample_type_field(reader.fieldnames)
+            expected_field = _select_field(reader.fieldnames, "expected_top8_true_tiers")
             selector_field = _select_optional_field(reader.fieldnames, "sample_type_selector")
             holo_field = _select_optional_field(reader.fieldnames, "sample_type_holo")
 
@@ -161,6 +196,12 @@ def collect_distributions(
                 if sample_type in tie_counts:
                     tie_counts[sample_type][ties] += 1
                     margins[sample_type].append(margin)
+                    if ties == 1 and sample_type in no_tie_stats:
+                        no_tie_stats[sample_type]["count"] += 1
+                        no_tie_stats[sample_type]["tier2_total"] += _count_tier_two(
+                            row.get(expected_field, "")
+                        )
+                        no_tie_stats[sample_type]["margin_total"] += margin
 
                 if selector_type is not None and holo_type is not None:
                     holo_key = f"sel{selector_type}_holo{holo_type}"
@@ -171,7 +212,15 @@ def collect_distributions(
 
         summaries[name] = {"total": total, "le_8": le_8, "gt_8": gt_8}
 
-    return tie_counts, margins, summaries, holo_tie_counts, holo_margins, has_holo_data
+    return (
+        tie_counts,
+        margins,
+        summaries,
+        holo_tie_counts,
+        holo_margins,
+        has_holo_data,
+        no_tie_stats,
+    )
 
 
 def _build_tie_accum_table(
@@ -211,6 +260,15 @@ def _build_tie_accum_table(
         rows.append(row)
         sample_totals[str(display_key)] = row_total
     total_samples = sum(sample_totals.values())
+    if rows:
+        value_count = len(headers) - 1
+        total_row_values = [0] * value_count
+        for row in rows:
+            for idx, val in enumerate(row[1:]):
+                total_row_values[idx] += val
+        total_row = ["total"] + total_row_values
+        rows.append(total_row)
+        sample_totals["total"] = total_samples
     return headers, rows, sample_totals, total_samples
 
 
@@ -393,9 +451,15 @@ def main() -> None:
 
     for run_root in run_roots:
         print(f"Processing: {run_root}")
-        tie_counts, margins, summaries, holo_tie_counts, holo_margins, has_holo = collect_distributions(
-            run_root
-        )
+        (
+            tie_counts,
+            margins,
+            summaries,
+            holo_tie_counts,
+            holo_margins,
+            has_holo,
+            no_tie_stats,
+        ) = collect_distributions(run_root)
         for name in CSV_FILES:
             stats = summaries.get(name)
             if stats is None:
@@ -437,6 +501,9 @@ def main() -> None:
                 tie_axis_override=range(1, 11),
                 show=args.show,
             )
+
+        no_tie_output_path = run_root / "no_tie_expected_top8_summary.csv"
+        _save_no_tie_table(no_tie_stats, no_tie_output_path)
 
 
 if __name__ == "__main__":

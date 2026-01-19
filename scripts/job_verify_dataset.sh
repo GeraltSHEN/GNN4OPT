@@ -15,7 +15,8 @@ conda activate opt-ml-env
 
 PARENT_DIR="data/data_dist"
 DATASETS=("set_cover" "cauctions" "facilities" "indset")
-CFG_IDS=(0 2)
+# CFG_IDS=(10 11 12 13)
+CFG_IDS=(14 15 16)
 
 for DATASET in "${DATASETS[@]}"; do
   for CFG in "${CFG_IDS[@]}"; do

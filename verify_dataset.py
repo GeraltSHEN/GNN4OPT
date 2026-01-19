@@ -10,7 +10,7 @@ from eval import _infer_feature_dimensions, _load_config, _merge_args_with_confi
 from utils import load_checkpoint, load_data, load_model, print_dash_str, set_seed
 
 
-AnnotationRow = Tuple[int, int, float, int]
+AnnotationRow = Tuple[int, int, int, float, str, str]
 
 
 def _parse_cli_args() -> argparse.Namespace:
@@ -144,7 +144,9 @@ def _write_split_csv(split: str, samples: List[AnnotationRow], output_dir: Path)
     csv_path = output_dir / f"{split}_samples.csv"
     with csv_path.open("w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["sample_idx", "sample_type", "tied_best_scores", "first_margin"])
+        writer.writerow(
+            ["sample_idx", "sample_type", "tied_best_scores", "first_margin", "top8_true_tiers", "expected_top8_true_tiers"]
+        )
         writer.writerows(samples)
 
 
@@ -180,19 +182,24 @@ def evaluate_split(
             )
 
             logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
-            true_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates).clip(0)
+            raw_true_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates)
+            true_scores = raw_true_scores.clamp_min(0)
 
             num_candidates = batch.nb_candidates
             candidate_mask = (
                 torch.arange(true_scores.size(1), device=device).unsqueeze(0) < num_candidates.unsqueeze(1)
             )
             masked_true_scores = true_scores.masked_fill(~candidate_mask, -1e9)
+            raw_masked_true_scores = raw_true_scores.masked_fill(~candidate_mask, -1e9)
 
             best_scores = masked_true_scores.max(dim=-1).values
             best_scores_unsqueezed = best_scores.unsqueeze(-1)
             k_top = min(k_max, true_scores.size(1))
 
             topk_idx = logits.topk(k_top, dim=-1).indices
+            log_k = min(8, topk_idx.size(1))
+            topk_log_idx = topk_idx[:, :log_k]
+            topk_log_mask = candidate_mask.gather(-1, topk_log_idx)
             top1_idx = topk_idx[:, 0]
 
             top1_scores = masked_true_scores.gather(-1, top1_idx.unsqueeze(-1)).squeeze(-1)
@@ -241,14 +248,45 @@ def evaluate_split(
                 for key in sample_type_counts:
                     sample_type_counts[key] += int((sample_type == key).sum().item())
 
-                sample_records.extend(
-                    zip(
-                        sample_indices.cpu().tolist(),
-                        sample_type.cpu().tolist(),
-                        tied_best.cpu().tolist(),
-                        first_margin_values.cpu().tolist(),
+                candidate_relevance = pad_tensor(batch.candidate_relevance, batch.nb_candidates, pad_value=-1)
+                candidate_relevance = candidate_relevance.masked_fill(~candidate_mask, -1)
+                tier_lookup = torch.full_like(candidate_relevance, fill_value=-1, dtype=torch.int64)
+                unique_tiers = torch.unique(candidate_relevance[candidate_relevance >= 0])
+                if unique_tiers.numel() > 0:
+                    sorted_unique = unique_tiers.sort(descending=True).values.tolist()
+                    for rank, tier_value in enumerate(sorted_unique):
+                        tier_lookup = torch.where(candidate_relevance == tier_value, rank + 1, tier_lookup)
+
+                topk_tiers = tier_lookup.gather(-1, topk_log_idx)
+                topk_valid_mask = topk_log_mask & (topk_tiers > 0)
+
+                for row in range(batch.num_graphs):
+                    valid_mask = topk_valid_mask[row]
+                    topk_tiers_row = topk_tiers[row][valid_mask].detach().cpu().tolist()
+
+                    all_tiers = tier_lookup[row][candidate_mask[row]]
+                    valid_all_tiers = all_tiers[all_tiers > 0]
+                    expected_tiers: List[int] = []
+                    if valid_all_tiers.numel() > 0:
+                        unique_tiers_all, counts = torch.unique(valid_all_tiers, return_counts=True)
+                        sorted_tiers, order = torch.sort(unique_tiers_all)
+                        counts = counts[order]
+                        for tier_value, count in zip(sorted_tiers.tolist(), counts.tolist()):
+                            repeat_count = min(count, max(0, log_k - len(expected_tiers)))
+                            expected_tiers.extend([tier_value] * repeat_count)
+                            if len(expected_tiers) >= log_k:
+                                break
+
+                    sample_records.append(
+                        (
+                            int(sample_indices[row].item()),
+                            int(sample_type[row].item()),
+                            int(tied_best[row].item()),
+                            float(first_margin_values[row].item()),
+                            "|".join(str(tier) for tier in topk_tiers_row),
+                            "|".join(str(tier) for tier in expected_tiers),
+                        )
                     )
-                )
 
     metrics = {
         "samples": total_graphs,
