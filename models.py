@@ -812,67 +812,195 @@ class SetCoverHolo(torch.nn.Module):
         return X
 
 
+class new_GNNPolicy(nn.Module):
+    """A wrapper module combining
+    - an initial MLP to convert raw features to embeddings in common dimension,
+    - a set transformer (InducedSetAttentionBlock, ISAB) to update constraint nodes (constraint attends to each other), a set transformer (InducedSetAttentionBlock, ISAB) to update variable nodes (variable attends to each other)
+    - a MP-GNN (StackedBipartiteGNN) for MILP bipartite graphs to exchange information
+The set transformer + GNN process can be repeated for a few times controlled by an arg
+    - a final MLP on the variable features for candidate choice/scoring
+    Remember to add this new_GNNPolicy to utils.py to load -> args.model == 'STGNN', use this model
+    """
 
-# # End-to-end learned selection policy subgraph GNN
-# class GumbelModel(torch.nn.Module):
-#     def __init__(
-#         self,
-#         selection_model: GumbelSelection,
-#         prediction_model: DSnetwork,
-#         num_subgraphs: int,
-#     ):
-#         super().__init__()
-#         self.selection_model = selection_model
-#         self.prediction_model = prediction_model
-#         self.num_subgraphs = num_subgraphs
+    def __init__(
+        self,
+        emb_size,
+        cons_nfeats,
+        edge_nfeats,
+        var_nfeats,
+        output_size,
+        n_layers,
+        num_heads=1,
+        isab_num_inds=4,
+        use_set_transformer=True,
+    ):
+        super().__init__()
+        if n_layers <= 0:
+            raise ValueError("n_layers must be >= 1.")
 
-#     @contextmanager
-#     def with_dataset(self, dataset: AdjAndFeats):
-#         with self.selection_model.with_dataset(dataset):
-#             yield
+        self.emb_size = emb_size
+        self.n_layers = n_layers
+        self.use_set_transformer = use_set_transformer and num_heads > 0 and isab_num_inds > 0
 
-#     def mark_subgraphs(self, batched_data, samples, detach=False):
-#         # NOTE(first_node_id_is_1): for nodes of the subgraph of the original
-#         #  graph the marking is on no node and it does not carry gradient
-#         original = torch.zeros_like(samples[0])
+        # Embeddings
+        self.cons_embedding = torch.nn.Sequential(
+            torch.nn.LayerNorm(cons_nfeats),
+            torch.nn.Linear(cons_nfeats, emb_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(emb_size, emb_size),
+            torch.nn.ReLU(),
+        )
+        self.edge_embedding = torch.nn.Sequential(torch.nn.LayerNorm(edge_nfeats))
+        self.var_embedding = torch.nn.Sequential(
+            torch.nn.LayerNorm(var_nfeats),
+            torch.nn.Linear(var_nfeats, emb_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(emb_size, emb_size),
+            torch.nn.ReLU(),
+        )
 
-#         max_nodes = original.size(2)
-#         num_marked = original.size(-1)
-#         samples = torch.cat((original, *samples), dim=1).reshape(-1, num_marked)
-#         marking = samples[
-#             vrange(
-#                 lengths=batched_data.num_nodes_per_subgraph,
-#                 starts=torch.arange(
-#                     batched_data.num_total_subgraphs, device=samples.device
-#                 )
-#                 * max_nodes,
-#             )
-#         ]
-        
-#         if detach:
-#             marking = marking.detach()
+        # Set transformer layers
+        self.constraint_set_layers = nn.ModuleList()
+        self.variable_set_layers = nn.ModuleList()
+        if self.use_set_transformer:
+            if emb_size % num_heads != 0:
+                raise ValueError(
+                    f"emb_size ({emb_size}) must be divisible by num_heads ({num_heads})."
+                )
+            for _ in range(n_layers):
+                self.constraint_set_layers.append(
+                    InducedSetAttentionBlock(
+                        dim_in=emb_size,
+                        dim_out=emb_size,
+                        num_heads=num_heads,
+                        num_inds=isab_num_inds,
+                        ln=True,
+                    )
+                )
+                self.variable_set_layers.append(
+                    InducedSetAttentionBlock(
+                        dim_in=emb_size,
+                        dim_out=emb_size,
+                        num_heads=num_heads,
+                        num_inds=isab_num_inds,
+                        ln=True,
+                    )
+                )
 
-#         # NOTE: Use the marking to attach gradient
-#         node_repr = batched_data.v_features[:, num_marked:]
-#         return batched_data.replace(v_features=torch.cat((marking, node_repr), dim=-1))
+        # Message passing layers
+        self.gnn_layers = nn.ModuleList(
+            [
+                StackedBipartiteGNN(
+                    hidden_channels=emb_size, edge_nfeats=edge_nfeats, n_layers=1
+                )
+                for _ in range(n_layers)
+            ]
+        )
 
-#     def forward(self, obs: Observation):
-#         samples = []
-#         for t in range(self.num_subgraphs - 1):
-#             batched_data = self.selection_model.preprocess_observation(obs)
+        # Output head
+        self.output_module = torch.nn.Sequential(
+            torch.nn.Linear(emb_size, emb_size),
+            torch.nn.ReLU(),
+            torch.nn.Linear(emb_size, output_size, bias=False),
+        )
 
-#             if len(samples) > 0:
-#                 batched_data = self.mark_subgraphs(batched_data, samples)
+    @staticmethod
+    def _normalize_sizes(size_tensor, ref, total_fallback):
+        if size_tensor is None:
+            return torch.tensor([total_fallback], device=ref.device, dtype=torch.long)
+        if isinstance(size_tensor, int):
+            return torch.tensor([size_tensor], device=ref.device, dtype=torch.long)
+        return size_tensor.to(device=ref.device, dtype=torch.long)
 
-#             subgraphs, curr_samples = self.selection_model(batched_data, t)
+    @staticmethod
+    def _pad_nodes(nodes, n_per_graph):
+        device, dtype = nodes.device, nodes.dtype
+        n_per_graph = n_per_graph.to(device=device)
+        num_graphs = n_per_graph.numel()
+        n_max = int(n_per_graph.max().item())
 
-#             update_observation_inplace_no_replace(
-#                 obs, subgraphs + 1
-#             )  # NOTE(first_node_id_is_1): 0 subgraph is the graph itself
+        if (n_per_graph == n_max).all():
+            return nodes.view(num_graphs, n_max, -1), None
 
-#             samples.append(curr_samples.unsqueeze(1))
+        offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_per_graph[:-1])),
+            dim=0,
+        )
+        padded = []
+        masks = []
+        for g in range(num_graphs):
+            start = int(offsets[g].item())
+            n_current = int(n_per_graph[g].item())
+            end = start + n_current
+            chunk = nodes[start:end]
 
-#         batched_data = self.selection_model.preprocess_observation(obs)
-#         batched_data = self.mark_subgraphs(batched_data, samples)
-#         out, _ = self.prediction_model(batched_data)
-#         return out
+            pad_len = n_max - n_current
+            if pad_len > 0:
+                pad = torch.zeros((pad_len, nodes.size(-1)), device=device, dtype=dtype)
+                chunk = torch.cat((chunk, pad), dim=0)
+                mask = torch.cat(
+                    (
+                        torch.zeros(n_current, device=device, dtype=torch.bool),
+                        torch.ones(pad_len, device=device, dtype=torch.bool),
+                    ),
+                    dim=0,
+                )
+            else:
+                mask = torch.zeros(n_max, device=device, dtype=torch.bool)
+
+            padded.append(chunk)
+            masks.append(mask)
+
+        return torch.stack(padded, dim=0), torch.stack(masks, dim=0)
+
+    @staticmethod
+    def _unpad_nodes(nodes, n_per_graph):
+        n_per_graph = n_per_graph.to(device=nodes.device)
+        n_max = nodes.size(1)
+        valid_mask = (
+            torch.arange(n_max, device=nodes.device).unsqueeze(0) < n_per_graph.unsqueeze(1)
+        )
+        return nodes[valid_mask].reshape(-1, nodes.size(-1))
+
+    def forward(
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        candidates=None,
+        n_constraints_per_graph=None,
+        n_variables_per_graph=None,
+    ):
+        del candidates  # unused but kept for API compatibility
+
+        # 1) Embedding
+        Y = self.cons_embedding(constraint_features)
+        edge_features = self.edge_embedding(edge_features)
+        X = self.var_embedding(variable_features)
+
+        n_constraints_per_graph = self._normalize_sizes(
+            n_constraints_per_graph, Y, total_fallback=Y.size(0)
+        )
+        n_variables_per_graph = self._normalize_sizes(
+            n_variables_per_graph, X, total_fallback=X.size(0)
+        )
+
+        # 2) Set transformer + message passing blocks
+        for layer_idx in range(self.n_layers):
+            if self.use_set_transformer:
+                Y_batched, cons_mask = self._pad_nodes(Y, n_constraints_per_graph)
+                Y = self.constraint_set_layers[layer_idx](
+                    Y_batched, key_padding_mask=cons_mask
+                )
+                Y = self._unpad_nodes(Y, n_constraints_per_graph)
+
+                X_batched, var_mask = self._pad_nodes(X, n_variables_per_graph)
+                X = self.variable_set_layers[layer_idx](X_batched, key_padding_mask=var_mask)
+                X = self._unpad_nodes(X, n_variables_per_graph)
+
+            Y, X = self.gnn_layers[layer_idx](Y, edge_indices, edge_features, X)
+
+        # 3) Output head
+        output = self.output_module(X).squeeze(-1)
+        return output

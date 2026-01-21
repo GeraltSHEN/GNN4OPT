@@ -1,16 +1,18 @@
 ** set_cover dataset **
-Training set_cover cfg 18
-max_samples_per_split: None
+Training set_cover cfg 19
+/home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+max_samples_per_split: 100
 config_root: ./cfg
 resume_model_dir: 
 model_suffix: 
 model_dir: ./models
 log_dir: ./logs
-model: raw
+model: STGNN
 hidden_channels: 64
 num_layers: 2
 n_breakings: 8
-num_heads: 1
+num_heads: 4
 isab_num_inds: 50
 sym_break_layers: 2
 mp_layers: 2
@@ -24,7 +26,7 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TopTierAverageSoftmaxLoss
+loss_option: LambdaNDCGLoss1
 tier1_ub: 0.0
 relevance_type: linear
 resume: False
@@ -33,32 +35,32 @@ save_every: 100000
 print_every: 100000
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dataset: set_cover
-cfg_idx: 18
-model_id: set_cover_cfg18
+cfg_idx: 19
+model_id: set_cover_cfg19
 device: cuda
 load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Model is saved to models/raw/set_cover_cfg18, logs are saved to logs/set_cover_cfg18.
-[Epoch 1] CPU Memory - RSS: 0.92 GB
+Model is saved to models/STGNN/set_cover_cfg19, logs are saved to logs/set_cover_cfg19.
+[Epoch 1] CPU Memory - RSS: 0.88 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
--------- Valid loss: 4.791, accuracy 0.035, top 5 accuracy 0.170, score difference [abs] 5.995 [relative] 0.918 --------
-Saved checkpoint models/raw/set_cover_cfg18/0.pth
-Epoch 1: Train loss 2.909, accuracy 0.515, top 5 accuracy 0.740, [absolute] 1.823 [relative] 0.213
-[Epoch 2] CPU Memory - RSS: 1.78 GB
-Epoch 2: Train loss 2.751, accuracy 0.551, top 5 accuracy 0.777, [absolute] 1.547 [relative] 0.182
-Saved checkpoint models/raw/set_cover_cfg18/25000.pth
-Training completed in 149.18 minutes.
-Evaluating set_cover cfg 18
-max_samples_per_split: None
+-------- Valid loss: 4.776, accuracy 0.000, top 5 accuracy 0.020, score difference [abs] 5.327 [relative] 1.000 --------
+Saved checkpoint models/STGNN/set_cover_cfg19/0.pth
+Epoch 1: Train loss 47.816, accuracy 0.140, top 5 accuracy 0.340, [absolute] 4.816 [relative] 0.704
+[Epoch 2] CPU Memory - RSS: 1.69 GB
+Epoch 2: Train loss 42.764, accuracy 0.090, top 5 accuracy 0.250, [absolute] 5.399 [relative] 0.767
+Saved checkpoint models/STGNN/set_cover_cfg19/26.pth
+Training completed in 0.19 minutes.
+Evaluating set_cover cfg 19
+max_samples_per_split: 100
 config_root: ./cfg
 resume_model_dir: 
 model_suffix: 
 model_dir: ./models
 log_dir: ./logs
-model: raw
+model: STGNN
 hidden_channels: 64
 num_layers: 2
 n_breakings: 8
-num_heads: 1
+num_heads: 4
 isab_num_inds: 50
 sym_break_layers: 2
 mp_layers: 2
@@ -72,7 +74,7 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TopTierAverageSoftmaxLoss
+loss_option: LambdaNDCGLoss1
 tier1_ub: 0.0
 relevance_type: linear
 resume: False
@@ -81,34 +83,36 @@ save_every: 100000
 print_every: 100000
 dataset_path: legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
 dataset: set_cover
-cfg_idx: 18
+cfg_idx: 19
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: set_cover_cfg18
+model_id: set_cover_cfg19
 device: cuda
 load dataset from legacy_code_generator/data/samples/setcover/500r_1000c_0.05d
-Number of parameters: 115196
-Loaded checkpoint models/raw/set_cover_cfg18/25000.pth
---------------------------- [test] Save stats to: data/results_summary/set_cover_cfg18/test ----------------------------
-[test] loss 4.0761, acc 0.5714, top5 0.8452, score_diff 1.2311, normalized 0.1418
-Total eval time: 14.30 minutes
+Number of parameters: 396284
+Loaded checkpoint models/STGNN/set_cover_cfg19/26.pth
+--------------------------- [test] Save stats to: data/results_summary/set_cover_cfg19/test ----------------------------
+[test] loss 4.7129, acc 0.2500, top5 0.4300, score_diff 4.3467, normalized 0.4812
+Total eval time: 0.08 minutes
 ** cauctions dataset **
-Training cauctions cfg 18
-max_samples_per_split: None
+Training cauctions cfg 19
+/home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+max_samples_per_split: 100
 config_root: ./cfg
 resume_model_dir: 
 model_suffix: 
 model_dir: ./models
 log_dir: ./logs
-model: raw
+model: STGNN
 hidden_channels: 64
 num_layers: 2
 n_breakings: 8
-num_heads: 1
+num_heads: 4
 isab_num_inds: 50
 sym_break_layers: 2
 mp_layers: 2
@@ -122,7 +126,7 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TopTierAverageSoftmaxLoss
+loss_option: LambdaNDCGLoss1
 tier1_ub: 0.0
 relevance_type: linear
 resume: False
@@ -131,32 +135,32 @@ save_every: 100000
 print_every: 100000
 dataset_path: legacy_code_generator/data/samples/cauctions/100_500
 dataset: cauctions
-cfg_idx: 18
-model_id: cauctions_cfg18
+cfg_idx: 19
+model_id: cauctions_cfg19
 device: cuda
 load dataset from legacy_code_generator/data/samples/cauctions/100_500
-Model is saved to models/raw/cauctions_cfg18, logs are saved to logs/cauctions_cfg18.
-[Epoch 1] CPU Memory - RSS: 0.93 GB
+Model is saved to models/STGNN/cauctions_cfg19, logs are saved to logs/cauctions_cfg19.
+[Epoch 1] CPU Memory - RSS: 0.88 GB
 -------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
------- Valid loss: 4.810, accuracy 0.120, top 5 accuracy 0.406, score difference [abs] 1093.231 [relative] 0.761 -------
-Saved checkpoint models/raw/cauctions_cfg18/0.pth
-Epoch 1: Train loss 2.479, accuracy 0.536, top 5 accuracy 0.762, [absolute] 421.340 [relative] 0.239
-[Epoch 2] CPU Memory - RSS: 1.77 GB
-Epoch 2: Train loss 2.398, accuracy 0.538, top 5 accuracy 0.755, [absolute] 417.754 [relative] 0.245
-Saved checkpoint models/raw/cauctions_cfg18/25000.pth
-Training completed in 97.44 minutes.
-Evaluating cauctions cfg 18
-max_samples_per_split: None
+------ Valid loss: 4.810, accuracy 0.020, top 5 accuracy 0.090, score difference [abs] 1172.691 [relative] 0.979 -------
+Saved checkpoint models/STGNN/cauctions_cfg19/0.pth
+Epoch 1: Train loss 49.822, accuracy 0.160, top 5 accuracy 0.450, [absolute] 1133.111 [relative] 0.708
+[Epoch 2] CPU Memory - RSS: 1.69 GB
+Epoch 2: Train loss 48.528, accuracy 0.150, top 5 accuracy 0.480, [absolute] 1094.050 [relative] 0.696
+Saved checkpoint models/STGNN/cauctions_cfg19/26.pth
+Training completed in 0.15 minutes.
+Evaluating cauctions cfg 19
+max_samples_per_split: 100
 config_root: ./cfg
 resume_model_dir: 
 model_suffix: 
 model_dir: ./models
 log_dir: ./logs
-model: raw
+model: STGNN
 hidden_channels: 64
 num_layers: 2
 n_breakings: 8
-num_heads: 1
+num_heads: 4
 isab_num_inds: 50
 sym_break_layers: 2
 mp_layers: 2
@@ -170,7 +174,7 @@ epochs: 2
 lr: 0.0001
 batch_size: 8
 weight_decay: 0.0005
-loss_option: TopTierAverageSoftmaxLoss
+loss_option: LambdaNDCGLoss1
 tier1_ub: 0.0
 relevance_type: linear
 resume: False
@@ -179,21 +183,218 @@ save_every: 100000
 print_every: 100000
 dataset_path: legacy_code_generator/data/samples/cauctions/100_500
 dataset: cauctions
-cfg_idx: 18
+cfg_idx: 19
 parent_test_stats_dir: data/results_summary/
 eval_split: test
 eval_batch_size: 32
 eval_train_batch_size: None
 eval_val_batch_size: None
 eval_test_batch_size: None
-model_id: cauctions_cfg18
+model_id: cauctions_cfg19
 device: cuda
 load dataset from legacy_code_generator/data/samples/cauctions/100_500
-Number of parameters: 115196
-Loaded checkpoint models/raw/cauctions_cfg18/25000.pth
---------------------------- [test] Save stats to: data/results_summary/cauctions_cfg18/test ----------------------------
-[test] loss 3.4061, acc 0.5939, top5 0.8859, score_diff 265.4978, normalized 0.1498
-Total eval time: 12.58 minutes
+Number of parameters: 396284
+Loaded checkpoint models/STGNN/cauctions_cfg19/26.pth
+--------------------------- [test] Save stats to: data/results_summary/cauctions_cfg19/test ----------------------------
+[test] loss 4.6358, acc 0.1100, top5 0.4800, score_diff 985.6962, normalized 0.6281
+Total eval time: 0.11 minutes
 ** facilities dataset **
-Training facilities cfg 18
-slurmstepd: error: *** JOB 10207324 ON gilbreth-k005 CANCELLED AT 2026-01-21T00:42:51 ***
+Training facilities cfg 19
+/home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+max_samples_per_split: 100
+config_root: ./cfg
+resume_model_dir: 
+model_suffix: 
+model_dir: ./models
+log_dir: ./logs
+model: STGNN
+hidden_channels: 64
+num_layers: 2
+n_breakings: 8
+num_heads: 4
+isab_num_inds: 50
+sym_break_layers: 2
+mp_layers: 2
+use_set_transformer: True
+breaking_selector_model_path: None
+edge_nfeats: 1
+binarize_edge_features: False
+file_pattern: sample_*.pkl
+seed: 42
+epochs: 2
+lr: 0.0001
+batch_size: 8
+weight_decay: 0.0005
+loss_option: LambdaNDCGLoss1
+tier1_ub: 0.0
+relevance_type: linear
+resume: False
+eval_every: 100000
+save_every: 100000
+print_every: 100000
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dataset: facilities
+cfg_idx: 19
+model_id: facilities_cfg19
+device: cuda
+load dataset from legacy_code_generator/data/samples/facilities/100_100_5
+Model is saved to models/STGNN/facilities_cfg19, logs are saved to logs/facilities_cfg19.
+[Epoch 1] CPU Memory - RSS: 0.88 GB
+-------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
+------- Valid loss: 3.711, accuracy 0.280, top 5 accuracy 0.670, score difference [abs] 163.176 [relative] 0.607 -------
+Saved checkpoint models/STGNN/facilities_cfg19/0.pth
+Epoch 1: Train loss 23.107, accuracy 0.260, top 5 accuracy 0.670, [absolute] 105.948 [relative] 0.610
+[Epoch 2] CPU Memory - RSS: 1.74 GB
+Epoch 2: Train loss 22.319, accuracy 0.350, top 5 accuracy 0.800, [absolute] 102.555 [relative] 0.518
+Saved checkpoint models/STGNN/facilities_cfg19/26.pth
+Training completed in 0.35 minutes.
+Evaluating facilities cfg 19
+max_samples_per_split: 100
+config_root: ./cfg
+resume_model_dir: 
+model_suffix: 
+model_dir: ./models
+log_dir: ./logs
+model: STGNN
+hidden_channels: 64
+num_layers: 2
+n_breakings: 8
+num_heads: 4
+isab_num_inds: 50
+sym_break_layers: 2
+mp_layers: 2
+use_set_transformer: True
+breaking_selector_model_path: None
+edge_nfeats: 1
+binarize_edge_features: False
+file_pattern: sample_*.pkl
+seed: 42
+epochs: 2
+lr: 0.0001
+batch_size: 8
+weight_decay: 0.0005
+loss_option: LambdaNDCGLoss1
+tier1_ub: 0.0
+relevance_type: linear
+resume: False
+eval_every: 100000
+save_every: 100000
+print_every: 100000
+dataset_path: legacy_code_generator/data/samples/facilities/100_100_5
+dataset: facilities
+cfg_idx: 19
+parent_test_stats_dir: data/results_summary/
+eval_split: test
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: facilities_cfg19
+device: cuda
+load dataset from legacy_code_generator/data/samples/facilities/100_100_5
+Number of parameters: 396284
+Loaded checkpoint models/STGNN/facilities_cfg19/26.pth
+--------------------------- [test] Save stats to: data/results_summary/facilities_cfg19/test ---------------------------
+[test] loss 3.2769, acc 0.4800, top5 0.8900, score_diff 95.9373, normalized 0.4061
+Total eval time: 0.14 minutes
+** indset dataset **
+Training indset cfg 19
+/home/chen4433/.conda/envs/2025.06-py313/opt-ml-env/lib/python3.12/site-packages/torch/functional.py:554: UserWarning: torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument. (Triggered internally at /pytorch/aten/src/ATen/native/TensorShape.cpp:4322.)
+  return _VF.meshgrid(tensors, **kwargs)  # type: ignore[attr-defined]
+max_samples_per_split: 100
+config_root: ./cfg
+resume_model_dir: 
+model_suffix: 
+model_dir: ./models
+log_dir: ./logs
+model: STGNN
+hidden_channels: 64
+num_layers: 2
+n_breakings: 8
+num_heads: 4
+isab_num_inds: 50
+sym_break_layers: 2
+mp_layers: 2
+use_set_transformer: True
+breaking_selector_model_path: None
+edge_nfeats: 1
+binarize_edge_features: False
+file_pattern: sample_*.pkl
+seed: 42
+epochs: 2
+lr: 0.0001
+batch_size: 8
+weight_decay: 0.0005
+loss_option: LambdaNDCGLoss1
+tier1_ub: 0.0
+relevance_type: linear
+resume: False
+eval_every: 100000
+save_every: 100000
+print_every: 100000
+dataset_path: legacy_code_generator/data/samples/indset/500_4
+dataset: indset
+cfg_idx: 19
+model_id: indset_cfg19
+device: cuda
+load dataset from legacy_code_generator/data/samples/indset/500_4
+Model is saved to models/STGNN/indset_cfg19, logs are saved to logs/indset_cfg19.
+[Epoch 1] CPU Memory - RSS: 0.88 GB
+-------------------------------------------- Evaluating at epoch 1, step 0 ---------------------------------------------
+-------- Valid loss: 6.158, accuracy 0.090, top 5 accuracy 0.270, score difference [abs] 0.464 [relative] 0.764 --------
+Saved checkpoint models/STGNN/indset_cfg19/0.pth
+Epoch 1: Train loss 222.057, accuracy 0.320, top 5 accuracy 0.460, [absolute] 0.325 [relative] 0.476
+[Epoch 2] CPU Memory - RSS: 1.71 GB
+Epoch 2: Train loss 223.274, accuracy 0.350, top 5 accuracy 0.470, [absolute] 0.304 [relative] 0.429
+Saved checkpoint models/STGNN/indset_cfg19/26.pth
+Training completed in 0.17 minutes.
+Evaluating indset cfg 19
+max_samples_per_split: 100
+config_root: ./cfg
+resume_model_dir: 
+model_suffix: 
+model_dir: ./models
+log_dir: ./logs
+model: STGNN
+hidden_channels: 64
+num_layers: 2
+n_breakings: 8
+num_heads: 4
+isab_num_inds: 50
+sym_break_layers: 2
+mp_layers: 2
+use_set_transformer: True
+breaking_selector_model_path: None
+edge_nfeats: 1
+binarize_edge_features: False
+file_pattern: sample_*.pkl
+seed: 42
+epochs: 2
+lr: 0.0001
+batch_size: 8
+weight_decay: 0.0005
+loss_option: LambdaNDCGLoss1
+tier1_ub: 0.0
+relevance_type: linear
+resume: False
+eval_every: 100000
+save_every: 100000
+print_every: 100000
+dataset_path: legacy_code_generator/data/samples/indset/500_4
+dataset: indset
+cfg_idx: 19
+parent_test_stats_dir: data/results_summary/
+eval_split: test
+eval_batch_size: 32
+eval_train_batch_size: None
+eval_val_batch_size: None
+eval_test_batch_size: None
+model_id: indset_cfg19
+device: cuda
+load dataset from legacy_code_generator/data/samples/indset/500_4
+Number of parameters: 396284
+Loaded checkpoint models/STGNN/indset_cfg19/26.pth
+----------------------------- [test] Save stats to: data/results_summary/indset_cfg19/test -----------------------------
+[test] loss 6.1320, acc 0.2400, top5 0.4000, score_diff 0.4280, normalized 0.4541
+Total eval time: 0.08 minutes

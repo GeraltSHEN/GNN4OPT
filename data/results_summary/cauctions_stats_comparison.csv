@@ -8,3 +8,6 @@ cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accur
 14,cauctions_cfg14,2.91,59.91%,88.96%,265.56,0.15,20000
 15,cauctions_cfg15,2.93,57.34%,86.48%,311.95,0.17,20000
 16,cauctions_cfg16,2.93,60.48%,88.91%,255.58,0.14,20000
+17,cauctions_cfg17,4.72,15.00%,59.00%,1005.77,0.63,100
+18,cauctions_cfg18,3.41,59.39%,88.59%,265.50,0.15,20000
+19,cauctions_cfg19,2.69,59.49%,88.75%,265.45,0.15,20000

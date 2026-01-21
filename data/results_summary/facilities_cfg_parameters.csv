@@ -1,34 +1,34 @@
-parameter,facilities_cfg0,facilities_cfg10,facilities_cfg11,facilities_cfg12,facilities_cfg13,facilities_cfg14,facilities_cfg15,facilities_cfg16,facilities_cfg2,variation
-epochs,2 # -> 2,2,2,2,2,2,2,2,2 # -> 2,different
-loss_option,ranking,PairwiseLogisticLoss,NormalizedPairwiseLogisticLoss,LambdaARPLoss2,TierNormalizedLambdaARP2,LambdaARPLoss2,TierNormalizedLambdaARP2,LiPO,ranking,different
-model,raw # -> raw,raw,raw,raw,raw,raw,raw,raw,raw # -> raw,different
-relevance_type,,linear,linear,linear,linear,exponential,exponential,true_score,,different
-tier1_ub,,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,different
-use_normalized_scores_as_relevance,False,,,,,,,,true # -> true,different
-batch_size,8,8,8,8,8,8,8,8,8,persistent
-binarize_edge_features,False,False,False,False,False,False,False,False,False,persistent
-breaking_selector_model_path,,,,,,,,,,persistent
-config_root,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,persistent
-dataset_path,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,persistent
-edge_nfeats,1,1,1,1,1,1,1,1,1,persistent
-eval_every,100000,100000,100000,100000,100000,100000,100000,100000,100000,persistent
-file_pattern,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,persistent
-hidden_channels,64,64,64,64,64,64,64,64,64,persistent
-isab_num_inds,50,50,50,50,50,50,50,50,50,persistent
-log_dir,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,persistent
-lr,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,persistent
-max_samples_per_split,,,,,,,,,,persistent
-model_dir,./models,./models,./models,./models,./models,./models,./models,./models,./models,persistent
-model_suffix,,,,,,,,,,persistent
-mp_layers,2,2,2,2,2,2,2,2,2,persistent
-n_breakings,8,8,8,8,8,8,8,8,8,persistent
-num_heads,1,1,1,1,1,1,1,1,1,persistent
-num_layers,2,2,2,2,2,2,2,2,2,persistent
-print_every,100000,100000,100000,100000,100000,100000,100000,100000,100000,persistent
-resume,False,False,False,False,False,False,False,False,False,persistent
-resume_model_dir,,,,,,,,,,persistent
-save_every,100000,100000,100000,100000,100000,100000,100000,100000,100000,persistent
-seed,42,42,42,42,42,42,42,42,42,persistent
-sym_break_layers,2,2,2,2,2,2,2,2,2,persistent
-use_set_transformer,True,True,True,True,True,True,True,True,True,persistent
-weight_decay,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,persistent
+parameter,facilities_cfg0,facilities_cfg10,facilities_cfg11,facilities_cfg12,facilities_cfg13,facilities_cfg14,facilities_cfg15,facilities_cfg16,facilities_cfg17,facilities_cfg18,facilities_cfg19,facilities_cfg2,variation
+epochs,2 # -> 2,2,2,2,2,2,2,2,2,2,2,2 # -> 2,different
+loss_option,ranking,PairwiseLogisticLoss,NormalizedPairwiseLogisticLoss,LambdaARPLoss2,TierNormalizedLambdaARP2,LambdaARPLoss2,TierNormalizedLambdaARP2,LiPO,LambdaNDCGLoss2,TopTierAverageSoftmaxLoss,LambdaNDCGLoss1,ranking,different
+model,raw # -> raw,raw,raw,raw,raw,raw,raw,raw,raw,raw,STGNN,raw # -> raw,different
+num_heads,1,1,1,1,1,1,1,1,1,1,4,1,different
+relevance_type,,linear,linear,linear,linear,exponential,exponential,true_score,linear,linear,linear,,different
+tier1_ub,,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,different
+use_normalized_scores_as_relevance,False,,,,,,,,,,,true # -> true,different
+batch_size,8,8,8,8,8,8,8,8,8,8,8,8,persistent
+binarize_edge_features,False,False,False,False,False,False,False,False,False,False,False,False,persistent
+breaking_selector_model_path,,,,,,,,,,,,,persistent
+config_root,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,cfg,persistent
+dataset_path,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,legacy_code_generator/data/samples/facilities/100_100_5,persistent
+edge_nfeats,1,1,1,1,1,1,1,1,1,1,1,1,persistent
+eval_every,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,persistent
+file_pattern,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,sample_*.pkl,persistent
+hidden_channels,64,64,64,64,64,64,64,64,64,64,64,64,persistent
+isab_num_inds,50,50,50,50,50,50,50,50,50,50,50,50,persistent
+log_dir,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,./logs,persistent
+lr,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,0.0001,persistent
+max_samples_per_split,,,,,,,,,,,,,persistent
+model_dir,./models,./models,./models,./models,./models,./models,./models,./models,./models,./models,./models,./models,persistent
+model_suffix,,,,,,,,,,,,,persistent
+mp_layers,2,2,2,2,2,2,2,2,2,2,2,2,persistent
+n_breakings,8,8,8,8,8,8,8,8,8,8,8,8,persistent
+num_layers,2,2,2,2,2,2,2,2,2,2,2,2,persistent
+print_every,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,persistent
+resume,False,False,False,False,False,False,False,False,False,False,False,False,persistent
+resume_model_dir,,,,,,,,,,,,,persistent
+save_every,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,100000,persistent
+seed,42,42,42,42,42,42,42,42,42,42,42,42,persistent
+sym_break_layers,2,2,2,2,2,2,2,2,2,2,2,2,persistent
+use_set_transformer,True,True,True,True,True,True,True,True,True,True,True,True,persistent
+weight_decay,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,0.0005,persistent

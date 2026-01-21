@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 
-from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
+from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN, new_GNNPolicy
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
@@ -354,6 +354,18 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             output_size,
             n_layers,
             holo=None,
+        )
+    elif getattr(args, "model", "").lower() == "stgnn":
+        model = new_GNNPolicy(
+            emb_size,
+            cons_nfeats,
+            edge_nfeats,
+            var_nfeats,
+            output_size,
+            n_layers,
+            num_heads=num_heads,
+            isab_num_inds=isab_num_inds,
+            use_set_transformer=use_set_transformer,
         )
     elif args.model == "holo":
         selector_layers = n_layers

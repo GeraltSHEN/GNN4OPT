@@ -1,5 +1,5 @@
 #!/bin/sh -l
-# FILENAME:  job_train_raw
+# FILENAME:  job_train_new
 
 #SBATCH -A canli
 #SBATCH --nodes=1 --gpus-per-node=1
@@ -7,14 +7,13 @@
 #SBATCH --mem=50G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=3-1:30:00
-#SBATCH --job-name train_raw
-#SBATCH --output=joboutput/job_train_raw.out
+#SBATCH --job-name train_new
+#SBATCH --output=joboutput/job_train_new.out
 
 module load anaconda
 conda activate opt-ml-env
 
-DATASETS=("set_cover" "cauctions" "facilities" "indset")
-# CFG_IDS=(10 11 12 13 14 15)
+DATASETS=("set_cover")
 CFG_IDS=(19)
 
 for DATASET in "${DATASETS[@]}"; do
