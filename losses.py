@@ -51,6 +51,50 @@ _batch_pairs = batch_pairs
 _rank_by_score = rank_by_score
 
 
+class TopTierAverageSoftmaxLoss(_torch.nn.Module):
+    r"""Averaged multi-positive softmax loss on the top tier.
+
+    Implements the loss
+        L = log( sum_j exp(s_j) ) - log( (1 / |T_1|) * sum_{i in T_1} exp(s_i) )
+    where T_1 contains the documents in the highest relevance tier.
+
+    Shape:
+        - input scores: :math:`(N, list\_size)` or `(N, list_size, 1)`
+        - input relevance: :math:`(N, list\_size)` or `(N, list_size, 1)`
+        - input n: :math:`(N)`
+        - output: :math:`(N)`
+    """
+    def forward(self, scores: _torch.FloatTensor,
+                relevance: _torch.FloatTensor,
+                n: _torch.LongTensor) -> _torch.FloatTensor:
+        if relevance.ndimension() == 3:
+            relevance = relevance.reshape(
+                (relevance.shape[0], relevance.shape[1]))
+        if scores.ndimension() == 3:
+            scores = scores.reshape((scores.shape[0], scores.shape[1]))
+
+        _, list_size = scores.shape
+        device = scores.device
+        valid_mask = (_torch.arange(list_size, device=device)
+                      .unsqueeze(0) < n.unsqueeze(1))
+
+        positive_mask = (relevance > 0) & valid_mask
+        positive_counts = positive_mask.sum(dim=1)
+
+        masked_scores = scores.masked_fill(~valid_mask, -float("inf"))
+        log_denom = _torch.logsumexp(masked_scores, dim=1)
+
+        positive_scores = scores.masked_fill(~positive_mask, -float("inf"))
+        log_positive_sum = _torch.logsumexp(positive_scores, dim=1)
+        safe_counts = positive_counts.clamp(min=1).float()
+        log_positive_mean = log_positive_sum - _torch.log(safe_counts)
+
+        loss = log_denom - log_positive_mean
+        loss = _torch.where(positive_counts > 0, loss,
+                            _torch.zeros_like(loss))
+        return loss
+
+
 class NormalizedPairwiseLogisticLoss(_torch.nn.Module):
     r"""Normalized pairwise logistic loss.
 

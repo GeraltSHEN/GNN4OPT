@@ -49,12 +49,11 @@ DATASETS=(set_cover cauctions facilities indset)
 # done
 
 for DATASET in "${DATASETS[@]}"; do
-  echo "Generating defaults for ${DATASET} cfg 16 with LiPO (relevance_type=true_score)"
   python default_args.py \
     --dataset "${DATASET}" \
-    --cfg_idx 16 \
+    --cfg_idx 18 \
     --epochs 2 \
-    --loss_option LiPO \
-    --relevance_type true_score \
+    --loss_option TopTierAverageSoftmaxLoss  \
+    --relevance_type linear \
     --max_samples_per_split none
 done

@@ -184,6 +184,9 @@ class GraphDataset(Dataset):
         score_gap = max_score - candidate_scores
         tier1_mask = score_gap <= tier1_ub
 
+        if loss_option == "TopTierAverageSoftmaxLoss":
+            return tier1_mask.to(torch.long)
+
         if relevance_type == "true_score":
             true_scores = candidate_scores.clamp(min=0)
             denom = true_scores.max().clamp(min=1e-8)
