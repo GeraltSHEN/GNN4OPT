@@ -180,60 +180,20 @@ class GraphDataset(Dataset):
         tier1_ub = float(getattr(args, "tier1_ub", 0.0)) if args is not None else 0.0
         relevance_type = getattr(args, "relevance_type", "linear") if args is not None else "linear"
 
-        max_score = candidate_scores.max()
-        score_gap = max_score - candidate_scores
-        tier1_mask = score_gap <= tier1_ub
-
-        if loss_option == "TopTierAverageSoftmaxLoss":
+        if relevance_type == "linear":
+            max_score = candidate_scores.max()
+            score_gap = max_score - candidate_scores
+            tier1_mask = score_gap <= tier1_ub
             return tier1_mask.to(torch.long)
 
-        if relevance_type == "true_score":
+        elif relevance_type == "true_score":
             true_scores = candidate_scores.clamp(min=0)
             denom = true_scores.max().clamp(min=1e-8)
             normalized_scores = true_scores / denom
             return normalized_scores
-
-        if loss_option != "TierNormalizedLambdaARP2":
-            return tier1_mask.to(torch.long)
-
-        tiers = [tier1_mask]
-        remaining_mask = ~tier1_mask
-
-        if remaining_mask.any():
-            unique_scores = torch.unique(candidate_scores[remaining_mask], sorted=True)
-            unique_scores = torch.flip(unique_scores, dims=[0])
-            for score in unique_scores:
-                if len(tiers) >= 4:
-                    break
-                score_mask = remaining_mask & (candidate_scores == score)
-                tiers.append(score_mask)
-                remaining_mask = remaining_mask & ~score_mask
-                if not remaining_mask.any():
-                    break
-
-        tiers.append(remaining_mask)
-
-        if relevance_type not in ("linear", "exponential", "true_score"):
-            relevance_type = "linear"
-
-        tier_values = []
-        for idx in range(len(tiers)):
-            tier_idx = idx + 1
-            if relevance_type == "linear":
-                tier_values.append(5 - tier_idx)
-            else:
-                tier_values.append(2 ** (5 - tier_idx))
-
-        if len(tiers) < 5:
-            tier_values[-1] = 0
-
-        relevance = torch.zeros_like(candidate_scores, dtype=torch.long)
-        for mask, value in zip(tiers, tier_values):
-            if value == 0:
-                continue
-            relevance = relevance + (mask.to(torch.long) * int(value))
-
-        return relevance
+        
+        else:
+            raise ValueError(f"Unknown relevance_type: {relevance_type}")
 
 
 def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
