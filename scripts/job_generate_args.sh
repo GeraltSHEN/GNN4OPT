@@ -51,11 +51,9 @@ DATASETS=(set_cover cauctions facilities indset)
 for DATASET in "${DATASETS[@]}"; do
   python default_args.py \
     --dataset "${DATASET}" \
-    --cfg_idx 19 \
+    --cfg_idx 20 \
     --epochs 2 \
-    --loss_option LambdaNDCGLoss1  \
+    --loss_option TierAwarePairwiseLogisticLoss  \
     --relevance_type linear \
-    --model STGNN \
-    --num_heads 4 \
     --max_samples_per_split none
 done

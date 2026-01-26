@@ -21,7 +21,13 @@ from utils import (
     load_checkpoint,
     print_dash_str
 )
-from losses import NormalizedPairwiseLogisticLoss, TierNormalizedLambdaARP2, LiPO, TopTierAverageSoftmaxLoss
+from losses import (
+    NormalizedPairwiseLogisticLoss,
+    TierNormalizedLambdaARP2,
+    LiPO,
+    TopTierAverageSoftmaxLoss,
+    TierAwarePairwiseLogisticLoss,
+)
 from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2, PairwiseLogisticLoss
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
@@ -72,6 +78,7 @@ def train(
         "LambdaARPLoss2": LambdaARPLoss2,
         "PairwiseLogisticLoss": PairwiseLogisticLoss,
         "NormalizedPairwiseLogisticLoss": NormalizedPairwiseLogisticLoss,
+        "TierAwarePairwiseLogisticLoss": TierAwarePairwiseLogisticLoss,
         "TierNormalizedLambdaARP2": TierNormalizedLambdaARP2,
         "LiPO": LiPO,
         "TopTierAverageSoftmaxLoss": TopTierAverageSoftmaxLoss,

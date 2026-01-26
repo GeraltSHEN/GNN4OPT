@@ -325,3 +325,63 @@ class LiPO(LambdaLoss):
         loss = loss * (rel_i > rel_j).float()
 
         return loss * weight
+
+
+class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
+    r"""Tier-aware pairwise logistic loss."""
+    def __init__(self, sigma: float = 1.0):
+        super().__init__()
+        self.sigma = sigma
+
+    def forward(self, scores: _torch.FloatTensor,
+                relevance: _torch.FloatTensor,
+                n: _torch.LongTensor) -> _torch.FloatTensor:
+        if relevance.ndimension() == 3:
+            relevance = relevance.reshape(
+                (relevance.shape[0], relevance.shape[1]))
+        if scores.ndimension() == 3:
+            scores = scores.reshape((scores.shape[0], scores.shape[1]))
+
+        batch_size, list_size = scores.shape
+        device = scores.device
+
+        valid_mask = (_torch.arange(list_size, device=device)
+                      .unsqueeze(0) < n.unsqueeze(1))
+        y = relevance.float()
+
+        tier1_mask = (y > 0) & valid_mask
+        tier2_mask = (~tier1_mask) & valid_mask
+
+        tier1_counts = tier1_mask.sum(dim=1).clamp(min=1).float()
+        tier2_counts = tier2_mask.sum(dim=1).clamp(min=1).float()
+
+        alpha_i = _torch.where(
+            tier1_mask,
+            0.5 / tier1_counts.unsqueeze(1),
+            0.5 / tier2_counts.unsqueeze(1),
+        )
+        alpha_i = alpha_i * valid_mask.float()
+
+        alpha_ij = alpha_i[:, :, None] * alpha_i[:, None, :]
+
+        score_diffs = scores[:, :, None] - scores[:, None, :]
+        loss_forward = _torch.log2(1.0 + _torch.exp(-self.sigma * score_diffs))
+        loss_backward = _torch.log2(1.0 + _torch.exp(self.sigma * score_diffs))
+
+        if list_size > 1:
+            diag_mask = ~_torch.eye(list_size, dtype=_torch.bool, device=device)
+            pair_mask = (valid_mask[:, :, None] & valid_mask[:, None, :]
+                         & diag_mask.unsqueeze(0))
+        else:
+            pair_mask = valid_mask[:, :, None] & valid_mask[:, None, :]
+
+        y_i = y[:, :, None]
+        y_j = y[:, None, :]
+        greater_mask = (y_i > y_j) & pair_mask
+        equal_mask = (y_i == y_j) & pair_mask
+
+        loss = (2.0 * alpha_ij * loss_forward * greater_mask.float()
+                + 0.5 * alpha_ij * (loss_forward + loss_backward)
+                * equal_mask.float())
+
+        return loss.sum(dim=(1, 2))

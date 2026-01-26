@@ -11,3 +11,4 @@ cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accur
 17,cauctions_cfg17,4.72,15.00%,59.00%,1005.77,0.63,100
 18,cauctions_cfg18,3.41,59.39%,88.59%,265.50,0.15,20000
 19,cauctions_cfg19,2.69,59.49%,88.75%,265.45,0.15,20000
+20,cauctions_cfg20,2.88,58.40%,88.06%,282.92,0.16,20000
