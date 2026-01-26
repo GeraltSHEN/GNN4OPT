@@ -328,7 +328,21 @@ class LiPO(LambdaLoss):
 
 
 class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
-    r"""Tier-aware pairwise logistic loss."""
+    r"""Tier-aware pairwise logistic loss.
+
+    For a query with valid documents i, j and scores s_i, s_j, define tiers:
+    tier1: y_i > 0, tier2: y_i <= 0. Let n1, n2 be tier counts and
+    n_i = n1 if y_i > 0 else n2. The pairwise weight is
+    alpha_ij = c_ij / (n_i * n_j), where c_11 = c_12 = c_21 = 0.3 and
+    c_22 = 0.1. The loss is:
+
+        L = sum_{i != j} [
+              2 * alpha_ij * log2(1 + exp(-sigma * (s_i - s_j))) * I[y_i > y_j]
+            + 0.5 * alpha_ij * (log2(1 + exp(-sigma * (s_i - s_j)))
+                               +log2(1 + exp( sigma * (s_i - s_j))))
+              * I[y_i = y_j]
+            ]
+    """
     def __init__(self, sigma: float = 1.0):
         super().__init__()
         self.sigma = sigma
@@ -355,14 +369,21 @@ class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
         tier1_counts = tier1_mask.sum(dim=1).clamp(min=1).float()
         tier2_counts = tier2_mask.sum(dim=1).clamp(min=1).float()
 
-        alpha_i = _torch.where(
-            tier1_mask,
-            0.5 / tier1_counts.unsqueeze(1),
-            0.5 / tier2_counts.unsqueeze(1),
-        )
-        alpha_i = alpha_i * valid_mask.float()
+        count_i = _torch.where(tier1_mask, tier1_counts.unsqueeze(1),
+                               tier2_counts.unsqueeze(1))
+        count_i = count_i * valid_mask.float()
+        count_j = count_i
 
-        alpha_ij = alpha_i[:, :, None] * alpha_i[:, None, :]
+        denom_ij = count_i[:, :, None] * count_j[:, None, :]
+        denom_ij = _torch.where(denom_ij > 0.0, denom_ij,
+                                _torch.ones_like(denom_ij))
+
+        tier2_i = tier2_mask[:, :, None]
+        tier2_j = tier2_mask[:, None, :]
+        both_tier2 = (tier2_i & tier2_j).float()
+        numer_ij = 0.3 - 0.2 * both_tier2
+
+        alpha_ij = numer_ij / denom_ij
 
         score_diffs = scores[:, :, None] - scores[:, None, :]
         loss_forward = _torch.log2(1.0 + _torch.exp(-self.sigma * score_diffs))
