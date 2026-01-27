@@ -119,10 +119,16 @@ class GraphDataset(Dataset):
             ),
             dtype=torch.float32,
         )
-        variable_features = torch.cat(
-            (variable_features, variable_default_features),
-            dim=-1,
+        use_default_features = (
+            bool(getattr(self.args, "use_default_features", False))
+            if self.args is not None
+            else False
         )
+        if use_default_features:
+            variable_features = torch.cat(
+                (variable_features, variable_default_features),
+                dim=-1,
+            )
 
         # mark constraints that touch any variable fixed to 1
         f1_mask = torch.as_tensor(is_fixed_to_1, dtype=torch.bool)
@@ -135,10 +141,11 @@ class GraphDataset(Dataset):
                 connected_constraints = constraint_indices[f1_edge_mask]
                 r[connected_constraints] = 0
         constraint_features = r.unsqueeze(-1)
-        constraint_features = torch.cat(
-            (constraint_features, constraint_default_features),
-            dim=-1,
-        )
+        if use_default_features:
+            constraint_features = torch.cat(
+                (constraint_features, constraint_default_features),
+                dim=-1,
+            )
 
         if self.binarize_edge_features:
             non_zero_mask = edge_features != 0
