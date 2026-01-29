@@ -84,7 +84,17 @@ def train(
         "TopTierAverageSoftmaxLoss": TopTierAverageSoftmaxLoss,
     }
     ranking_loss_cls = ranking_loss_factories.get(loss_option)
-    ranking_loss_fn = ranking_loss_cls() if ranking_loss_cls else None
+    if ranking_loss_cls is None:
+        ranking_loss_fn = None
+    elif loss_option == "TierAwarePairwiseLogisticLoss":
+        ranking_loss_fn = ranking_loss_cls(
+            c_11=getattr(args, "c_11", 0.3),
+            c_12=getattr(args, "c_12", 0.3),
+            c_21=getattr(args, "c_21", 0.3),
+            c_22=getattr(args, "c_22", 0.1),
+        )
+    else:
+        ranking_loss_fn = ranking_loss_cls()
     score_th = float('inf')
 
     model_dir = Path(model_dir)
@@ -353,6 +363,30 @@ def parse_args(argv=None):
         type=int,
         default=100000,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
+    )
+    parser.add_argument(
+        "--c_11",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Tier-aware pairwise loss coefficient for tier1-tier1 pairs.",
+    )
+    parser.add_argument(
+        "--c_12",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Tier-aware pairwise loss coefficient for tier1-tier2 pairs.",
+    )
+    parser.add_argument(
+        "--c_21",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Tier-aware pairwise loss coefficient for tier2-tier1 pairs.",
+    )
+    parser.add_argument(
+        "--c_22",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Tier-aware pairwise loss coefficient for tier2-tier2 pairs.",
     )
     return parser.parse_args(argv)
 

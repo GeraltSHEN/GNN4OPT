@@ -13,14 +13,14 @@
 module load anaconda
 conda activate opt-ml-env
 
-DATASETS=(set_cover)
+DATASETS=("set_cover" "cauctions" "facilities" "indset")
 
 for DATASET in "${DATASETS[@]}"; do
   python default_args.py \
     --dataset "${DATASET}" \
-    --cfg_idx 21 \
-    --epochs 1 \
-    --loss_option LambdaNDCGLoss2  \
+    --cfg_idx 20 \
+    --epochs 2 \
+    --loss_option TierAwarePairwiseLogisticLoss  \
     --relevance_type linear \
     --use_default_features true \
     --max_samples_per_split none
@@ -29,10 +29,10 @@ done
 for DATASET in "${DATASETS[@]}"; do
   python default_args.py \
     --dataset "${DATASET}" \
-    --cfg_idx 22 \
-    --epochs 1 \
-    --loss_option LambdaNDCGLoss2  \
+    --cfg_idx 23 \
+    --epochs 2 \
+    --loss_option TierAwarePairwiseLogisticLoss  \
     --relevance_type linear \
-    --use_default_features false \
+    --use_default_features true \
     --max_samples_per_split none
 done

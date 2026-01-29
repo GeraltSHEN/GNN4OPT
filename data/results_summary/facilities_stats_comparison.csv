@@ -11,4 +11,4 @@ cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accur
 17,facilities_cfg17,3.09,48.00%,96.00%,84.71,0.39,100
 18,facilities_cfg18,3.00,34.00%,82.00%,132.17,0.57,100
 19,facilities_cfg19,1.00,68.38%,98.20%,40.89,0.17,20000
-20,facilities_cfg20,1.27,67.36%,98.06%,45.83,0.18,20000
+20,facilities_cfg20,1.16,66.71%,97.98%,44.71,0.18,20000

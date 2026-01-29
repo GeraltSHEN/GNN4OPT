@@ -12,4 +12,6 @@ cfg_index,cfg,test_eval_acc_Loss,test_eval_acc_Accuracy,test_eval_acc_Top5_Accur
 17,set_cover_cfg17,3.05,56.00%,88.00%,0.90,0.11,100
 18,set_cover_cfg18,4.08,57.14%,84.52%,1.23,0.14,20000
 19,set_cover_cfg19,2.98,59.24%,86.57%,1.09,0.13,20000
-20,set_cover_cfg20,3.18,55.63%,83.01%,1.37,0.15,20000
+20,set_cover_cfg20,3.06,55.86%,83.28%,1.34,0.15,20000
+21,set_cover_cfg21,3.45,56.49%,83.55%,1.30,0.15,20000
+22,set_cover_cfg22,4.79,12.21%,29.52%,5.23,0.74,20000

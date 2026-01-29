@@ -326,7 +326,6 @@ class LiPO(LambdaLoss):
 
         return loss * weight
 
-
 class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
     r"""Tier-aware pairwise logistic loss.
 
@@ -334,7 +333,8 @@ class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
     tier1: y_i > 0, tier2: y_i <= 0. Let n1, n2 be tier counts and
     n_i = n1 if y_i > 0 else n2. The pairwise weight is
     alpha_ij = c_ij / (n_i * n_j), where c_11 = c_12 = c_21 = 0.3 and
-    c_22 = 0.1. The loss is:
+    c_22 = 0.1. 
+    The loss is:
 
         L = sum_{i != j} [
               2 * alpha_ij * log2(1 + exp(-sigma * (s_i - s_j))) * I[y_i > y_j]
@@ -343,9 +343,18 @@ class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
               * I[y_i = y_j]
             ]
     """
-    def __init__(self, sigma: float = 1.0):
+    def __init__(self,
+                 sigma: float = 1.0,
+                 c_11: float = 0.3,
+                 c_12: float = 0.3,
+                 c_21: float = 0.3,
+                 c_22: float = 0.1):
         super().__init__()
         self.sigma = sigma
+        self.c_11 = c_11
+        self.c_12 = c_12
+        self.c_21 = c_21
+        self.c_22 = c_22
 
     def forward(self, scores: _torch.FloatTensor,
                 relevance: _torch.FloatTensor,
@@ -378,10 +387,15 @@ class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
         denom_ij = _torch.where(denom_ij > 0.0, denom_ij,
                                 _torch.ones_like(denom_ij))
 
-        tier2_i = tier2_mask[:, :, None]
-        tier2_j = tier2_mask[:, None, :]
-        both_tier2 = (tier2_i & tier2_j).float()
-        numer_ij = 0.3 - 0.2 * both_tier2
+        tier1_i = tier1_mask[:, :, None].float()
+        tier1_j = tier1_mask[:, None, :].float()
+        tier2_i = tier2_mask[:, :, None].float()
+        tier2_j = tier2_mask[:, None, :].float()
+
+        numer_ij = (self.c_11 * tier1_i * tier1_j
+                    + self.c_12 * tier1_i * tier2_j
+                    + self.c_21 * tier2_i * tier1_j
+                    + self.c_22 * tier2_i * tier2_j)
 
         alpha_ij = numer_ij / denom_ij
 

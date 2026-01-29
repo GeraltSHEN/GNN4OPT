@@ -120,9 +120,9 @@ class GraphDataset(Dataset):
             dtype=torch.float32,
         )
         use_default_features = (
-            bool(getattr(self.args, "use_default_features", False))
+            bool(getattr(self.args, "use_default_features", True))
             if self.args is not None
-            else False
+            else True
         )
         if use_default_features:
             variable_features = torch.cat(
