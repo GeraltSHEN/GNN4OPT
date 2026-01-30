@@ -14,7 +14,7 @@ module load anaconda
 conda activate opt-ml-env
 
 DATASETS=("set_cover" "cauctions" "facilities" "indset")
-MAX_SAMPLES_PER_SPLIT=100
+MAX_SAMPLES_PER_SPLIT="none"
 
 for DATASET in "${DATASETS[@]}"; do
   python default_args.py \

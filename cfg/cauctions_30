@@ -1,4 +1,4 @@
-max_samples_per_split: 100
+max_samples_per_split: null
 config_root: cfg
 resume_model_dir: ''
 model_suffix: ''

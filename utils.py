@@ -146,14 +146,21 @@ class GraphDataset(Dataset):
             else False
         )
         if remove_bad_candidates:
-            candidates, candidate_scores = self.clean_candidates(candidates, candidate_scores, candidate_choice_node_id, 
+            candidates, candidate_scores, candidate_choice_node_id = self.clean_candidates(candidates, candidate_scores, candidate_choice_node_id, 
                                                                  variable_features, variable_feature_indices, index)
-        candidate_choices = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
+        candidate_choices = torch.where(candidates == torch.as_tensor(candidate_choice_node_id, dtype=torch.int64))[0][0]
         
-        # add candidate indicator to variable features
+        # add is_fixed (variables that were considered as candidates by 02_generate_samples) indicator to variable features
+        # as a variable can be integer or continuous, to make it simple, we add is_not_fixed indicator instead of is_fixed
+        is_not_fixed_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
+        is_not_fixed_feature[torch.as_tensor(sample_action_set, dtype=torch.int64)] = 1.0
+        # add candidate (variables that will be considered in ranking) indicator to variable features
         candidates_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
         candidates_feature[candidates] = 1.0
-        variable_features = torch.cat([variable_features, candidates_feature.unsqueeze(-1)], dim=-1)
+        # add the two additional features to variable features
+        variable_features = torch.cat([variable_features,
+                                        is_not_fixed_feature.unsqueeze(-1), 
+                                       candidates_feature.unsqueeze(-1)], dim=-1)
 
         candidate_relevance = self.assign_candidate_relevance(candidate_scores)
 
@@ -185,18 +192,13 @@ class GraphDataset(Dataset):
         if cleaned_candidates.numel() < 1:
             raise ValueError("no candidate exists after cleaning")
         if candidate_choice_node_id not in cleaned_candidates:
-            print(f"Problematic file: {self.sample_files[index]}")
-            print(f"original candidates: {candidates}")
-            print(f"original candidate_scores: {candidate_scores}")
-            print(f"candidate_choice_node_id: {candidate_choice_node_id}")
-            print(f"original candidate_scores max: {candidate_scores.max()}")
-            print(f"original candidate_scores argmax: {candidate_scores.argmax()}")
-            print(f"cleaned candidates: {cleaned_candidates}")
-            print(f"cleaned candidate_scores: {cleaned_candidate_scores}")
-            print(f"cleaned candidate_scores max: {cleaned_candidate_scores.max()}")
-            print(f"cleaned candidate_scores argmax: {cleaned_candidate_scores.argmax()}")
-            raise ValueError("candidate_choice_node_id is not in cleaned_candidates")
-        return cleaned_candidates, cleaned_candidate_scores
+            # NOTE: Rare case: all candidates are equally bad (as bad as nodes whose LP solution is at LB/UB.) 
+            # This usually happens when branching on 'real candidate' produces the same optimal obj value.
+            # Replace the candidate choice with a new one in the cleaned candidates.
+            new_candidate_choice = cleaned_candidate_scores.argmax().item()
+            new_candidate_choice_node_id = cleaned_candidates[new_candidate_choice].item()
+            candidate_choice_node_id = new_candidate_choice_node_id
+        return cleaned_candidates, cleaned_candidate_scores, candidate_choice_node_id
     
     def assign_candidate_relevance(self, candidate_scores: torch.Tensor) -> torch.Tensor:
         args = getattr(self, "args", None)
@@ -212,7 +214,8 @@ class GraphDataset(Dataset):
 
         elif relevance_type == "true_score":
             true_scores = candidate_scores.clamp(min=0)
-            denom = true_scores.max().clamp(min=1e-8)
+            # denom = true_scores.max().clamp(min=1e-8)
+            denom = true_scores.max()
             normalized_scores = true_scores / denom
             return normalized_scores
         
