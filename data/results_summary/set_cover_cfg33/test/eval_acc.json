@@ -1,0 +1,8 @@
+{
+    "Loss": 4.371393527984619,
+    "Accuracy": 0.11,
+    "Top5_Accuracy": 0.22,
+    "Score_diff": 5.326051177978516,
+    "Normalized_score_diff": 0.6726363897323608,
+    "n_samples": 100
+}

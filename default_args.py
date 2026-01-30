@@ -27,8 +27,8 @@ BASE_DEFAULTS = {
     "use_set_transformer": True,
     "breaking_selector_model_path": None,
     "edge_nfeats": 1,
-    "binarize_edge_features": False,
     "use_default_features": False,
+    "remove_bad_candidates": False,
     "file_pattern": "sample_*.pkl",
     # training options
     "seed": 42,

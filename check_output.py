@@ -135,7 +135,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         description="Check tie counts and top-score output similarities for set cover models."
     )
     parser.add_argument("--dataset", type=str, default="set_cover")
-    parser.add_argument("--cfgs", type=_parse_cfgs, default=_parse_cfgs("21,22"))
+    parser.add_argument("--cfgs", type=_parse_cfgs, default=_parse_cfgs("30,31,32,33"))
     parser.add_argument("--config-root", type=str, default="./cfg")
     parser.add_argument("--model-suffix", type=str, default="")
     parser.add_argument(
@@ -145,7 +145,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=("train", "val", "test"),
     )
     parser.add_argument("--eval-batch-size", type=int, default=1)
-    parser.add_argument("--max-samples-per-split", type=int, default=None)
+    parser.add_argument("--max-samples-per-split", type=int, default=100)
     parser.add_argument(
         "--output-dir",
         type=str,

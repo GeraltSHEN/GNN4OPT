@@ -73,13 +73,11 @@ class GraphDataset(Dataset):
         self,
         sample_files: Sequence[Union[str, Path]],
         edge_nfeats: int = 1,
-        binarize_edge_features: bool = True,
         args=None,
     ):
         super().__init__(root=None, transform=None, pre_transform=None)
         self.sample_files = [str(path) for path in _ensure_sequence(sample_files)]
         self.edge_nfeats = edge_nfeats
-        self.binarize_edge_features = binarize_edge_features
         self.args = args
 
     def len(self):
@@ -93,77 +91,71 @@ class GraphDataset(Dataset):
         sample_state, _, sample_action, sample_action_set, sample_scores = sample["data"]
 
         constraint_dict, edge_dict, variable_dict = sample_state
-        constraint_default_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
+
         edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
         edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
+
         variable_names = variable_dict["names"]
-        variable_values = np.asarray(variable_dict["values"], dtype=np.float32)
-        variable_default_features = torch.as_tensor(variable_values, dtype=torch.float32)
-        # pick the relevant variable features
-        feature_indices = {
-            name: variable_names.index(name)
-            for name in ("coef_normalized", "sol_is_at_lb", "sol_is_at_ub", "sol_val")
-        }
-        coef_normalized = variable_values[:, feature_indices["coef_normalized"]]
-        sol_is_at_lb = variable_values[:, feature_indices["sol_is_at_lb"]]
-        sol_is_at_ub = variable_values[:, feature_indices["sol_is_at_ub"]]
-        sol_val = variable_values[:, feature_indices["sol_val"]]
-        fixed_mask = (sol_is_at_lb == 1) & (sol_is_at_ub == 1)
-        is_fixed_to_1 = (fixed_mask & (sol_val == 1)).astype(np.float32)
-        is_fixed_to_0 = (fixed_mask & (sol_val == 0)).astype(np.float32)
-        is_not_fixed = 1.0 - is_fixed_to_1 - is_fixed_to_0
-        variable_features = torch.as_tensor(
-            np.stack(
-                [coef_normalized, is_fixed_to_1, is_fixed_to_0, is_not_fixed],
-                axis=-1,
-            ),
-            dtype=torch.float32,
-        )
+        variable_feature_indices = {name: variable_names.index(name) for name in variable_names}
+        variable_default_features = torch.as_tensor(variable_dict["values"], dtype=torch.float32)
+
+        constraint_names = constraint_dict["names"]
+        constraint_feature_indices = {name: constraint_names.index(name) for name in constraint_names}
+        constraint_default_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
+
+        # pick problem data features
         use_default_features = (
             bool(getattr(self.args, "use_default_features", True))
             if self.args is not None
             else True
         )
         if use_default_features:
-            variable_features = torch.cat(
-                (variable_features, variable_default_features),
-                dim=-1,
-            )
+            variable_features = variable_default_features
+            constraint_features = constraint_default_features
+        else:
+            variable_required = ["type_0", "type_1", "type_2", "type_3", 
+                                 "has_lb", "has_ub", "sol_is_at_lb", "sol_is_at_ub", "sol_frac",
+                                 "coef_normalized", "sol_val"]
+            constraint_required = ["bias", "dualsol_val_normalized"]
 
-        # mark constraints that touch any variable fixed to 1
-        f1_mask = torch.as_tensor(is_fixed_to_1, dtype=torch.bool)
-        n_constraints = len(constraint_dict["values"])
-        r = torch.ones(n_constraints, dtype=torch.float32)
-        if f1_mask.any():
-            constraint_indices, variable_indices = edge_indices
-            f1_edge_mask = f1_mask[variable_indices]
-            if f1_edge_mask.any():
-                connected_constraints = constraint_indices[f1_edge_mask]
-                r[connected_constraints] = 0
-        constraint_features = r.unsqueeze(-1)
-        if use_default_features:
-            constraint_features = torch.cat(
-                (constraint_features, constraint_default_features),
-                dim=-1,
-            )
-
-        if self.binarize_edge_features:
-            non_zero_mask = edge_features != 0
-            edge_features = torch.where(
-                non_zero_mask,
-                torch.ones_like(edge_features),
-                torch.zeros_like(edge_features),
-            )
-
+            variable_features = torch.stack([variable_default_features[:, variable_feature_indices[name]]
+                                    for name in variable_required], 
+                                    axis=-1)
+            constraint_features = torch.stack([constraint_default_features[:, constraint_feature_indices[name]]
+                                    for name in constraint_required], 
+                                    axis=-1)
+            variable_feature_indices = {name: new_index for name, new_index in zip(variable_required, range(len(variable_required)))}
+            constraint_feature_indices = {name: new_index for name, new_index in zip(constraint_required, range(len(constraint_required)))}
+    
         if self.edge_nfeats == 2:
             norm = torch.linalg.norm(edge_features)
             ef_norm = torch.where(norm > 0, edge_features / norm, torch.zeros_like(edge_features))
             edge_features = torch.cat((edge_features, ef_norm), dim=-1)
         
+        candidate_choice_node_id = sample_action
         candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
         candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
-        candidate_relevance = self.assign_candidate_relevance(candidate_scores)
+
+        # 02_generate_samples' candidates seem to include some variables whose LP solution is at 0 or 1
+        # it may consider all integer variables that haven't been fixed as candidates
+        # it seems to assign a very small candidate score (close to 0) to those "candidates" whose LP solution is at 0 or 1
+        # NOTE: perhaps clean up the candidates and candidate_scores to include true candidates only. 
+        remove_bad_candidates = (
+            bool(getattr(self.args, "remove_bad_candidates", False))
+            if self.args is not None
+            else False
+        )
+        if remove_bad_candidates:
+            candidates, candidate_scores = self.clean_candidates(candidates, candidate_scores, candidate_choice_node_id, 
+                                                                 variable_features, variable_feature_indices, index)
         candidate_choices = torch.where(candidates == torch.as_tensor(sample_action, dtype=torch.int64))[0][0]
+        
+        # add candidate indicator to variable features
+        candidates_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
+        candidates_feature[candidates] = 1.0
+        variable_features = torch.cat([variable_features, candidates_feature.unsqueeze(-1)], dim=-1)
+
+        candidate_relevance = self.assign_candidate_relevance(candidate_scores)
 
         graph = BipartiteNodeData(
             constraint_features,
@@ -180,6 +172,31 @@ class GraphDataset(Dataset):
         )
         graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
         return graph
+    
+    def clean_candidates(self, candidates: torch.Tensor, candidate_scores: torch.Tensor, 
+                         candidate_choice_node_id: int, 
+                         variable_features: torch.Tensor, 
+                         variable_feature_indices: Dict[str, int], index):
+        sol_is_not_at_lb = variable_features[candidates, variable_feature_indices["sol_is_at_lb"]] == 0
+        sol_is_not_at_ub = variable_features[candidates, variable_feature_indices["sol_is_at_ub"]] == 0
+        sol_is_not_at_lub = sol_is_not_at_lb & sol_is_not_at_ub
+        cleaned_candidates = candidates[sol_is_not_at_lub]
+        cleaned_candidate_scores = candidate_scores[sol_is_not_at_lub]
+        if cleaned_candidates.numel() < 1:
+            raise ValueError("no candidate exists after cleaning")
+        if candidate_choice_node_id not in cleaned_candidates:
+            print(f"Problematic file: {self.sample_files[index]}")
+            print(f"original candidates: {candidates}")
+            print(f"original candidate_scores: {candidate_scores}")
+            print(f"candidate_choice_node_id: {candidate_choice_node_id}")
+            print(f"original candidate_scores max: {candidate_scores.max()}")
+            print(f"original candidate_scores argmax: {candidate_scores.argmax()}")
+            print(f"cleaned candidates: {cleaned_candidates}")
+            print(f"cleaned candidate_scores: {cleaned_candidate_scores}")
+            print(f"cleaned candidate_scores max: {cleaned_candidate_scores.max()}")
+            print(f"cleaned candidate_scores argmax: {cleaned_candidate_scores.argmax()}")
+            raise ValueError("candidate_choice_node_id is not in cleaned_candidates")
+        return cleaned_candidates, cleaned_candidate_scores
     
     def assign_candidate_relevance(self, candidate_scores: torch.Tensor) -> torch.Tensor:
         args = getattr(self, "args", None)
@@ -209,7 +226,6 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
     print(f'load dataset from {dataset_root}')
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
     edge_nfeats = getattr(args, "edge_nfeats", 1)
-    binarize_edge_features = getattr(args, "binarize_edge_features", True)
 
     if for_training:
         splits = {
@@ -267,13 +283,12 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
             dataset = GraphDataset(
                 sample_files,
                 edge_nfeats=edge_nfeats,
-                binarize_edge_features=binarize_edge_features,
                 args=args,
             )
             data[split_name] = DataLoader(dataset, 
                                           batch_size=cfg["batch_size"], 
                                           shuffle=cfg["shuffle"], 
-                                          num_workers=0, pin_memory=False)
+                                          num_workers=8, pin_memory=True)
         else:
             data[split_name] = None
     data.update(metadata)
