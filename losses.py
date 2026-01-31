@@ -52,6 +52,7 @@ _rank_by_score = rank_by_score
 
 
 class TopTierAverageSoftmaxLoss(_torch.nn.Module):
+    # DEPRECATED
     r"""Averaged multi-positive softmax loss on the top tier.
 
     Implements the loss
@@ -96,6 +97,7 @@ class TopTierAverageSoftmaxLoss(_torch.nn.Module):
 
 
 class NormalizedPairwiseLogisticLoss(_torch.nn.Module):
+    # DEPRECATED
     r"""Normalized pairwise logistic loss.
 
     Implements the loss
@@ -252,6 +254,7 @@ class LambdaLoss(_torch.nn.Module):
 
 
 class TierNormalizedLambdaARP2(LambdaLoss):
+    # DEPRECATED
     r"""
     Tier-normalized ARP Loss 2.
 
@@ -420,3 +423,40 @@ class TierAwarePairwiseLogisticLoss(_torch.nn.Module):
                 * equal_mask.float())
 
         return loss.sum(dim=(1, 2))
+
+
+class NCE(_torch.nn.Module):
+    r"""Implementation of ListNet ranking loss (or from "Noise Contrastive Alignment of Language Models with Explicit Rewards")
+    L = - sum_{i \in Candidate Set} exp(sigma y_i) / (sum_j exp(sigma y_j)) 
+                log(exp(sigma s_i) / (sum_j exp(sigma s_j)))
+    """
+    def __init__(self, sigma: float = 1.0):
+        super().__init__()
+        self.sigma = sigma
+
+    def forward(self, scores: _torch.FloatTensor, relevance: _torch.FloatTensor, n: _torch.LongTensor) -> _torch.FloatTensor:
+        if relevance.ndimension() == 3:
+            relevance = relevance.reshape(
+                (relevance.shape[0], relevance.shape[1]))
+        if scores.ndimension() == 3:
+            scores = scores.reshape((scores.shape[0], scores.shape[1]))
+
+        _, list_size = scores.shape
+        device = scores.device
+        valid_mask = (_torch.arange(list_size, device=device)
+                      .unsqueeze(0) < n.unsqueeze(1))
+
+        scaled_scores = scores * self.sigma
+        scaled_relevance = relevance * self.sigma
+
+        masked_scores = scaled_scores.masked_fill(~valid_mask, -float("inf"))
+        masked_relevance = scaled_relevance.masked_fill(~valid_mask,
+                                                        -float("inf"))
+
+        log_probs = _torch.log_softmax(masked_scores, dim=1)
+        log_probs = log_probs.masked_fill(~valid_mask, 0.0)
+        target_probs = _torch.softmax(masked_relevance, dim=1)
+        target_probs = target_probs.masked_fill(~valid_mask, 0.0)
+
+        loss = -(target_probs * log_probs).sum(dim=1)
+        return loss

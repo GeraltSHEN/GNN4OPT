@@ -16,64 +16,87 @@ conda activate opt-ml-env
 DATASETS=("set_cover" "cauctions" "facilities" "indset")
 MAX_SAMPLES_PER_SPLIT="none"
 
-for DATASET in "${DATASETS[@]}"; do
-  python default_args.py \
-    --dataset "${DATASET}" \
-    --cfg_idx 30 \
-    --epochs 2 \
-    --loss_option LambdaNDCGLoss1  \
-    --relevance_type linear \
-    --use_default_features true \
-    --remove_bad_candidates false \
-    --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
-done
+# for DATASET in "${DATASETS[@]}"; do
+#   python default_args.py \
+#     --dataset "${DATASET}" \
+#     --cfg_idx 30 \
+#     --epochs 2 \
+#     --loss_option LambdaNDCGLoss1  \
+#     --relevance_type linear \
+#     --use_default_features true \
+#     --remove_bad_candidates false \
+#     --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
+# done
 
-for DATASET in "${DATASETS[@]}"; do
-  python default_args.py \
-    --dataset "${DATASET}" \
-    --cfg_idx 31 \
-    --epochs 2 \
-    --loss_option LambdaNDCGLoss1  \
-    --relevance_type linear \
-    --use_default_features true \
-    --remove_bad_candidates true \
-    --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
-done
-
-for DATASET in "${DATASETS[@]}"; do
-  python default_args.py \
-    --dataset "${DATASET}" \
-    --cfg_idx 32 \
-    --epochs 2 \
-    --loss_option LambdaNDCGLoss1  \
-    --relevance_type linear \
-    --use_default_features false \
-    --remove_bad_candidates false \
-    --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
-done
-
-for DATASET in "${DATASETS[@]}"; do
-  python default_args.py \
-    --dataset "${DATASET}" \
-    --cfg_idx 33 \
-    --epochs 2 \
-    --loss_option LambdaNDCGLoss1  \
-    --relevance_type linear \
-    --use_default_features false \
-    --remove_bad_candidates true \
-    --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
-done
-
-
+# for DATASET in "${DATASETS[@]}"; do
+#   python default_args.py \
+#     --dataset "${DATASET}" \
+#     --cfg_idx 31 \
+#     --epochs 2 \
+#     --loss_option LambdaNDCGLoss1  \
+#     --relevance_type linear \
+#     --use_default_features true \
+#     --remove_bad_candidates true \
+#     --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
+# done
 
 # for DATASET in "${DATASETS[@]}"; do
 #   python default_args.py \
 #     --dataset "${DATASET}" \
 #     --cfg_idx 32 \
 #     --epochs 2 \
-#     --loss_option TierAwarePairwiseLogisticLoss  \
+#     --loss_option LambdaNDCGLoss1  \
 #     --relevance_type linear \
-#     --use_default_features true \
+#     --use_default_features false \
 #     --remove_bad_candidates false \
 #     --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
 # done
+
+# for DATASET in "${DATASETS[@]}"; do
+#   python default_args.py \
+#     --dataset "${DATASET}" \
+#     --cfg_idx 33 \
+#     --epochs 2 \
+#     --loss_option LambdaNDCGLoss1  \
+#     --relevance_type linear \
+#     --use_default_features false \
+#     --remove_bad_candidates true \
+#     --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
+# done
+
+# for DATASET in "${DATASETS[@]}"; do
+#   python default_args.py \
+#     --dataset "${DATASET}" \
+#     --cfg_idx 34 \
+#     --epochs 2 \
+#     --loss_option LambdaNDCGLoss1  \
+#     --relevance_type true_score \
+#     --use_default_features true \
+#     --remove_bad_candidates true \
+#     --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
+# done
+
+# for DATASET in "${DATASETS[@]}"; do
+#   python default_args.py \
+#     --dataset "${DATASET}" \
+#     --cfg_idx 35 \
+#     --epochs 2 \
+#     --loss_option TierAwarePairwiseLogisticLoss  \
+#     --relevance_type linear \
+#     --use_default_features true \
+#     --remove_bad_candidates true \
+#     --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
+# done
+
+for DATASET in "${DATASETS[@]}"; do
+  python default_args.py \
+    --dataset "${DATASET}" \
+    --cfg_idx 36 \
+    --epochs 2 \
+    --loss_option NCE  \
+    --relevance_type true_score \
+    --use_default_features true \
+    --remove_bad_candidates true \
+    --max_samples_per_split $MAX_SAMPLES_PER_SPLIT
+done
+

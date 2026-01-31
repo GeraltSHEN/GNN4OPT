@@ -27,6 +27,7 @@ from losses import (
     LiPO,
     TopTierAverageSoftmaxLoss,
     TierAwarePairwiseLogisticLoss,
+    NCE
 )
 from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, LambdaARPLoss2, PairwiseLogisticLoss
 
@@ -82,6 +83,7 @@ def train(
         "TierNormalizedLambdaARP2": TierNormalizedLambdaARP2,
         "LiPO": LiPO,
         "TopTierAverageSoftmaxLoss": TopTierAverageSoftmaxLoss,
+        "NCE": NCE,
     }
     ranking_loss_cls = ranking_loss_factories.get(loss_option)
     if ranking_loss_cls is None:
