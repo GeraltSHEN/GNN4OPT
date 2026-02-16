@@ -229,6 +229,15 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
     print(f'load dataset from {dataset_root}')
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
     edge_nfeats = getattr(args, "edge_nfeats", 1)
+    subsamples = getattr(args, "subsamples", None)
+    subsample_manifest_name = "sample_files.txt"
+    subsample_root = None
+    if subsamples is not None:
+        subsamples_str = str(subsamples).strip().rstrip(",").strip()
+        if subsamples_str and subsamples_str.lower() not in {"none", "null"}:
+            subsample_root = Path(subsamples_str)
+            if not subsample_root.is_absolute():
+                subsample_root = dataset_root.parent / subsample_root
 
     if for_training:
         splits = {
@@ -272,7 +281,23 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
     metadata: Dict[str, Sequence[Path]] = {}
     for split_name, cfg in splits.items():
         split_dir = dataset_root / cfg["subdir"]
-        sample_files = sorted(split_dir.glob(file_pattern))
+        sample_files = None
+        if subsample_root is not None:
+            manifest_path = subsample_root / cfg["subdir"] / subsample_manifest_name
+            if manifest_path.exists():
+                manifest_entries = manifest_path.read_text(encoding="utf-8").splitlines()
+                sample_files = []
+                for entry in manifest_entries:
+                    entry = entry.strip()
+                    if not entry:
+                        continue
+                    sample_path = Path(entry)
+                    if not sample_path.is_absolute():
+                        sample_path = split_dir / sample_path
+                    sample_files.append(sample_path)
+                print(f"using subsample manifest for {split_name}: {manifest_path}")
+        if sample_files is None:
+            sample_files = sorted(split_dir.glob(file_pattern))
         max_split_samples = getattr(
             args,
             f"max_{split_name}_samples",

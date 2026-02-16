@@ -357,7 +357,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--save_every",
         type=int,
-        default=100000,
+        default=250000,
         help="Checkpoint frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(

@@ -30,6 +30,7 @@ BASE_DEFAULTS = {
     "use_default_features": False,
     "remove_bad_candidates": False,
     "file_pattern": "sample_*.pkl",
+    "subsamples": None,
     # training options
     "seed": 42,
     "epochs": 1,
