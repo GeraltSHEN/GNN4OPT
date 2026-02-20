@@ -6,7 +6,7 @@
 #SBATCH --partition=a100-80gb
 #SBATCH --mem=50G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=3-3:30:00
+#SBATCH --time=5-3:30:00
 #SBATCH --job-name train_overfit
 #SBATCH --output=joboutput/job_train_overfit.out
 

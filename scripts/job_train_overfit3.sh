@@ -1,20 +1,20 @@
 #!/bin/sh -l
-# FILENAME:  job_train_overfit2
+# FILENAME:  job_train_overfit3
 
 #SBATCH -A canli
 #SBATCH --nodes=1 --gpus-per-node=1
-#SBATCH --partition=a100-80gb
+#SBATCH --partition=a100-40gb
 #SBATCH --mem=50G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=5-3:30:00
-#SBATCH --job-name train_overfit2
-#SBATCH --output=joboutput/job_train_overfit2.out
+#SBATCH --job-name train_overfit3
+#SBATCH --output=joboutput/job_train_overfit3.out
 
 module load anaconda
 conda activate opt-ml-env
 
 DATASETS=("set_cover")
-CFG_IDS=(42)
+CFG_IDS=(43)
 
 for DATASET in "${DATASETS[@]}"; do
   echo "** ${DATASET} dataset **"
