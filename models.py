@@ -693,7 +693,7 @@ class SetCoverHolo(torch.nn.Module):
         n_constraints_total = n_constraints_per_graph.sum().int()
         n_variables_every = n_variables_per_graph.sum().int() // num_graphs
 
-        peak_mem_device = _reset_peak_memory(Y.device)
+        # peak_mem_device = _reset_peak_memory(Y.device)
 
         break_node_indices_local, break_node_indices_global = self.get_nodes_to_break(
             constraint_features=constraint_features,
