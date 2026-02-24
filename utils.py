@@ -333,6 +333,10 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
     num_heads = args.num_heads
     isab_num_inds = args.isab_num_inds
     use_set_transformer = getattr(args, "use_set_transformer", True)
+    gnn_backbone = getattr(args, "gnn_backbone", "bipartite")
+    sage_mlp_layers = int(getattr(args, "sage_mlp_layers", 2))
+    ppgn_mlp_layers = int(getattr(args, "ppgn_mlp_layers", 2))
+    ppgn_layernorm = bool(getattr(args, "ppgn_layernorm", True))
     output_size = 1
 
     def _load_breaking_selector_model(model, selector_path: Union[str, Path]):
@@ -362,6 +366,10 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             output_size,
             n_layers,
             holo=None,
+            gnn_backbone=gnn_backbone,
+            sage_mlp_layers=sage_mlp_layers,
+            ppgn_mlp_layers=ppgn_mlp_layers,
+            ppgn_layernorm=ppgn_layernorm,
         )
     elif getattr(args, "model", "").lower() == "stgnn":
         model = new_GNNPolicy(
@@ -384,7 +392,11 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
                                             var_nfeats,
                                             output_size,
                                             selector_layers,
-                                            holo=None)
+                                            holo=None,
+                                            gnn_backbone=gnn_backbone,
+                                            sage_mlp_layers=sage_mlp_layers,
+                                            ppgn_mlp_layers=ppgn_mlp_layers,
+                                            ppgn_layernorm=ppgn_layernorm)
         breaking_selector_model = _load_breaking_selector_model(breaking_selector_model, 
                                                                 selector_path)
         breaking_selector_model = breaking_selector_model.to(args.device)
@@ -415,7 +427,11 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
                           var_nfeats,
                           output_size,
                           n_layers,
-                          holo=holo)
+                          holo=holo,
+                          gnn_backbone=gnn_backbone,
+                          sage_mlp_layers=sage_mlp_layers,
+                          ppgn_mlp_layers=ppgn_mlp_layers,
+                          ppgn_layernorm=ppgn_layernorm)
     else:
         raise NotImplementedError(f"Unknown model type '{args.model}'.")
 

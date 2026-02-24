@@ -344,17 +344,160 @@ class SecondOrderPPGNBlock(nn.Module):
 
         mult = torch.einsum("bmnf,bnlf->bmlf", x1, x2)
         mult = self.ln(mult)
-
+        # no symmetry needed here
         out = self.skip(pair_features + mult)
         return out
 
 
 class StackedPPGNBipartiteGNN(nn.Module):
     """Stack of SecondOrderPPGNBlock"""
-    # TODO: implement __init__ and forward
-    # __init__: simply stack SecondOrderPPGNBlock, just like StackedSAGEBipartiteGNN and StackedBipartiteGNN
-    # forward: check SDP/models/ppgn.py and hetero_higher_order.py
-    
+    def __init__(self, hidden_channels, edge_nfeats=1, n_layers=2, 
+                 sage_mlp_layers=2, ppgn_mlp_layers=2, ppgn_layernorm=True):
+        super().__init__()
+        self.out_dim = hidden_channels
+        self.edge_nfeats = edge_nfeats
+        self.n_layers = n_layers
+
+        self.ppgn_layers = nn.ModuleList(
+            [
+                SecondOrderPPGNBlock(
+                    emb_size=hidden_channels,
+                    mlp_layers=ppgn_mlp_layers,
+                    layernorm=ppgn_layernorm,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.conv_v_to_c_layers = nn.ModuleList(
+            [
+                SAGEConv(
+                    emb_size=hidden_channels,
+                    edge_nfeats=edge_nfeats,
+                    mlp_layers=sage_mlp_layers,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+        self.conv_c_to_v_layers = nn.ModuleList(
+            [
+                SAGEConv(
+                    emb_size=hidden_channels,
+                    edge_nfeats=edge_nfeats,
+                    mlp_layers=sage_mlp_layers,
+                )
+                for _ in range(n_layers)
+            ]
+        )
+
+    def _prepare_variable_batch_layout(self, variable_features, n_variables_per_graph):
+        device = variable_features.device
+        num_graphs = int(n_variables_per_graph.numel())
+        n_variables_max = int(n_variables_per_graph.max().item())
+        emb_size = variable_features.size(-1)
+        no_padding = bool((n_variables_per_graph == n_variables_max).all())
+
+        node_mask = None
+        pair_mask = None
+        graph_index = None
+        local_index = None
+
+        if not no_padding:
+            row = torch.arange(n_variables_max, device=device).unsqueeze(0)
+            node_mask = row < n_variables_per_graph.unsqueeze(1)
+            pair_mask = torch.einsum("bn,bm->bnm", node_mask, node_mask)
+            offsets = torch.cumsum(
+                torch.cat(
+                    (
+                        torch.zeros(1, device=device, dtype=torch.long),
+                        n_variables_per_graph[:-1],
+                    )
+                ),
+                dim=0,
+            )
+            graph_index = torch.repeat_interleave(
+                torch.arange(num_graphs, device=device), n_variables_per_graph
+            )
+            local_index = torch.arange(variable_features.size(0), device=device) - torch.repeat_interleave(
+                offsets, n_variables_per_graph
+            )
+
+        return (
+            num_graphs,
+            n_variables_max,
+            emb_size,
+            no_padding,
+            node_mask,
+            pair_mask,
+            graph_index,
+            local_index,
+        )
+
+    def forward(self, constraint_features, edge_indices, edge_features, variable_features, n_variables_per_graph=None):
+        device = variable_features.device
+        if n_variables_per_graph.dim() != 1:
+            raise ValueError("n_variables_per_graph must be a 1D tensor.")
+        n_variables_per_graph = n_variables_per_graph.to(device=device, dtype=torch.long)
+        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+
+        (
+            num_graphs,
+            n_variables_max,
+            emb_size,
+            no_padding,
+            node_mask,
+            pair_mask,
+            graph_index,
+            local_index,
+        ) = self._prepare_variable_batch_layout(variable_features, n_variables_per_graph)
+
+        for layer_idx in range(self.n_layers):
+            # Build dense node tensor per graph for second-order pair updates.
+            if no_padding:
+                x_dense = variable_features.reshape(num_graphs, n_variables_max, emb_size)
+            else:
+                x_dense = variable_features.new_zeros((num_graphs, n_variables_max, emb_size))
+                x_dense[graph_index, local_index] = variable_features
+
+            # Convert node -> pair, run PPGN block, then recover node features from diagonal.
+            pair_features = 0.5 * (x_dense.unsqueeze(2) + x_dense.unsqueeze(1))
+            pair_features = self.ppgn_layers[layer_idx](pair_features, pair_mask)
+            updated_variables_dense = pair_features.diagonal(dim1=1, dim2=2).transpose(1, 2)
+
+            # Return to the original packed variable representation.
+            if no_padding:
+                updated_variables = updated_variables_dense.reshape(-1, emb_size)
+            else:
+                updated_variables = updated_variables_dense[node_mask]
+
+            # Bipartite message passing uses SAGEConv for both directions.
+            if self.n_layers == 1:
+                constraint_features = self.conv_v_to_c_layers[layer_idx](
+                    updated_variables,
+                    reversed_edge_indices,
+                    edge_features,
+                    constraint_features,
+                )
+                variable_features = self.conv_c_to_v_layers[layer_idx](
+                    constraint_features,
+                    edge_indices,
+                    edge_features,
+                    updated_variables,
+                )
+            else:
+                constraint_features = constraint_features + self.conv_v_to_c_layers[layer_idx](
+                    updated_variables,
+                    reversed_edge_indices,
+                    edge_features,
+                    constraint_features,
+                )
+                variable_features = variable_features + self.conv_c_to_v_layers[layer_idx](
+                    constraint_features,
+                    edge_indices,
+                    edge_features,
+                    updated_variables,
+                )
+
+        return constraint_features, variable_features
 
 
 
