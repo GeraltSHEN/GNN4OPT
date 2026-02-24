@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing
+from torch_geometric.nn import MLP, MessagePassing
 
 # from extensions import repeat_interleave, vrange
 
@@ -154,7 +154,15 @@ class StackedBipartiteGNN(torch.nn.Module):
                     ),
                 )
 
-    def forward(self, constraint_features, edge_indices, edge_features, variable_features):
+    def forward(
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        n_variables_per_graph=None,
+    ):
+        del n_variables_per_graph
         reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
 
         if self.n_layers == 1:
@@ -231,16 +239,152 @@ class BipartiteGraphConvolution(MessagePassing):
         return output
 
 
+class SAGEConv(MessagePassing):
+    def __init__(self, emb_size=64, edge_nfeats=1, mlp_layers=2):
+        super().__init__("add")
+        self.act = nn.ReLU()
+        self.lin_src = nn.Linear(emb_size, emb_size)
+        self.lin_dst = nn.Linear(emb_size, emb_size)
+        self.mlp = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+
+    def forward(self, left_features, edge_indices, edge_features, right_features):
+        left_features = self.lin_src(left_features)
+        out = self.propagate(
+            edge_indices,
+            size=(left_features.shape[0], right_features.shape[0]),
+            node_features=(left_features, right_features),
+            edge_features=edge_features,
+        )
+        out = out + self.lin_dst(right_features)
+        return self.mlp(out)
+
+    def message(self, node_features_j, edge_features):
+        return self.act(node_features_j) * edge_features
+
+
+class StackedSAGEBipartiteGNN(nn.Module):
+    """Stack of SAGE bipartite layers"""
+
+    def __init__(self, hidden_channels, edge_nfeats=1, n_layers=2, mlp_layers=2):
+        super().__init__()
+        self.out_dim = hidden_channels
+        self.edge_nfeats = edge_nfeats
+        self.n_layers = n_layers
+
+        if n_layers == 1:
+            self.conv_v_to_c = SAGEConv(
+                emb_size=hidden_channels, edge_nfeats=edge_nfeats, mlp_layers=mlp_layers
+            )
+            self.conv_c_to_v = SAGEConv(
+                emb_size=hidden_channels, edge_nfeats=edge_nfeats, mlp_layers=mlp_layers
+            )
+        else:
+            for i in range(n_layers):
+                setattr(self, f"conv_{i}_v_to_c",
+                    SAGEConv(
+                        emb_size=hidden_channels, edge_nfeats=edge_nfeats, mlp_layers=mlp_layers
+                    ),
+                )
+                setattr(
+                    self,
+                    f"conv_{i}_c_to_v",
+                    SAGEConv(
+                        emb_size=hidden_channels, edge_nfeats=edge_nfeats, mlp_layers=mlp_layers
+                    ),
+                )
+
+    def forward(
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        n_variables_per_graph=None,
+    ):
+        del n_variables_per_graph
+        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+
+        if self.n_layers == 1:
+            constraint_features = self.conv_v_to_c(
+                variable_features, reversed_edge_indices, edge_features, constraint_features
+            )
+            variable_features = self.conv_c_to_v(
+                constraint_features, edge_indices, edge_features, variable_features
+            )
+        else:
+            for i in range(self.n_layers):
+                conv_v_to_c = getattr(self, f"conv_{i}_v_to_c")
+                conv_c_to_v = getattr(self, f"conv_{i}_c_to_v")
+                constraint_features = constraint_features + conv_v_to_c(
+                    variable_features, reversed_edge_indices, edge_features, constraint_features
+                )
+                variable_features = variable_features + conv_c_to_v(
+                    constraint_features, edge_indices, edge_features, variable_features
+                )
+        return constraint_features, variable_features
+
+
+class SecondOrderPPGNBlock(nn.Module):
+    """Second-order Folklore block operating on dense pair tensors (B, N, N, F)."""
+
+    def __init__(self, emb_size=64, mlp_layers=2, layernorm=True):
+        super().__init__()
+        self.mlp1 = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.mlp2 = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.skip = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.ln = nn.LayerNorm(emb_size) if layernorm else nn.Identity()
+
+    def forward(self, pair_features, pair_mask):
+        x1 = self.mlp1(pair_features)
+        x2 = self.mlp2(pair_features)
+        if pair_mask is not None:
+            mask = pair_mask.unsqueeze(-1)
+            x1 = x1.masked_fill(~mask, 0.0)
+            x2 = x2.masked_fill(~mask, 0.0)
+
+        mult = torch.einsum("bmnf,bnlf->bmlf", x1, x2)
+        mult = self.ln(mult)
+
+        out = self.skip(pair_features + mult)
+        return out
+
+
+class StackedPPGNBipartiteGNN(nn.Module):
+    """Stack of SecondOrderPPGNBlock"""
+    # TODO: implement __init__ and forward
+    # __init__: simply stack SecondOrderPPGNBlock, just like StackedSAGEBipartiteGNN and StackedBipartiteGNN
+    # forward: check SDP/models/ppgn.py and hetero_higher_order.py
+    
+
+
+
+
 class GNNPolicy(nn.Module):
     """A wrapper module combining
     - an initial MLP to convert raw features to embeddings in common dimension,
-    - a data encoder (BipartiteGraphConvolution) for MILP bipartite graphs, 
-    - a set-cover-specific module (SetCoverHolo)
+    - a configurable data encoder (bipartite / sage / ppgn) for MILP bipartite graphs,
+    - a set-cover-specific module (SetCoverHolo) ASSUME NONE ALWAYS FOR NOW.
     - a final MLP on the variable features for candidate choice/scoring
     """
-    def __init__(self, emb_size, cons_nfeats, edge_nfeats, var_nfeats, output_size,
-                 n_layers, holo):
+    def __init__(
+        self,
+        emb_size,
+        cons_nfeats,
+        edge_nfeats,
+        var_nfeats,
+        output_size,
+        n_layers,
+        holo,
+        gnn_backbone: str = "bipartite", # sage, ppgn
+        sage_mlp_layers: int = 2,
+        ppgn_mlp_layers: int = 2,
+        ppgn_layernorm: bool = True,
+    ):
         super().__init__()
+        if n_layers <= 0:
+            raise ValueError("n_layers must be >= 1.")
+        self.n_layers = n_layers
+        self.gnn_backbone = gnn_backbone
 
         # CONSTRAINT EMBEDDING
         self.cons_embedding = torch.nn.Sequential(
@@ -251,11 +395,6 @@ class GNNPolicy(nn.Module):
             torch.nn.ReLU(),
         )
 
-        # EDGE EMBEDDING
-        self.edge_embedding = torch.nn.Sequential(
-            torch.nn.LayerNorm(edge_nfeats),
-        )
-
         # VARIABLE EMBEDDING
         self.var_embedding = torch.nn.Sequential(
             torch.nn.LayerNorm(var_nfeats),
@@ -264,13 +403,31 @@ class GNNPolicy(nn.Module):
             torch.nn.Linear(emb_size, emb_size),
             torch.nn.ReLU(),
         )
-        
+
         # DATA ENCODER
-        self.n_layers = n_layers
-        self.data_encoder = StackedBipartiteGNN(
-            hidden_channels=emb_size, edge_nfeats=edge_nfeats, n_layers=n_layers
-        )
-        
+        if self.gnn_backbone == "bipartite":
+            self.data_encoder = StackedBipartiteGNN(
+                hidden_channels=emb_size, edge_nfeats=edge_nfeats, n_layers=n_layers
+            )
+        elif self.gnn_backbone == "sage":
+            self.data_encoder = StackedSAGEBipartiteGNN(
+                hidden_channels=emb_size,
+                edge_nfeats=edge_nfeats,
+                n_layers=n_layers,
+                mlp_layers=sage_mlp_layers,
+            )
+        elif self.gnn_backbone == "ppgn":
+            self.data_encoder = StackedPPGNBipartiteGNN(
+                hidden_channels=emb_size,
+                edge_nfeats=edge_nfeats,
+                n_layers=n_layers,
+                sage_mlp_layers=sage_mlp_layers,
+                ppgn_mlp_layers=ppgn_mlp_layers,
+                ppgn_layernorm=ppgn_layernorm,
+            )
+        else:
+            raise ValueError(f"{self.gnn_backbone} not available.")
+
         # TUPLE ENCODER
         self.holo = holo
 
@@ -294,13 +451,18 @@ class GNNPolicy(nn.Module):
         # 1. raw features to embeddings in common dimension
         with _perf_timer("GNNPolicy step 1: embed raw features"):
             Y = self.cons_embedding(constraint_features)
-            edge_features = self.edge_embedding(edge_features)
             X = self.var_embedding(variable_features)
 
         # 2. constraint-variable message passing
         with _perf_timer("GNNPolicy step 2: constraint-variable message passing"):
-            Y, X = self.data_encoder(Y, edge_indices, edge_features, X)
-        
+            Y, X = self.data_encoder(
+                Y,
+                edge_indices,
+                edge_features,
+                X,
+                n_variables_per_graph=n_variables_per_graph,
+            )
+
         # 3. break symmetry
         if self.holo is not None:
             with _perf_timer("GNNPolicy step 3: symmetry breaking / SetCoverHolo"):

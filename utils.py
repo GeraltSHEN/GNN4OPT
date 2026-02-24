@@ -128,9 +128,7 @@ class GraphDataset(Dataset):
             constraint_feature_indices = {name: new_index for name, new_index in zip(constraint_required, range(len(constraint_required)))}
     
         if self.edge_nfeats == 2:
-            norm = torch.linalg.norm(edge_features)
-            ef_norm = torch.where(norm > 0, edge_features / norm, torch.zeros_like(edge_features))
-            edge_features = torch.cat((edge_features, ef_norm), dim=-1)
+            raise ValueError("edge_nfeats == 2 disabled")
         
         candidate_choice_node_id = sample_action
         candidates = torch.as_tensor(sample_action_set, dtype=torch.int64)
