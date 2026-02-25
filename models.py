@@ -10,7 +10,7 @@ from torch_geometric.nn import MLP, MessagePassing
 
 # from extensions import repeat_interleave, vrange
 
-PERFORMANCE_DEBUG = False  # Toggle to print timing and memory information
+PERFORMANCE_DEBUG = True  # Toggle to print timing and memory information
 
 
 @contextmanager
@@ -569,7 +569,7 @@ class GNNPolicy(nn.Module):
         # 2. constraint-variable message passing
         with _perf_timer("GNNPolicy step 2: constraint-variable message passing"):
             if self.gnn_backbone == "ppgn":
-                Y, X = self.data_encoder(Y, 
+                X = self.data_encoder(Y, 
                                          X, 
                                          n_constraints_per_graph, 
                                          n_variables_per_graph)

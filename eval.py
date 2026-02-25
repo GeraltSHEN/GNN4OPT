@@ -128,7 +128,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--eval_batch_size",
         type=int,
-        default=32, 
+        default=1, 
         help="Base evaluation batch size (used if split-specific batch size is not provided).",
     )
     parser.add_argument(
