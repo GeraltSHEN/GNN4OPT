@@ -26,6 +26,7 @@ BASE_DEFAULTS = {
     "sage_mlp_layers": 2,
     "ppgn_mlp_layers": 2,
     "ppgn_layernorm": True,
+    "two_fwl": False,
     "sym_break_layers": 2,
     "mp_layers": 2,
     "use_set_transformer": True,

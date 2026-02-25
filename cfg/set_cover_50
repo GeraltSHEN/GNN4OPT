@@ -14,6 +14,7 @@ gnn_backbone: ppgn
 sage_mlp_layers: 2
 ppgn_mlp_layers: 2
 ppgn_layernorm: true
+two_fwl: true
 sym_break_layers: 2
 mp_layers: 2
 use_set_transformer: true

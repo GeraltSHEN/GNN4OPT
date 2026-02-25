@@ -325,34 +325,60 @@ class StackedSAGEBipartiteGNN(nn.Module):
 
 
 class SecondOrderPPGNBlock(nn.Module):
-    """Second-order Folklore block operating on dense pair tensors (B, N, N, F)."""
+    """Second-order Folklore block operating on dense pair tensors (B, M_max, N, F) and (B, N, N, F)."""
 
     def __init__(self, emb_size=64, mlp_layers=2, layernorm=True):
         super().__init__()
-        self.mlp1 = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
-        self.mlp2 = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
-        self.skip = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
-        self.ln = nn.LayerNorm(emb_size) if layernorm else nn.Identity()
+        self.mlp1_cv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.mlp2_cv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.skip_cv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.ln_cv = nn.LayerNorm(emb_size) if layernorm else nn.Identity()
 
-    def forward(self, pair_features, pair_mask):
-        x1 = self.mlp1(pair_features)
-        x2 = self.mlp2(pair_features)
-        if pair_mask is not None:
-            mask = pair_mask.unsqueeze(-1)
+        self.mlp1_vv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.mlp2_vv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.skip_vv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.ln_vv = nn.LayerNorm(emb_size) if layernorm else nn.Identity()
+    
+    def cv_forward(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
+        x1 = self.mlp1_cv(con_var_features)
+        x2 = self.mlp2_cv(var_var_features)
+        if con_var_mask is not None:
+            x1 = x1.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+        if var_var_mask is not None:
+            x2 = x2.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
+        mult = torch.einsum("bmnf,bnlf->bmlf", x1, x2)
+        mult = self.ln_cv(mult)
+        return self.skip_cv(con_var_features + mult)
+    
+    def vv_forward(self, var_var_features, var_var_mask):
+        x1 = self.mlp1_vv(var_var_features)
+        x2 = self.mlp2_vv(var_var_features)
+        if var_var_mask is not None:
+            mask = var_var_mask.unsqueeze(-1)
             x1 = x1.masked_fill(~mask, 0.0)
             x2 = x2.masked_fill(~mask, 0.0)
-
         mult = torch.einsum("bmnf,bnlf->bmlf", x1, x2)
-        mult = self.ln(mult)
-        # no symmetry needed here
-        out = self.skip(pair_features + mult)
-        return out
+        mult = self.ln_vv(mult)
+        return self.skip_vv(var_var_features + mult)
 
+    def forward(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
+        con_var_features = self.cv_forward(
+            con_var_features, var_var_features, con_var_mask, var_var_mask
+        )
+        var_var_features = self.vv_forward(var_var_features, var_var_mask)
+
+        if con_var_mask is not None:
+            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+        if var_var_mask is not None:
+            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
+
+        return con_var_features, var_var_features
+    
 
 class StackedPPGNBipartiteGNN(nn.Module):
     """Stack of SecondOrderPPGNBlock"""
     def __init__(self, hidden_channels, edge_nfeats=1, n_layers=2, 
-                 sage_mlp_layers=2, ppgn_mlp_layers=2, ppgn_layernorm=True):
+                 ppgn_mlp_layers=2, ppgn_layernorm=True):
         super().__init__()
         self.out_dim = hidden_channels
         self.edge_nfeats = edge_nfeats
@@ -368,138 +394,78 @@ class StackedPPGNBipartiteGNN(nn.Module):
                 for _ in range(n_layers)
             ]
         )
-        self.conv_v_to_c_layers = nn.ModuleList(
-            [
-                SAGEConv(
-                    emb_size=hidden_channels,
-                    edge_nfeats=edge_nfeats,
-                    mlp_layers=sage_mlp_layers,
-                )
-                for _ in range(n_layers)
-            ]
-        )
-        self.conv_c_to_v_layers = nn.ModuleList(
-            [
-                SAGEConv(
-                    emb_size=hidden_channels,
-                    edge_nfeats=edge_nfeats,
-                    mlp_layers=sage_mlp_layers,
-                )
-                for _ in range(n_layers)
-            ]
-        )
+        self.readout_mlp = MLP([2 * hidden_channels, hidden_channels, hidden_channels], act="relu", 
+                               norm=None, plain_last=False)
 
-    def _prepare_variable_batch_layout(self, variable_features, n_variables_per_graph):
-        device = variable_features.device
-        num_graphs = int(n_variables_per_graph.numel())
-        n_variables_max = int(n_variables_per_graph.max().item())
-        emb_size = variable_features.size(-1)
-        no_padding = bool((n_variables_per_graph == n_variables_max).all())
+    def prepare_mask(self, con_var_features, var_var_features, n_constraints_per_graph, n_variables_per_graph):
+        if con_var_features.dim() != 4:
+            raise ValueError("con_var_features must be a 4D tensor with shape (B, M_max, N_max, F).")
+        if var_var_features.dim() != 4:
+            raise ValueError("var_var_features must be a 4D tensor with shape (B, N_max, N_max, F).")
 
-        node_mask = None
-        pair_mask = None
-        graph_index = None
-        local_index = None
+        bsz, m_max, n_max, _ = con_var_features.shape
+        bsz_vv, n_max_a, n_max_b, _ = var_var_features.shape
+        if bsz != bsz_vv:
+            raise ValueError("Batch sizes of con_var_features and var_var_features must match.")
+        if n_max_a != n_max or n_max_b != n_max:
+            raise ValueError("N_max dimensions of con_var_features and var_var_features must match.")
 
-        if not no_padding:
-            row = torch.arange(n_variables_max, device=device).unsqueeze(0)
-            node_mask = row < n_variables_per_graph.unsqueeze(1)
-            pair_mask = torch.einsum("bn,bm->bnm", node_mask, node_mask)
-            offsets = torch.cumsum(
-                torch.cat(
-                    (
-                        torch.zeros(1, device=device, dtype=torch.long),
-                        n_variables_per_graph[:-1],
-                    )
-                ),
-                dim=0,
-            )
-            graph_index = torch.repeat_interleave(
-                torch.arange(num_graphs, device=device), n_variables_per_graph
-            )
-            local_index = torch.arange(variable_features.size(0), device=device) - torch.repeat_interleave(
-                offsets, n_variables_per_graph
-            )
+        if n_constraints_per_graph is None or n_variables_per_graph is None:
+            return None, None
 
-        return (
-            num_graphs,
-            n_variables_max,
-            emb_size,
-            no_padding,
-            node_mask,
-            pair_mask,
-            graph_index,
-            local_index,
+        device = con_var_features.device
+        n_constraints_per_graph = n_constraints_per_graph.reshape(-1)
+        n_variables_per_graph = n_variables_per_graph.reshape(-1)
+
+        constraint_node_mask = (torch.arange(m_max, device=device).unsqueeze(0) < n_constraints_per_graph.unsqueeze(1))
+        variable_node_mask = (torch.arange(n_max, device=device).unsqueeze(0) < n_variables_per_graph.unsqueeze(1))
+        con_var_mask = torch.einsum("bm,bn->bmn", constraint_node_mask, variable_node_mask).bool()
+        var_var_mask = torch.einsum("bn,bm->bnm", variable_node_mask, variable_node_mask).bool()
+        return con_var_mask, var_var_mask
+    
+    def readout(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
+        """
+        con_var_features: (B, M_max, N_max, F)
+        var_var_features: (B, N_max, N_max, F)
+        get [con_var_features.sum(dim=1), var_var_features.sum(dim=1)] in shape of (B, N_max, 2F)
+        apply MLP([con_var_features.sum(dim=1), var_var_features.sum(dim=1)]) to get 
+        variable_features in shape of (B, N_max, F), then unpad to (N_1 + ... + N_bsz, F)
+        """
+        if con_var_mask is not None:
+            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+        if var_var_mask is not None:
+            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
+
+        con_var_summary = con_var_features.sum(dim=1)
+        var_var_summary = var_var_features.sum(dim=1)
+        variable_features = self.readout_mlp(torch.cat([con_var_summary, var_var_summary], dim=-1)) # (B, N_max, 2F)
+
+        if var_var_mask is None:
+            return variable_features.reshape(-1, variable_features.size(-1))
+
+        variable_node_mask = var_var_mask.any(dim=-1)  # (B, N_max)
+        return variable_features[variable_node_mask]  # (N_1 + ... + N_bsz, F)
+
+    def forward(self, con_var_features, var_var_features, n_constraints_per_graph, n_variables_per_graph):
+        con_var_mask, var_var_mask = self.prepare_mask(
+            con_var_features,
+            var_var_features,
+            n_constraints_per_graph,
+            n_variables_per_graph,
         )
 
-    def forward(self, constraint_features, edge_indices, edge_features, variable_features, n_variables_per_graph=None):
-        device = variable_features.device
-        if n_variables_per_graph.dim() != 1:
-            raise ValueError("n_variables_per_graph must be a 1D tensor.")
-        n_variables_per_graph = n_variables_per_graph.to(device=device, dtype=torch.long)
-        reversed_edge_indices = torch.stack([edge_indices[1], edge_indices[0]], dim=0)
+        if con_var_mask is not None:
+            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+        if var_var_mask is not None:
+            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
 
-        (
-            num_graphs,
-            n_variables_max,
-            emb_size,
-            no_padding,
-            node_mask,
-            pair_mask,
-            graph_index,
-            local_index,
-        ) = self._prepare_variable_batch_layout(variable_features, n_variables_per_graph)
+        for layer in self.ppgn_layers:
+            con_var_features, var_var_features = layer(
+                con_var_features, var_var_features, con_var_mask, var_var_mask
+            )
 
-        for layer_idx in range(self.n_layers):
-            # Build dense node tensor per graph for second-order pair updates.
-            if no_padding:
-                x_dense = variable_features.reshape(num_graphs, n_variables_max, emb_size)
-            else:
-                x_dense = variable_features.new_zeros((num_graphs, n_variables_max, emb_size))
-                x_dense[graph_index, local_index] = variable_features
-
-            # Convert node -> pair, run PPGN block, then recover node features from diagonal.
-            pair_features = 0.5 * (x_dense.unsqueeze(2) + x_dense.unsqueeze(1))
-            pair_features = self.ppgn_layers[layer_idx](pair_features, pair_mask)
-            updated_variables_dense = pair_features.diagonal(dim1=1, dim2=2).transpose(1, 2)
-
-            # Return to the original packed variable representation.
-            if no_padding:
-                updated_variables = updated_variables_dense.reshape(-1, emb_size)
-            else:
-                updated_variables = updated_variables_dense[node_mask]
-
-            # Bipartite message passing uses SAGEConv for both directions.
-            if self.n_layers == 1:
-                constraint_features = self.conv_v_to_c_layers[layer_idx](
-                    updated_variables,
-                    reversed_edge_indices,
-                    edge_features,
-                    constraint_features,
-                )
-                variable_features = self.conv_c_to_v_layers[layer_idx](
-                    constraint_features,
-                    edge_indices,
-                    edge_features,
-                    updated_variables,
-                )
-            else:
-                constraint_features = constraint_features + self.conv_v_to_c_layers[layer_idx](
-                    updated_variables,
-                    reversed_edge_indices,
-                    edge_features,
-                    constraint_features,
-                )
-                variable_features = variable_features + self.conv_c_to_v_layers[layer_idx](
-                    constraint_features,
-                    edge_indices,
-                    edge_features,
-                    updated_variables,
-                )
-
-        return constraint_features, variable_features
-
-
+        variable_features = self.readout(con_var_features, var_var_features, con_var_mask, var_var_mask)
+        return variable_features
 
 
 class GNNPolicy(nn.Module):
@@ -530,22 +496,24 @@ class GNNPolicy(nn.Module):
         self.gnn_backbone = gnn_backbone
 
         # CONSTRAINT EMBEDDING
-        self.cons_embedding = torch.nn.Sequential(
-            torch.nn.LayerNorm(cons_nfeats),
-            torch.nn.Linear(cons_nfeats, emb_size),
-            torch.nn.ReLU(),
-            torch.nn.Linear(emb_size, emb_size),
-            torch.nn.ReLU(),
-        )
-
-        # VARIABLE EMBEDDING
-        self.var_embedding = torch.nn.Sequential(
-            torch.nn.LayerNorm(var_nfeats),
-            torch.nn.Linear(var_nfeats, emb_size),
-            torch.nn.ReLU(),
-            torch.nn.Linear(emb_size, emb_size),
-            torch.nn.ReLU(),
-        )
+        if self.gnn_backbone == "ppgn":
+            self.con_var_embedding = torch.nn.Sequential(
+                torch.nn.LayerNorm(cons_nfeats + var_nfeats + 1),
+                MLP([cons_nfeats + var_nfeats + 1, emb_size, emb_size], act="relu", norm=None, plain_last=False))
+            self.cons_embedding = None
+            self.var_var_embedding = torch.nn.Sequential(
+                torch.nn.LayerNorm(var_nfeats + var_nfeats + 1),
+                MLP([var_nfeats + var_nfeats + 1, emb_size, emb_size], act="relu", norm=None, plain_last=False))
+            self.var_embedding = None
+        else:
+            self.con_var_embedding = None
+            self.cons_embedding = torch.nn.Sequential(
+                torch.nn.LayerNorm(cons_nfeats),
+                MLP([cons_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
+            self.var_var_embedding = None
+            self.var_embedding = torch.nn.Sequential(
+                torch.nn.LayerNorm(var_nfeats),
+                MLP([var_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
 
         # DATA ENCODER
         if self.gnn_backbone == "bipartite":
@@ -564,7 +532,6 @@ class GNNPolicy(nn.Module):
                 hidden_channels=emb_size,
                 edge_nfeats=edge_nfeats,
                 n_layers=n_layers,
-                sage_mlp_layers=sage_mlp_layers,
                 ppgn_mlp_layers=ppgn_mlp_layers,
                 ppgn_layernorm=ppgn_layernorm,
             )
@@ -575,11 +542,8 @@ class GNNPolicy(nn.Module):
         self.holo = holo
 
         # FINAL MLP
-        self.output_module = torch.nn.Sequential(
-            torch.nn.Linear(self.holo.emb_size if self.holo is not None else emb_size, emb_size),
-            torch.nn.ReLU(),
-            torch.nn.Linear(emb_size, output_size, bias=False),
-        )
+        self.output_module = MLP([self.holo.emb_size if self.holo is not None else emb_size, emb_size, output_size],
+                                 act="relu", norm=None, plain_last=True, bias=[True, False])
 
     def forward(
         self,
@@ -587,26 +551,36 @@ class GNNPolicy(nn.Module):
         edge_indices,
         edge_features,
         variable_features,
+        con_var_features,
+        var_var_features,
         candidates=None,
         n_constraints_per_graph=None,
         n_variables_per_graph=None,
     ):
         # 1. raw features to embeddings in common dimension
         with _perf_timer("GNNPolicy step 1: embed raw features"):
-            Y = self.cons_embedding(constraint_features)
-            X = self.var_embedding(variable_features)
+            if self.gnn_backbone == "ppgn":
+                Y = self.con_var_embedding(con_var_features)
+                X = self.var_var_embedding(var_var_features)
+            else:
+                Y = self.cons_embedding(constraint_features)
+                X = self.var_embedding(variable_features)
 
         # 2. constraint-variable message passing
         with _perf_timer("GNNPolicy step 2: constraint-variable message passing"):
-            Y, X = self.data_encoder(
-                Y,
-                edge_indices,
-                edge_features,
-                X,
-                n_variables_per_graph=n_variables_per_graph,
-            )
+            if self.gnn_backbone == "ppgn":
+                Y, X = self.data_encoder(Y, 
+                                         X, 
+                                         n_constraints_per_graph, 
+                                         n_variables_per_graph)
+            else:
+                Y, X = self.data_encoder(Y,
+                                         edge_indices,
+                                         edge_features,
+                                         X,
+                                         n_variables_per_graph=n_variables_per_graph)
 
-        # 3. break symmetry
+        # 3. break symmetry NOTE NOT MODIFIED FOR PPGN YET
         if self.holo is not None:
             with _perf_timer("GNNPolicy step 3: symmetry breaking / SetCoverHolo"):
                 X = self.holo(
