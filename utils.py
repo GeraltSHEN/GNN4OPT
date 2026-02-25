@@ -436,7 +436,7 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
                 dataset,
                 batch_size=cfg["batch_size"],
                 shuffle=cfg["shuffle"],
-                num_workers=0,
+                num_workers=8,
                 pin_memory=True,
                 collate_fn=PairwiseCollater(dataset),
             )
