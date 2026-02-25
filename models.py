@@ -10,7 +10,7 @@ from torch_geometric.nn import MLP, MessagePassing
 
 # from extensions import repeat_interleave, vrange
 
-PERFORMANCE_DEBUG = False  # Toggle to print timing and memory information
+PERFORMANCE_DEBUG = True  # Toggle to print timing and memory information
 
 
 @contextmanager

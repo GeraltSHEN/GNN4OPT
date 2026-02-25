@@ -44,6 +44,8 @@ def evaluate(policy, data_loader, device, stats_filename):
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
+                batch.con_var_features,
+                batch.var_var_features,
                 candidates=batch.candidates,
                 n_constraints_per_graph=batch.n_constraints_per_graph,
                 n_variables_per_graph=batch.n_variables_per_graph,

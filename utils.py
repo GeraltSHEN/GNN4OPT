@@ -298,8 +298,8 @@ class PairwiseCollater:
 
 def _collate_pairwise_features(graphs: Sequence[Data]) -> tuple[torch.Tensor, torch.Tensor]:
     batch_size = len(graphs)
-    max_constraints = max(g.n_constraints_per_graph.item() for g in graphs)
-    max_variables = max(g.n_variables_per_graph.item() for g in graphs)
+    max_constraints = max(g.n_constraints_per_graph for g in graphs)
+    max_variables = max(g.n_variables_per_graph for g in graphs)
 
     con_var_dim = graphs[0].con_var_features.size(-1)
     var_var_dim = graphs[0].var_var_features.size(-1)
@@ -312,8 +312,8 @@ def _collate_pairwise_features(graphs: Sequence[Data]) -> tuple[torch.Tensor, to
     )
 
     for graph_idx, graph in enumerate(graphs):
-        n_constraints = graph.n_constraints_per_graph.item()
-        n_variables = graph.n_variables_per_graph.item()
+        n_constraints = graph.n_constraints_per_graph
+        n_variables = graph.n_variables_per_graph
         con_var_features[graph_idx, :n_constraints, :n_variables, :] = graph.con_var_features
         var_var_features[graph_idx, :n_variables, :n_variables, :] = graph.var_var_features
 
@@ -436,7 +436,7 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
                 dataset,
                 batch_size=cfg["batch_size"],
                 shuffle=cfg["shuffle"],
-                num_workers=8,
+                num_workers=0,
                 pin_memory=True,
                 collate_fn=PairwiseCollater(dataset),
             )
