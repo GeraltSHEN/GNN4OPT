@@ -8,7 +8,8 @@ from typing import Dict, Sequence, Union
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader as TorchDataLoader
+from torch.utils.data import DataLoader
+from torch_geometric.loader.dataloader import Collater
 from torch_geometric.data import Data, Dataset
 from torch_geometric.data import Batch
 
@@ -256,8 +257,8 @@ class GraphDataset(Dataset):
         m, f_m = constraint_features.shape
         n, f_n = variable_features.shape
 
-        if edge_features.numel() > 1:
-            raise ValueError(f"edge_features.numel() = {edge_features.numel()}")
+        if edge_features.dim() > 1:
+            edge_features = edge_features.squeeze()
 
         adjacency = torch.sparse_coo_tensor(edge_indices, edge_features, size=(m, n), device=device, dtype=dtype).to_dense().unsqueeze(-1)
 
@@ -280,6 +281,19 @@ class GraphDataset(Dataset):
             dim=-1,
         )
         return con_var_features, var_var_features
+
+
+class PairwiseCollater:
+    def __init__(self, dataset, follow_batch=None, exclude_keys=None):
+        self.base = Collater(dataset, follow_batch, exclude_keys)
+
+    def __call__(self, data_list):
+        batch = self.base(data_list)
+        if all(hasattr(g, "con_var_features") and hasattr(g, "var_var_features") for g in data_list):
+            con_var, var_var = _collate_pairwise_features(data_list)
+            batch.con_var_features = con_var
+            batch.var_var_features = var_var
+        return batch
 
 
 def _collate_pairwise_features(graphs: Sequence[Data]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -418,13 +432,13 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
                 two_fwl=two_fwl, 
                 args=args,
             )
-            data[split_name] = TorchDataLoader(
+            data[split_name] = DataLoader(
                 dataset,
                 batch_size=cfg["batch_size"],
                 shuffle=cfg["shuffle"],
                 num_workers=8,
                 pin_memory=True,
-                collate_fn=collate_bipartite_batch,
+                collate_fn=PairwiseCollater(dataset),
             )
         else:
             data[split_name] = None
