@@ -14,7 +14,7 @@ module load anaconda
 conda activate opt-ml-env
 
 DATASETS=("set_cover")
-CFG_IDS=(41)
+CFG_IDS=(51)
 
 for DATASET in "${DATASETS[@]}"; do
   echo "** ${DATASET} dataset **"

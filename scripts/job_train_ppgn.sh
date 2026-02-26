@@ -6,7 +6,7 @@
 #SBATCH --partition=a100-80gb
 #SBATCH --mem=50G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=3:30:00
+#SBATCH --time=5-3:30:00
 #SBATCH --job-name train_ppgn
 #SBATCH --output=joboutput/job_train_ppgn.out
 
@@ -21,7 +21,7 @@ for DATASET in "${DATASETS[@]}"; do
   for CFG in "${CFG_IDS[@]}"; do
     echo "Training ${DATASET} cfg ${CFG}"
     python train.py --dataset "${DATASET}" --cfg_idx "${CFG}"
-    echo "Evaluating ${DATASET} cfg ${CFG}"
-    python eval.py --dataset "${DATASET}" --cfg_idx "${CFG}" --eval_split test
+    # echo "Evaluating ${DATASET} cfg ${CFG}"
+    # python eval.py --dataset "${DATASET}" --cfg_idx "${CFG}" --eval_split test
   done
 done

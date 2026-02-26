@@ -33,7 +33,7 @@ BASE_DEFAULTS = {
     "breaking_selector_model_path": None,
     "edge_nfeats": 1,
     "use_default_features": False,
-    "remove_bad_candidates": False,
+    "remove_bad_candidates": True,
     "file_pattern": "sample_*.pkl",
     "subsamples": None,
     # training options

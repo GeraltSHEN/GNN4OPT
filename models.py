@@ -10,7 +10,7 @@ from torch_geometric.nn import MLP, MessagePassing
 
 # from extensions import repeat_interleave, vrange
 
-PERFORMANCE_DEBUG = True  # Toggle to print timing and memory information
+PERFORMANCE_DEBUG = False  # Toggle to print timing and memory information
 
 
 @contextmanager
@@ -350,14 +350,13 @@ class SecondOrderPPGNBlock(nn.Module):
         mult = self.ln_cv(mult)
         return self.skip_cv(con_var_features + mult)
     
-    def vv_forward(self, var_var_features, var_var_mask):
-        x1 = self.mlp1_vv(var_var_features)
-        x2 = self.mlp2_vv(var_var_features)
-        if var_var_mask is not None:
-            mask = var_var_mask.unsqueeze(-1)
-            x1 = x1.masked_fill(~mask, 0.0)
-            x2 = x2.masked_fill(~mask, 0.0)
-        mult = torch.einsum("bmnf,bnlf->bmlf", x1, x2)
+    def vv_forward(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
+        x1 = self.mlp1_vv(con_var_features)
+        x2 = self.mlp2_vv(con_var_features)
+        if con_var_mask is not None:
+            x1 = x1.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+            x2 = x2.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+        mult = torch.einsum("bmnf,bmlf->bnlf", x1, x2)
         mult = self.ln_vv(mult)
         return self.skip_vv(var_var_features + mult)
 
@@ -365,15 +364,11 @@ class SecondOrderPPGNBlock(nn.Module):
         con_var_features = self.cv_forward(
             con_var_features, var_var_features, con_var_mask, var_var_mask
         )
-        var_var_features = self.vv_forward(var_var_features, var_var_mask)
-
-        if con_var_mask is not None:
-            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
-        if var_var_mask is not None:
-            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
-
+        var_var_features = self.vv_forward(
+            con_var_features, var_var_features, con_var_mask, var_var_mask
+        )
         return con_var_features, var_var_features
-    
+
 
 class StackedPPGNBipartiteGNN(nn.Module):
     """Stack of SecondOrderPPGNBlock"""
@@ -431,11 +426,6 @@ class StackedPPGNBipartiteGNN(nn.Module):
         apply MLP([con_var_features.sum(dim=1), var_var_features.sum(dim=1)]) to get 
         variable_features in shape of (B, N_max, F), then unpad to (N_1 + ... + N_bsz, F)
         """
-        if con_var_mask is not None:
-            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
-        if var_var_mask is not None:
-            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
-
         con_var_summary = con_var_features.sum(dim=1)
         var_var_summary = var_var_features.sum(dim=1)
         variable_features = self.readout_mlp(torch.cat([con_var_summary, var_var_summary], dim=-1)) # (B, N_max, 2F)
@@ -453,12 +443,6 @@ class StackedPPGNBipartiteGNN(nn.Module):
             n_constraints_per_graph,
             n_variables_per_graph,
         )
-
-        if con_var_mask is not None:
-            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
-        if var_var_mask is not None:
-            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
-
         for layer in self.ppgn_layers:
             con_var_features, var_var_features = layer(
                 con_var_features, var_var_features, con_var_mask, var_var_mask
