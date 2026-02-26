@@ -177,9 +177,8 @@ class GraphDataset(Dataset):
         if self.two_fwl:
             con_var_features, var_var_features = self.init_pairwise_features(constraint_features, 
                                                                              edge_indices, edge_features, variable_features)
-        else: 
-            con_var_features, var_var_features = None
-
+        else:
+            con_var_features, var_var_features = None, None
         graph = BipartiteNodeData(
             constraint_features,
             edge_indices,
