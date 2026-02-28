@@ -331,12 +331,12 @@ class SecondOrderPPGNBlock(nn.Module):
         super().__init__()
         self.mlp1_cv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
         self.mlp2_cv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
-        self.skip_cv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.skip_cv = MLP([2*emb_size] + [emb_size] * (mlp_layers), act="relu", norm=None, plain_last=False)
         self.ln_cv = nn.LayerNorm(emb_size) if layernorm else nn.Identity()
 
         self.mlp1_vv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
         self.mlp2_vv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
-        self.skip_vv = MLP([emb_size] * (mlp_layers + 1), act="relu", norm=None, plain_last=False)
+        self.skip_vv = MLP([2*emb_size] + [emb_size] * (mlp_layers), act="relu", norm=None, plain_last=False)
         self.ln_vv = nn.LayerNorm(emb_size) if layernorm else nn.Identity()
     
     def cv_forward(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
@@ -348,7 +348,7 @@ class SecondOrderPPGNBlock(nn.Module):
             x2 = x2.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
         mult = torch.einsum("bmnf,bnlf->bmlf", x1, x2)
         mult = self.ln_cv(mult)
-        return self.skip_cv(con_var_features + mult)
+        return self.skip_cv(torch.cat([con_var_features, mult], dim=-1))
     
     def vv_forward(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
         x1 = self.mlp1_vv(con_var_features)
@@ -358,16 +358,17 @@ class SecondOrderPPGNBlock(nn.Module):
             x2 = x2.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
         mult = torch.einsum("bmnf,bmlf->bnlf", x1, x2)
         mult = self.ln_vv(mult)
-        return self.skip_vv(var_var_features + mult)
+        return self.skip_vv(torch.cat([var_var_features, mult], dim=-1))
+
 
     def forward(self, con_var_features, var_var_features, con_var_mask, var_var_mask):
-        con_var_features = self.cv_forward(
+        new_con_var_features = self.cv_forward(
             con_var_features, var_var_features, con_var_mask, var_var_mask
         )
-        var_var_features = self.vv_forward(
+        new_var_var_features = self.vv_forward(
             con_var_features, var_var_features, con_var_mask, var_var_mask
         )
-        return con_var_features, var_var_features
+        return new_con_var_features, new_var_var_features
 
 
 class StackedPPGNBipartiteGNN(nn.Module):

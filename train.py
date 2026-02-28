@@ -200,9 +200,6 @@ def train(
                 padded_relevance = pad_tensor(batch.candidate_relevance, batch.nb_candidates, pad_value=0)
                 loss = loss_fn(logits, padded_relevance, batch.nb_candidates)
                 nan_mask = torch.isnan(loss)
-                print(f"debug: logits: {logits.detach().cpu()}")
-                print(f"debug: padded_relevance: {padded_relevance.detach().cpu()}")
-                raise ValueError("stop here")
                 if nan_mask.any():
                     nan_indices = nan_mask.nonzero(as_tuple=False).flatten()
                     print(f"NaN ranking loss at indices {nan_indices.tolist()}")
