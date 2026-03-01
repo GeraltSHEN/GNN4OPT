@@ -25,11 +25,11 @@ remove_bad_candidates: true
 file_pattern: sample_*.pkl
 subsamples: null
 seed: 42
-epochs: 2
+epochs: 1
 lr: 0.0001
 batch_size: 2
 weight_decay: 0.0005
-loss_option: LambdaNDCGLoss1
+loss_option: classification
 tier1_ub: 0.0
 relevance_type: true_score
 resume: false
