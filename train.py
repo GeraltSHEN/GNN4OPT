@@ -188,6 +188,9 @@ def train(
                 # Index the results by the candidates, and split and pad them
                 logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
                 loss = F.cross_entropy(logits, batch.candidate_choices)
+                nan_mask = torch.isnan(loss)
+                if nan_mask.any():
+                    raise ValueError("stop here")
             elif loss_option == "regression":
                 # Index the results by the candidates, and split and pad them
                 logits = pad_tensor(logits[batch.candidates], batch.nb_candidates)
