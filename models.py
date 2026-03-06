@@ -365,9 +365,13 @@ class SecondOrderPPGNBlock(nn.Module):
         new_con_var_features = self.cv_forward(
             con_var_features, var_var_features, con_var_mask, var_var_mask
         )
+        if con_var_mask is not None:
+            new_con_var_features = new_con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
         new_var_var_features = self.vv_forward(
             con_var_features, var_var_features, con_var_mask, var_var_mask
         )
+        if var_var_mask is not None:
+            new_var_var_features = new_var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
         return new_con_var_features, new_var_var_features
 
 
@@ -427,6 +431,11 @@ class StackedPPGNBipartiteGNN(nn.Module):
         apply MLP([con_var_features.sum(dim=1), var_var_features.sum(dim=1)]) to get 
         variable_features in shape of (B, N_max, F), then unpad to (N_1 + ... + N_bsz, F)
         """
+        if con_var_mask is not None:
+            con_var_features = con_var_features.masked_fill(~con_var_mask.unsqueeze(-1), 0.0)
+        if var_var_mask is not None:
+            var_var_features = var_var_features.masked_fill(~var_var_mask.unsqueeze(-1), 0.0)
+
         con_var_summary = con_var_features.sum(dim=1)
         var_var_summary = var_var_features.sum(dim=1)
         variable_features = self.readout_mlp(torch.cat([con_var_summary, var_var_summary], dim=-1)) # (B, N_max, 2F)

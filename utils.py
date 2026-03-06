@@ -263,8 +263,8 @@ class GraphDataset(Dataset):
 
         con_var_features = torch.cat(
             [
-                constraint_features.unsqueeze(1).expand(m, n, f_m) + adjacency,
-                variable_features.unsqueeze(0).expand(m, n, f_n) + adjacency,
+                constraint_features.unsqueeze(1).expand(m, n, f_m),
+                variable_features.unsqueeze(0).expand(m, n, f_n),
                 adjacency,
             ],
             dim=-1,
@@ -273,8 +273,8 @@ class GraphDataset(Dataset):
         identity = torch.eye(n, dtype=dtype, device=device).unsqueeze(-1)
         var_var_features = torch.cat(
             [
-                variable_features.unsqueeze(1).expand(n, n, f_n) + identity,
-                variable_features.unsqueeze(0).expand(n, n, f_n) + identity,
+                variable_features.unsqueeze(1).expand(n, n, f_n),
+                variable_features.unsqueeze(0).expand(n, n, f_n),
                 identity,
             ],
             dim=-1,
