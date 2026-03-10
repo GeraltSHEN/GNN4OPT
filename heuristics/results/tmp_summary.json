@@ -1,0 +1,22 @@
+{
+  "run_status": "ok",
+  "error": null,
+  "config": "cfg/set_cover_50",
+  "split": "valid",
+  "samples_requested": 1,
+  "samples_evaluated": 1,
+  "failures": 0,
+  "k_anchors": 2,
+  "top1_match": {
+    "count": 0,
+    "denom": 1,
+    "ratio": 0.0
+  },
+  "avg_truth_score_gap": 5.877285718917847,
+  "avg_num_candidates": 85.0,
+  "anchor_contains_best": {
+    "count": 0,
+    "denom": 1,
+    "ratio": 0.0
+  }
+}
