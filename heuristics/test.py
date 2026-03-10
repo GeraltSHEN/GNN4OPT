@@ -6,9 +6,11 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 
 import numpy as np
+import torch
 import yaml
 
 try:
@@ -115,6 +117,11 @@ def parse_args(argv=None):
         default="heuristics/results/anchor_sb_summary.json",
         help="Path to save JSON summary.",
     )
+    parser.add_argument(
+        "--use_trained_model",
+        action="store_true",
+        help="Use trained model logits to pick top-k anchor candidates (otherwise random).",
+    )
     return parser.parse_args(argv)
 
 
@@ -130,6 +137,7 @@ def _build_summary(
     total_gap: float,
     total_candidates: int,
     anchor_contains_best: int,
+    anchor_mode: str,
     run_status: str = "ok",
     error: str | None = None,
 ) -> dict:
@@ -146,6 +154,7 @@ def _build_summary(
         "samples_evaluated": int(evaluated),
         "failures": int(failures),
         "k_anchors": int(k_anchors),
+        "anchor_mode": anchor_mode,
         "top1_match": {
             "count": int(matched),
             "denom": int(evaluated),
@@ -166,6 +175,134 @@ def _save_summary_json(path: Path, summary: dict) -> None:
     path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
+def _parse_dataset_and_cfg_idx(cfg_path: Path) -> tuple[str, int]:
+    match = re.match(r"^(.*)_(\d+)$", cfg_path.name)
+    if match is None:
+        raise ValueError(
+            f"Cannot infer dataset/cfg_idx from config filename '{cfg_path.name}'. "
+            "Expected pattern like 'set_cover_51'."
+        )
+    dataset = match.group(1)
+    cfg_idx = int(match.group(2))
+    return dataset, cfg_idx
+
+
+def _infer_feature_dimensions_from_sample(GraphDataset, cfg_for_dataset: dict, sample_path: Path):
+    dataset_args = argparse.Namespace(**cfg_for_dataset)
+    dataset = GraphDataset(
+        [sample_path],
+        edge_nfeats=int(cfg_for_dataset.get("edge_nfeats", 1)),
+        two_fwl=bool(cfg_for_dataset.get("two_fwl", False)),
+        args=dataset_args,
+    )
+    sample = dataset.get(0)
+    cons_nfeats = sample.constraint_features.shape[-1]
+    edge_nfeats = sample.edge_attr.shape[-1]
+    var_nfeats = sample.variable_features.shape[-1]
+    return cons_nfeats, edge_nfeats, var_nfeats
+
+
+def _load_trained_model_for_cfg(
+    *,
+    project_utils,
+    GraphDataset,
+    cfg: dict,
+    cfg_path: Path,
+    splits: list[str],
+    max_samples: int | None,
+):
+    dataset_name, cfg_idx = _parse_dataset_and_cfg_idx(cfg_path)
+
+    first_sample: Path | None = None
+    for split in splits:
+        files = _resolve_sample_files(cfg, split=split, max_samples=max_samples)
+        if files:
+            first_sample = files[0]
+            break
+    if first_sample is None:
+        raise RuntimeError("Could not find any sample file to infer model feature dimensions.")
+
+    cfg_for_dataset = dict(cfg)
+    # Use the feature pipeline expected by the trained model config.
+    cfg_for_dataset["two_fwl"] = bool(cfg.get("two_fwl", False))
+    cons_nfeats, edge_nfeats, var_nfeats = _infer_feature_dimensions_from_sample(
+        GraphDataset,
+        cfg_for_dataset,
+        first_sample,
+    )
+
+    model_args = argparse.Namespace(**cfg)
+    model_args.dataset = dataset_name
+    model_args.cfg_idx = cfg_idx
+    model_args.model_id = f"{dataset_name}_cfg{cfg_idx}"
+    model_args.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    policy = project_utils.load_model(model_args, cons_nfeats, edge_nfeats, var_nfeats)
+
+    base_model_dir = Path(getattr(model_args, "model_dir", "./models"))
+    if getattr(model_args, "model", None):
+        base_model_dir = base_model_dir / model_args.model
+    if getattr(model_args, "model_id", None):
+        base_model_dir = base_model_dir / model_args.model_id
+    model_suffix = getattr(model_args, "model_suffix", "")
+    if model_suffix:
+        base_model_dir = Path(f"{base_model_dir}_{model_suffix}")
+    if not base_model_dir.exists():
+        raise FileNotFoundError(f"Model directory does not exist: {base_model_dir}")
+
+    step = project_utils.load_checkpoint(
+        policy,
+        None,
+        step="max",
+        save_dir=str(base_model_dir),
+        device=model_args.device,
+    )
+    if int(step) == 0:
+        raise RuntimeError(f"No checkpoint found in model directory: {base_model_dir}")
+    policy.eval()
+    return {
+        "policy": policy,
+        "device": model_args.device,
+        "model_dir": str(base_model_dir),
+        "model_step": int(step),
+        "two_fwl": bool(cfg.get("two_fwl", False)),
+    }
+
+
+def _select_anchor_positions_with_model(graph, model_bundle, k: int) -> np.ndarray:
+    policy = model_bundle["policy"]
+    device = model_bundle["device"]
+
+    graph = graph.to(device)
+    n_constraints = torch.as_tensor([int(graph.n_constraints_per_graph)], device=device)
+    n_variables = torch.as_tensor([int(graph.n_variables_per_graph)], device=device)
+    con_var_features = graph.con_var_features if hasattr(graph, "con_var_features") else None
+    var_var_features = graph.var_var_features if hasattr(graph, "var_var_features") else None
+    if con_var_features is not None and con_var_features.dim() == 3:
+        con_var_features = con_var_features.unsqueeze(0)
+    if var_var_features is not None and var_var_features.dim() == 3:
+        var_var_features = var_var_features.unsqueeze(0)
+
+    with torch.no_grad():
+        logits = policy(
+            graph.constraint_features,
+            graph.edge_index,
+            graph.edge_attr,
+            graph.variable_features,
+            con_var_features,
+            var_var_features,
+            candidates=graph.candidates,
+            n_constraints_per_graph=n_constraints,
+            n_variables_per_graph=n_variables,
+        )
+        candidate_logits = logits[graph.candidates]
+        k_eff = min(int(k), int(candidate_logits.numel()))
+        if k_eff < 1:
+            raise ValueError("No candidates available for model-based anchor selection.")
+        top_pos = torch.topk(candidate_logits, k=k_eff).indices.detach().cpu().numpy().astype(np.int64)
+    return np.sort(top_pos)
+
+
 def _print_summary_block(summary: dict) -> None:
     evaluated = int(summary["samples_evaluated"])
     matched = int(summary["top1_match"]["count"])
@@ -178,6 +315,7 @@ def _print_summary_block(summary: dict) -> None:
     print(f"samples_evaluated: {summary['samples_evaluated']}")
     print(f"failures: {summary['failures']}")
     print(f"k_anchors: {summary['k_anchors']}")
+    print(f"anchor_mode: {summary['anchor_mode']}")
     print(f"top1_match: {matched} / {evaluated} = {summary['top1_match']['ratio']:.6f}")
     if summary["avg_truth_score_gap"] is not None:
         print(f"avg_truth_score_gap: {summary['avg_truth_score_gap']:.6f}")
@@ -204,7 +342,9 @@ def _evaluate_split(
     args,
     GraphDataset,
     rng_seed: int,
+    trained_model_bundle=None,
 ) -> tuple[dict, Exception | None]:
+    anchor_mode = "trained_model" if trained_model_bundle is not None else "random"
     sample_files = _resolve_sample_files(cfg, split=split, max_samples=args.max_samples)
     if not sample_files:
         summary = _build_summary(
@@ -218,20 +358,23 @@ def _evaluate_split(
             total_gap=0.0,
             total_candidates=0,
             anchor_contains_best=0,
+            anchor_mode=anchor_mode,
             run_status="error",
             error="RuntimeError: No sample files found for the requested split.",
         )
         return summary, RuntimeError("No sample files found for the requested split.")
 
-    # No pairwise features are needed for this heuristic evaluation.
     cfg_for_dataset = dict(cfg)
-    cfg_for_dataset["two_fwl"] = False
+    if trained_model_bundle is None:
+        cfg_for_dataset["two_fwl"] = False
+    else:
+        cfg_for_dataset["two_fwl"] = bool(trained_model_bundle.get("two_fwl", False))
     dataset_args = argparse.Namespace(**cfg_for_dataset)
 
     dataset = GraphDataset(
         sample_files,
         edge_nfeats=int(cfg_for_dataset.get("edge_nfeats", 1)),
-        two_fwl=False,
+        two_fwl=bool(cfg_for_dataset.get("two_fwl", False)),
         args=dataset_args,
     )
     # This evaluator is intentionally sequential (effective batch size = 1).
@@ -253,11 +396,19 @@ def _evaluate_split(
             graph = dataset.get(i)
 
             try:
+                anchor_positions = None
+                if trained_model_bundle is not None:
+                    anchor_positions = _select_anchor_positions_with_model(
+                        graph,
+                        trained_model_bundle,
+                        k=args.k,
+                    )
                 result = run_anchor_strong_branching(
                     graph,
                     k=args.k,
                     rng=rng,
                     use_default_features=use_default_features,
+                    anchor_positions=anchor_positions,
                 )
             except Exception as exc:
                 failures += 1
@@ -308,6 +459,7 @@ def _evaluate_split(
             total_gap=total_gap,
             total_candidates=total_candidates,
             anchor_contains_best=anchor_contains_best,
+            anchor_mode=anchor_mode,
             run_status="ok",
         )
         return summary, None
@@ -323,6 +475,7 @@ def _evaluate_split(
             total_gap=total_gap,
             total_candidates=total_candidates,
             anchor_contains_best=anchor_contains_best,
+            anchor_mode=anchor_mode,
             run_status="error",
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -344,6 +497,20 @@ def main(argv=None):
     GraphDataset = project_utils.GraphDataset
     results_path = Path(args.results_json)
     splits = ["train", "valid", "test"] if args.split == "all" else [args.split]
+    trained_model_bundle = None
+    if args.use_trained_model:
+        trained_model_bundle = _load_trained_model_for_cfg(
+            project_utils=project_utils,
+            GraphDataset=GraphDataset,
+            cfg=cfg,
+            cfg_path=cfg_path,
+            splits=splits,
+            max_samples=args.max_samples,
+        )
+        print(
+            f"Loaded trained model from {trained_model_bundle['model_dir']} "
+            f"(step {trained_model_bundle['model_step']})."
+        )
 
     per_split: dict[str, dict] = {}
     first_error: Exception | None = None
@@ -356,6 +523,7 @@ def main(argv=None):
             args=args,
             GraphDataset=GraphDataset,
             rng_seed=int(args.seed) + split_idx,
+            trained_model_bundle=trained_model_bundle,
         )
         per_split[split] = summary
         _print_summary_block(summary)
@@ -370,12 +538,19 @@ def main(argv=None):
             "config": str(cfg_path),
             "split": "all",
             "k_anchors": int(args.k),
+            "anchor_mode": "trained_model" if args.use_trained_model else "random",
             "splits": per_split,
         }
+        if trained_model_bundle is not None:
+            output["model_dir"] = trained_model_bundle["model_dir"]
+            output["model_step"] = trained_model_bundle["model_step"]
         if first_error is not None:
             output["error"] = f"{type(first_error).__name__}: {first_error}"
     else:
         output = per_split[splits[0]]
+        if trained_model_bundle is not None:
+            output["model_dir"] = trained_model_bundle["model_dir"]
+            output["model_step"] = trained_model_bundle["model_step"]
 
     _save_summary_json(results_path, output)
     if first_error is not None:

@@ -17,8 +17,9 @@ module load anaconda
 conda activate opt-ml-env
 python heuristics/test.py \
   --config cfg/set_cover_41111 \
+  --use_trained_model \
   --split all \
-  --max_samples 500 \
+  --max_samples 10 \
   --k 8 \
-  --verbose_every 10 \
+  --verbose_every 2 \
   --results_json heuristics/results/set_cover_41111_all.json

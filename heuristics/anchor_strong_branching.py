@@ -107,6 +107,7 @@ def run_anchor_strong_branching(
     k: int = 8,
     rng: Optional[np.random.Generator] = None,
     use_default_features: bool = False,
+    anchor_positions: Optional[np.ndarray] = None,
 ) -> AnchorSBResult:
     """Run anchor strong branching on one sample graph."""
 
@@ -119,11 +120,18 @@ def run_anchor_strong_branching(
     if n_candidates == 0:
         raise ValueError("No branching candidates available.")
 
-    if rng is None:
-        rng = np.random.default_rng()
-
-    k_eff = min(int(k), n_candidates)
-    anchor_pos = np.sort(rng.choice(n_candidates, size=k_eff, replace=False))
+    if anchor_positions is None:
+        if rng is None:
+            rng = np.random.default_rng()
+        k_eff = min(int(k), n_candidates)
+        anchor_pos = np.sort(rng.choice(n_candidates, size=k_eff, replace=False))
+    else:
+        anchor_pos = np.array(anchor_positions, dtype=np.int64).reshape(-1)
+        if anchor_pos.size == 0:
+            raise ValueError("`anchor_positions` cannot be empty.")
+        if np.any(anchor_pos < 0) or np.any(anchor_pos >= n_candidates):
+            raise ValueError("`anchor_positions` contains out-of-range candidate positions.")
+        anchor_pos = np.unique(anchor_pos)
     anchor_globals = candidate_globals[anchor_pos]
 
     parent_dual = solve_dual(problem)
