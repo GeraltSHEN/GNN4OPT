@@ -1,5 +1,5 @@
 #!/bin/sh -l
-# FILENAME:  job_test_heuristic
+# FILENAME:  job_test_heuristic_random
 
 #SBATCH -A canli
 #SBATCH --nodes=1 --gpus-per-node=1
@@ -7,8 +7,8 @@
 #SBATCH --mem=50G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=3-1:30:00
-#SBATCH --job-name test_heuristic
-#SBATCH --output=joboutput/job_test_heuristic.out
+#SBATCH --job-name h_random
+#SBATCH --output=joboutput/job_test_heuristic_max_random.out
 
 module load anaconda
 conda activate opt-ml-env
@@ -16,10 +16,9 @@ conda activate opt-ml-env
 module load anaconda
 conda activate opt-ml-env
 python heuristics/test.py \
-  --config cfg/set_cover_54 \
-  --use_trained_model \
-  --max_samples 10 \
+  --config cfg/set_cover_41 \
   --split test \
+  --max_samples 1000 \
   --k 8 \
-  --verbose_every 2 \
-  --results_json heuristics/results/set_cover_41_test_max_5000.json
+  --verbose_every 10 \
+  --results_json heuristics/results/set_cover_41_test_max_random.json
