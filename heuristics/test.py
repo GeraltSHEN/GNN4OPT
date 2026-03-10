@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import re
@@ -189,17 +190,42 @@ def _parse_dataset_and_cfg_idx(cfg_path: Path) -> tuple[str, int]:
 
 def _infer_feature_dimensions_from_sample(GraphDataset, cfg_for_dataset: dict, sample_path: Path):
     dataset_args = argparse.Namespace(**cfg_for_dataset)
-    dataset = GraphDataset(
-        [sample_path],
+    dataset = _build_graph_dataset(
+        GraphDataset=GraphDataset,
+        sample_files=[sample_path],
         edge_nfeats=int(cfg_for_dataset.get("edge_nfeats", 1)),
+        dataset_args=dataset_args,
         two_fwl=bool(cfg_for_dataset.get("two_fwl", False)),
-        args=dataset_args,
     )
     sample = dataset.get(0)
     cons_nfeats = sample.constraint_features.shape[-1]
     edge_nfeats = sample.edge_attr.shape[-1]
     var_nfeats = sample.variable_features.shape[-1]
     return cons_nfeats, edge_nfeats, var_nfeats
+
+
+def _build_graph_dataset(
+    *,
+    GraphDataset,
+    sample_files: list[Path],
+    edge_nfeats: int,
+    dataset_args,
+    two_fwl: bool,
+):
+    """Instantiate GraphDataset across branch variants.
+
+    Some branches expose GraphDataset(..., two_fwl=..., args=...),
+    others only GraphDataset(..., args=...).
+    """
+    init_params = inspect.signature(GraphDataset.__init__).parameters
+    kwargs = {
+        "sample_files": sample_files,
+        "edge_nfeats": edge_nfeats,
+        "args": dataset_args,
+    }
+    if "two_fwl" in init_params:
+        kwargs["two_fwl"] = bool(two_fwl)
+    return GraphDataset(**kwargs)
 
 
 def _load_trained_model_for_cfg(
@@ -284,17 +310,36 @@ def _select_anchor_positions_with_model(graph, model_bundle, k: int) -> np.ndarr
         var_var_features = var_var_features.unsqueeze(0)
 
     with torch.no_grad():
-        logits = policy(
-            graph.constraint_features,
-            graph.edge_index,
-            graph.edge_attr,
-            graph.variable_features,
-            con_var_features,
-            var_var_features,
-            candidates=graph.candidates,
-            n_constraints_per_graph=n_constraints,
-            n_variables_per_graph=n_variables,
-        )
+        forward_params = inspect.signature(policy.forward).parameters
+        model_kwargs = {}
+
+        # Core tensors
+        if "constraint_features" in forward_params:
+            model_kwargs["constraint_features"] = graph.constraint_features
+        if "edge_indices" in forward_params:
+            model_kwargs["edge_indices"] = graph.edge_index
+        elif "edge_index" in forward_params:
+            model_kwargs["edge_index"] = graph.edge_index
+        if "edge_features" in forward_params:
+            model_kwargs["edge_features"] = graph.edge_attr
+        elif "edge_attr" in forward_params:
+            model_kwargs["edge_attr"] = graph.edge_attr
+        if "variable_features" in forward_params:
+            model_kwargs["variable_features"] = graph.variable_features
+
+        # Optional branch-specific tensors
+        if "con_var_features" in forward_params:
+            model_kwargs["con_var_features"] = con_var_features
+        if "var_var_features" in forward_params:
+            model_kwargs["var_var_features"] = var_var_features
+        if "candidates" in forward_params:
+            model_kwargs["candidates"] = graph.candidates
+        if "n_constraints_per_graph" in forward_params:
+            model_kwargs["n_constraints_per_graph"] = n_constraints
+        if "n_variables_per_graph" in forward_params:
+            model_kwargs["n_variables_per_graph"] = n_variables
+
+        logits = policy(**model_kwargs)
         candidate_logits = logits[graph.candidates]
         k_eff = min(int(k), int(candidate_logits.numel()))
         if k_eff < 1:
@@ -371,11 +416,12 @@ def _evaluate_split(
         cfg_for_dataset["two_fwl"] = bool(trained_model_bundle.get("two_fwl", False))
     dataset_args = argparse.Namespace(**cfg_for_dataset)
 
-    dataset = GraphDataset(
-        sample_files,
+    dataset = _build_graph_dataset(
+        GraphDataset=GraphDataset,
+        sample_files=sample_files,
         edge_nfeats=int(cfg_for_dataset.get("edge_nfeats", 1)),
+        dataset_args=dataset_args,
         two_fwl=bool(cfg_for_dataset.get("two_fwl", False)),
-        args=dataset_args,
     )
     # This evaluator is intentionally sequential (effective batch size = 1).
 
