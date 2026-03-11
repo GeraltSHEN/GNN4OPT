@@ -179,6 +179,6 @@ def compute_sbs(parent_obj: float, child_one_obj: float, child_zero_obj: float) 
     if any(np.isnan(v) for v in (parent_obj, child_one_obj, child_zero_obj)):
         return float("-inf")
 
-    gain_one = max(child_one_obj - parent_obj, 0.0)
-    gain_zero = max(child_zero_obj - parent_obj, 0.0)
+    gain_one = max(child_one_obj - parent_obj, 1e-9)
+    gain_zero = max(child_zero_obj - parent_obj, 1e-9)
     return float(gain_one * gain_zero)

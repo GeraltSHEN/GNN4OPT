@@ -34,6 +34,18 @@ class AnchorSBResult:
     parent_obj: float
 
 
+@dataclass
+class StrongSBResult:
+    selected_candidate_global: int
+    selected_candidate_pos: int
+    candidate_global_indices: np.ndarray
+    anchor_candidate_global_indices: np.ndarray
+    strong_scores: np.ndarray
+    child_zero_obj: np.ndarray
+    child_one_obj: np.ndarray
+    parent_obj: float
+
+
 def _feature_indices(use_default_features: bool) -> tuple[int, int, int]:
     # Mirrors feature construction in root utils.py / GraphDataset.get.
     if use_default_features:
@@ -41,7 +53,12 @@ def _feature_indices(use_default_features: bool) -> tuple[int, int, int]:
     return 0, 9, 10
 
 
-def prepare_problem_from_graph(graph, use_default_features: bool = False) -> PreparedSample:
+def prepare_problem_from_graph(
+    graph,
+    use_default_features: bool = False,
+    objective_scale: float = 1.0,
+    row_scale: float = 1.0,
+) -> PreparedSample:
     """Recover (b, A_F, x_F, A_U, c_U) style data from one GraphDataset sample."""
 
     bias_idx, coef_idx, sol_idx = _feature_indices(use_default_features)
@@ -64,6 +81,17 @@ def prepare_problem_from_graph(graph, use_default_features: bool = False) -> Pre
 
     c = variable_features[:, coef_idx]
     x_val = variable_features[:, sol_idx]
+
+    objective_scale = float(objective_scale)
+    if not np.isfinite(objective_scale):
+        raise ValueError("`objective_scale` must be finite.")
+    c = c * objective_scale
+
+    row_scale = float(row_scale)
+    if not np.isfinite(row_scale) or row_scale <= 0.0:
+        raise ValueError("`row_scale` must be a finite positive scalar.")
+    A = A * row_scale
+    b = b * row_scale
 
     # Last two columns are appended in GraphDataset.get:
     #   -2: is_not_fixed (from original action_set)
@@ -102,36 +130,120 @@ def prepare_problem_from_graph(graph, use_default_features: bool = False) -> Pre
     )
 
 
+def _resolve_anchor_positions(
+    n_candidates: int,
+    k: int,
+    rng: Optional[np.random.Generator],
+    anchor_positions: Optional[np.ndarray],
+) -> np.ndarray:
+    if n_candidates < 1:
+        raise ValueError("No branching candidates available.")
+    if anchor_positions is None:
+        if rng is None:
+            rng = np.random.default_rng()
+        k_eff = min(int(k), n_candidates)
+        return np.sort(rng.choice(n_candidates, size=k_eff, replace=False))
+
+    anchor_pos = np.array(anchor_positions, dtype=np.int64).reshape(-1)
+    if anchor_pos.size == 0:
+        raise ValueError("`anchor_positions` cannot be empty.")
+    if np.any(anchor_pos < 0) or np.any(anchor_pos >= n_candidates):
+        raise ValueError("`anchor_positions` contains out-of-range candidate positions.")
+    return np.unique(anchor_pos)
+
+
+def run_strong_branching(
+    graph,
+    k: int = 8,
+    rng: Optional[np.random.Generator] = None,
+    use_default_features: bool = False,
+    anchor_positions: Optional[np.ndarray] = None,
+    objective_scale: float = 1.0,
+    row_scale: float = 1.0,
+) -> StrongSBResult:
+    """Run exact strong branching only on the selected top-k candidate positions."""
+
+    prepared = prepare_problem_from_graph(
+        graph,
+        use_default_features=use_default_features,
+        objective_scale=objective_scale,
+        row_scale=row_scale,
+    )
+    problem = prepared.problem
+
+    candidate_globals = prepared.candidate_global_indices
+    candidate_locals = prepared.candidate_local_indices
+    n_candidates = int(candidate_locals.size)
+    anchor_pos = _resolve_anchor_positions(
+        n_candidates=n_candidates,
+        k=k,
+        rng=rng,
+        anchor_positions=anchor_positions,
+    )
+    anchor_globals = candidate_globals[anchor_pos]
+
+    parent_dual = solve_dual(problem)
+    if parent_dual.y is None or parent_dual.alpha is None or parent_dual.beta is None:
+        raise RuntimeError(f"Failed to solve parent dual LP: {parent_dual.message}")
+    parent_obj = float(parent_dual.objective)
+
+    child_zero_obj = np.full(n_candidates, float("-inf"), dtype=np.float64)
+    child_one_obj = np.full(n_candidates, float("-inf"), dtype=np.float64)
+    strong_scores = np.full(n_candidates, float("-inf"), dtype=np.float64)
+
+    for i in anchor_pos:
+        local_idx = int(candidate_locals[i])
+        zero_res = solve_dual(problem.branch_zero(local_idx))
+        one_res = solve_dual(problem.branch_one(local_idx))
+
+        child_zero_obj[i] = float(zero_res.objective)
+        child_one_obj[i] = float(one_res.objective)
+        strong_scores[i] = compute_sbs(parent_obj, child_one_obj[i], child_zero_obj[i])
+
+    best_anchor_idx = int(np.nanargmax(strong_scores[anchor_pos]))
+    selected_pos = int(anchor_pos[best_anchor_idx])
+    selected_global = int(candidate_globals[selected_pos])
+
+    return StrongSBResult(
+        selected_candidate_global=selected_global,
+        selected_candidate_pos=selected_pos,
+        candidate_global_indices=candidate_globals,
+        anchor_candidate_global_indices=anchor_globals,
+        strong_scores=strong_scores,
+        child_zero_obj=child_zero_obj,
+        child_one_obj=child_one_obj,
+        parent_obj=parent_obj,
+    )
+
+
 def run_anchor_strong_branching(
     graph,
     k: int = 8,
     rng: Optional[np.random.Generator] = None,
     use_default_features: bool = False,
     anchor_positions: Optional[np.ndarray] = None,
+    objective_scale: float = 1.0,
+    row_scale: float = 1.0,
 ) -> AnchorSBResult:
     """Run anchor strong branching on one sample graph."""
 
-    prepared = prepare_problem_from_graph(graph, use_default_features=use_default_features)
+    prepared = prepare_problem_from_graph(
+        graph,
+        use_default_features=use_default_features,
+        objective_scale=objective_scale,
+        row_scale=row_scale,
+    )
     problem = prepared.problem
 
     candidate_globals = prepared.candidate_global_indices
     candidate_locals = prepared.candidate_local_indices
     n_candidates = int(candidate_locals.size)
-    if n_candidates == 0:
-        raise ValueError("No branching candidates available.")
-
-    if anchor_positions is None:
-        if rng is None:
-            rng = np.random.default_rng()
-        k_eff = min(int(k), n_candidates)
-        anchor_pos = np.sort(rng.choice(n_candidates, size=k_eff, replace=False))
-    else:
-        anchor_pos = np.array(anchor_positions, dtype=np.int64).reshape(-1)
-        if anchor_pos.size == 0:
-            raise ValueError("`anchor_positions` cannot be empty.")
-        if np.any(anchor_pos < 0) or np.any(anchor_pos >= n_candidates):
-            raise ValueError("`anchor_positions` contains out-of-range candidate positions.")
-        anchor_pos = np.unique(anchor_pos)
+    anchor_pos = _resolve_anchor_positions(
+        n_candidates=n_candidates,
+        k=k,
+        rng=rng,
+        anchor_positions=anchor_positions,
+    )
     anchor_globals = candidate_globals[anchor_pos]
 
     parent_dual = solve_dual(problem)

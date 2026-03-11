@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import importlib.util
 import json
+import pickle
 from pathlib import Path
 import re
 import sys
@@ -14,9 +16,19 @@ import torch
 import yaml
 
 try:
-    from .anchor_strong_branching import run_anchor_strong_branching
+    from .anchor_strong_branching import (
+        prepare_problem_from_graph,
+        run_anchor_strong_branching,
+        run_strong_branching,
+    )
+    from .utils import solve_dual
 except Exception:  # pragma: no cover - script execution fallback
-    from anchor_strong_branching import run_anchor_strong_branching
+    from anchor_strong_branching import (
+        prepare_problem_from_graph,
+        run_anchor_strong_branching,
+        run_strong_branching,
+    )
+    from utils import solve_dual
 
 
 def _load_parent_utils_module(project_root: Path):
@@ -82,6 +94,11 @@ def _resolve_sample_files(cfg: dict, split: str, max_samples: int | None) -> lis
     return sample_files
 
 
+def _sol_val_feature_index(use_default_features: bool) -> int:
+    # Mirrors feature construction in root utils.py / GraphDataset.get.
+    return 16 if use_default_features else 10
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Evaluate anchor strong branching heuristic.")
     parser.add_argument(
@@ -122,6 +139,47 @@ def parse_args(argv=None):
         action="store_true",
         help="Use trained model logits to pick top-k anchor candidates (otherwise random).",
     )
+    parser.add_argument(
+        "--objective_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scalar applied to recovered objective coefficients before solving duals. "
+            "Use this to test sensitivity to normalized objective magnitudes."
+        ),
+    )
+    parser.add_argument(
+        "--row_scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scalar applied to recovered row coefficients and rhs (A, b) before solving duals. "
+            "Must be positive."
+        ),
+    )
+    parser.add_argument(
+        "--debug_vanilla_topk",
+        action="store_true",
+        help=(
+            "Debug mode: run exact strong branching only on top-k anchors and print mismatch cases. "
+            "After a mismatch is found, it will continue to search and print good match cases too."
+        ),
+    )
+    parser.add_argument(
+        "--debug_max_mismatches",
+        type=int,
+        default=1,
+        help="Maximum number of mismatch reports to print per split in --debug_vanilla_topk mode.",
+    )
+    parser.add_argument(
+        "--debug_max_matches",
+        type=int,
+        default=1,
+        help=(
+            "Maximum number of good-match reports to print after the first mismatch "
+            "in --debug_vanilla_topk mode."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -138,6 +196,8 @@ def _build_summary(
     total_candidates: int,
     anchor_contains_best: int,
     anchor_mode: str,
+    objective_scale: float,
+    row_scale: float,
     run_status: str = "ok",
     error: str | None = None,
 ) -> dict:
@@ -155,6 +215,8 @@ def _build_summary(
         "failures": int(failures),
         "k_anchors": int(k_anchors),
         "anchor_mode": anchor_mode,
+        "objective_scale": float(objective_scale),
+        "row_scale": float(row_scale),
         "top1_match": {
             "count": int(matched),
             "denom": int(evaluated),
@@ -316,6 +378,8 @@ def _print_summary_block(summary: dict) -> None:
     print(f"failures: {summary['failures']}")
     print(f"k_anchors: {summary['k_anchors']}")
     print(f"anchor_mode: {summary['anchor_mode']}")
+    print(f"objective_scale: {summary.get('objective_scale', 1.0)}")
+    print(f"row_scale: {summary.get('row_scale', 1.0)}")
     print(f"top1_match: {matched} / {evaluated} = {summary['top1_match']['ratio']:.6f}")
     if summary["avg_truth_score_gap"] is not None:
         print(f"avg_truth_score_gap: {summary['avg_truth_score_gap']:.6f}")
@@ -332,6 +396,310 @@ def _print_summary_block(summary: dict) -> None:
     if summary["run_status"] != "ok":
         print(f"run_status: {summary['run_status']}")
         print(f"error: {summary['error']}")
+
+
+def _read_sample_metadata(sample_path: Path) -> dict:
+    try:
+        with gzip.open(sample_path, "rb") as f:
+            raw = pickle.load(f)
+        return {
+            "node_number": raw.get("node_number"),
+            "node_depth": raw.get("node_depth"),
+        }
+    except Exception:
+        return {
+            "node_number": None,
+            "node_depth": None,
+        }
+
+
+def _debug_vanilla_topk_split(
+    *,
+    cfg: dict,
+    cfg_path: Path,
+    split: str,
+    args,
+    GraphDataset,
+    rng_seed: int,
+    trained_model_bundle=None,
+) -> tuple[dict, Exception | None]:
+    anchor_mode = "trained_model" if trained_model_bundle is not None else "random"
+    sample_files = _resolve_sample_files(cfg, split=split, max_samples=args.max_samples)
+    if not sample_files:
+        return {
+            "run_status": "error",
+            "error": "No sample files found for the requested split.",
+            "config": str(cfg_path),
+            "split": split,
+            "samples_scanned": 0,
+            "k_anchors": int(args.k),
+            "anchor_mode": anchor_mode,
+            "objective_scale": float(args.objective_scale),
+            "row_scale": float(args.row_scale),
+            "mismatch_reports": [],
+            "match_reports": [],
+            "mismatches_found": 0,
+            "matches_found": 0,
+        }, RuntimeError("No sample files found for the requested split.")
+
+    cfg_for_dataset = dict(cfg)
+    if trained_model_bundle is None:
+        cfg_for_dataset["two_fwl"] = False
+    else:
+        cfg_for_dataset["two_fwl"] = bool(trained_model_bundle.get("two_fwl", False))
+    dataset = GraphDataset(
+        sample_files,
+        edge_nfeats=int(cfg_for_dataset.get("edge_nfeats", 1)),
+        two_fwl=bool(cfg_for_dataset.get("two_fwl", False)),
+        args=argparse.Namespace(**cfg_for_dataset),
+    )
+
+    rng = np.random.default_rng(rng_seed)
+    use_default_features = bool(cfg_for_dataset.get("use_default_features", True))
+    mismatch_reports: list[dict] = []
+    match_reports: list[dict] = []
+    scanned = 0
+    found_first_mismatch = False
+    max_mismatches = max(int(args.debug_max_mismatches), 0)
+    max_matches = max(int(args.debug_max_matches), 0)
+
+    def _build_report(i: int, graph, anchor_positions: np.ndarray, result, best_pos: int, pred_pos: int) -> dict:
+        meta = _read_sample_metadata(sample_files[i])
+        candidate_globals = graph.candidates.detach().cpu().numpy().astype(np.int64)
+        variable_features = graph.variable_features.detach().cpu().numpy()
+        sol_idx = _sol_val_feature_index(use_default_features)
+        candidate_parent_x = variable_features[candidate_globals, sol_idx]
+        truth_scores = graph.candidate_scores.detach().cpu().numpy()
+
+        report = {
+            "sample_idx": i,
+            "sample_path": str(sample_files[i]),
+            "node_number": meta["node_number"],
+            "node_depth": meta["node_depth"],
+            "n_candidates": int(graph.nb_candidates),
+            "topk_positions": anchor_positions.tolist(),
+            "objective_scale": float(args.objective_scale),
+            "row_scale": float(args.row_scale),
+            "best_pos": best_pos,
+            "pred_pos": pred_pos,
+            "best_global": int(candidate_globals[best_pos]),
+            "pred_global": int(candidate_globals[pred_pos]),
+            "true_score_best": float(truth_scores[best_pos]),
+            "true_score_pred": float(truth_scores[pred_pos]),
+            "best_parent_x": float(candidate_parent_x[best_pos]),
+            "pred_parent_x": float(candidate_parent_x[pred_pos]),
+            "parent_obj": float(result.parent_obj),
+            "best_child_zero_obj": float(result.child_zero_obj[best_pos]),
+            "best_child_one_obj": float(result.child_one_obj[best_pos]),
+            "pred_child_zero_obj": float(result.child_zero_obj[pred_pos]),
+            "pred_child_one_obj": float(result.child_one_obj[pred_pos]),
+            "best_strong_score": float(result.strong_scores[best_pos]),
+            "pred_strong_score": float(result.strong_scores[pred_pos]),
+            "topk_by_strong_score": sorted(
+                [
+                    {
+                        "pos": int(pos),
+                        "global": int(candidate_globals[int(pos)]),
+                        "parent_x": float(candidate_parent_x[int(pos)]),
+                        "strong_score": float(result.strong_scores[int(pos)]),
+                        "true_score": float(truth_scores[int(pos)]),
+                    }
+                    for pos in anchor_positions.tolist()
+                ],
+                key=lambda x: x["strong_score"],
+                reverse=True,
+            ),
+        }
+
+        # Optional direct child re-solve sanity for compared candidates.
+        prepared = prepare_problem_from_graph(
+            graph,
+            use_default_features=use_default_features,
+            objective_scale=float(args.objective_scale),
+            row_scale=float(args.row_scale),
+        )
+        best_local = int(prepared.candidate_local_indices[best_pos])
+        pred_local = int(prepared.candidate_local_indices[pred_pos])
+        report["direct_resolve_best_child_zero_obj"] = float(
+            solve_dual(prepared.problem.branch_zero(best_local)).objective
+        )
+        report["direct_resolve_best_child_one_obj"] = float(
+            solve_dual(prepared.problem.branch_one(best_local)).objective
+        )
+        report["direct_resolve_pred_child_zero_obj"] = float(
+            solve_dual(prepared.problem.branch_zero(pred_local)).objective
+        )
+        report["direct_resolve_pred_child_one_obj"] = float(
+            solve_dual(prepared.problem.branch_one(pred_local)).objective
+        )
+        return report
+
+    def _print_report(report: dict, is_match: bool) -> None:
+        title = (
+            "=== VANILLA TOP-K STRONG BRANCHING MATCH ==="
+            if is_match
+            else "=== VANILLA TOP-K STRONG BRANCHING MISMATCH ==="
+        )
+        print(f"\n{title}")
+        print(
+            f"sample_idx={report['sample_idx']}, "
+            f"node_number={report['node_number']}, node_depth={report['node_depth']}"
+        )
+        print(f"n_candidates={report['n_candidates']}")
+        print(f"topk_pos={report['topk_positions']}")
+        print(
+            f"best_pos={report['best_pos']} (global={report['best_global']}), "
+            f"pred_pos={report['pred_pos']} (global={report['pred_global']})"
+        )
+        print(
+            f"true_score(best)={report['true_score_best']:.9f}, "
+            f"true_score(pred)={report['true_score_pred']:.9f}"
+        )
+        print(
+            f"parent_x(best)={report['best_parent_x']:.9f}, "
+            f"parent_x(pred)={report['pred_parent_x']:.9f}"
+        )
+        print(f"parent_obj={report['parent_obj']:.12f}")
+        print(
+            f"best child0={report['best_child_zero_obj']:.12f}, "
+            f"child1={report['best_child_one_obj']:.12f}, "
+            f"sb={report['best_strong_score']:.12e}"
+        )
+        print(
+            f"pred child0={report['pred_child_zero_obj']:.12f}, "
+            f"child1={report['pred_child_one_obj']:.12f}, "
+            f"sb={report['pred_strong_score']:.12e}"
+        )
+
+        print("\n[top-k ranking by computed strong score]")
+        for row in report["topk_by_strong_score"]:
+            mark = ""
+            if int(row["pos"]) == int(report["best_pos"]):
+                mark += " BEST"
+            if int(row["pos"]) == int(report["pred_pos"]):
+                mark += " PRED"
+            print(
+                f"pos={int(row['pos']):3d} "
+                f"global={int(row['global']):4d} "
+                f"x={float(row['parent_x']):.9f} "
+                f"sb={float(row['strong_score']):.12e} "
+                f"true={float(row['true_score']):.9f}{mark}"
+            )
+
+        print("\n[direct re-solve sanity]")
+        print(
+            f"best child0={report['direct_resolve_best_child_zero_obj']:.12f}, "
+            f"child1={report['direct_resolve_best_child_one_obj']:.12f}"
+        )
+        print(
+            f"pred child0={report['direct_resolve_pred_child_zero_obj']:.12f}, "
+            f"child1={report['direct_resolve_pred_child_one_obj']:.12f}"
+        )
+
+    try:
+        for i in range(len(dataset)):
+            scanned += 1
+            graph = dataset.get(i)
+
+            if trained_model_bundle is not None:
+                anchor_positions = _select_anchor_positions_with_model(
+                    graph,
+                    trained_model_bundle,
+                    k=args.k,
+                )
+            else:
+                n_candidates = int(graph.nb_candidates)
+                k_eff = min(int(args.k), n_candidates)
+                anchor_positions = np.sort(rng.choice(n_candidates, size=k_eff, replace=False))
+
+            result = run_strong_branching(
+                graph,
+                k=args.k,
+                rng=rng,
+                use_default_features=use_default_features,
+                anchor_positions=anchor_positions,
+                objective_scale=float(args.objective_scale),
+                row_scale=float(args.row_scale),
+            )
+
+            truth_scores = graph.candidate_scores.detach().cpu().numpy()
+            best_pos = int(np.argmax(truth_scores))
+            pred_pos = int(result.selected_candidate_pos)
+
+            if best_pos not in set(anchor_positions.tolist()):
+                if args.verbose_every > 0 and scanned % args.verbose_every == 0:
+                    print(
+                        f"[{split} {scanned}/{len(dataset)}] "
+                        f"scanned={scanned} mismatches={len(mismatch_reports)} matches={len(match_reports)}"
+                    )
+                continue
+
+            is_match = bool(pred_pos == best_pos)
+            if is_match:
+                # Only start collecting good matches after seeing at least one mismatch.
+                if not found_first_mismatch:
+                    if args.verbose_every > 0 and scanned % args.verbose_every == 0:
+                        print(
+                            f"[{split} {scanned}/{len(dataset)}] "
+                            f"scanned={scanned} mismatches={len(mismatch_reports)} matches={len(match_reports)}"
+                        )
+                    continue
+                if len(match_reports) < max_matches:
+                    report = _build_report(i, graph, anchor_positions, result, best_pos, pred_pos)
+                    match_reports.append(report)
+                    _print_report(report, is_match=True)
+            else:
+                found_first_mismatch = True
+                if len(mismatch_reports) < max_mismatches:
+                    report = _build_report(i, graph, anchor_positions, result, best_pos, pred_pos)
+                    mismatch_reports.append(report)
+                    _print_report(report, is_match=False)
+
+            if (
+                len(mismatch_reports) >= max_mismatches
+                and (not found_first_mismatch or len(match_reports) >= max_matches)
+            ):
+                break
+
+            if args.verbose_every > 0 and scanned % args.verbose_every == 0:
+                print(
+                    f"[{split} {scanned}/{len(dataset)}] "
+                    f"scanned={scanned} mismatches={len(mismatch_reports)} matches={len(match_reports)}"
+                )
+
+        summary = {
+            "run_status": "ok",
+            "error": None,
+            "config": str(cfg_path),
+            "split": split,
+            "samples_scanned": int(scanned),
+            "k_anchors": int(args.k),
+            "anchor_mode": anchor_mode,
+            "objective_scale": float(args.objective_scale),
+            "row_scale": float(args.row_scale),
+            "mismatches_found": int(len(mismatch_reports)),
+            "mismatch_reports": mismatch_reports,
+            "matches_found": int(len(match_reports)),
+            "match_reports": match_reports,
+        }
+        return summary, None
+    except Exception as exc:
+        summary = {
+            "run_status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "config": str(cfg_path),
+            "split": split,
+            "samples_scanned": int(scanned),
+            "k_anchors": int(args.k),
+            "anchor_mode": anchor_mode,
+            "objective_scale": float(args.objective_scale),
+            "row_scale": float(args.row_scale),
+            "mismatches_found": int(len(mismatch_reports)),
+            "mismatch_reports": mismatch_reports,
+            "matches_found": int(len(match_reports)),
+            "match_reports": match_reports,
+        }
+        return summary, exc
 
 
 def _evaluate_split(
@@ -359,6 +727,8 @@ def _evaluate_split(
             total_candidates=0,
             anchor_contains_best=0,
             anchor_mode=anchor_mode,
+            objective_scale=float(args.objective_scale),
+            row_scale=float(args.row_scale),
             run_status="error",
             error="RuntimeError: No sample files found for the requested split.",
         )
@@ -409,6 +779,8 @@ def _evaluate_split(
                     rng=rng,
                     use_default_features=use_default_features,
                     anchor_positions=anchor_positions,
+                    objective_scale=float(args.objective_scale),
+                    row_scale=float(args.row_scale),
                 )
             except Exception as exc:
                 failures += 1
@@ -460,6 +832,8 @@ def _evaluate_split(
             total_candidates=total_candidates,
             anchor_contains_best=anchor_contains_best,
             anchor_mode=anchor_mode,
+            objective_scale=float(args.objective_scale),
+            row_scale=float(args.row_scale),
             run_status="ok",
         )
         return summary, None
@@ -476,6 +850,8 @@ def _evaluate_split(
             total_candidates=total_candidates,
             anchor_contains_best=anchor_contains_best,
             anchor_mode=anchor_mode,
+            objective_scale=float(args.objective_scale),
+            row_scale=float(args.row_scale),
             run_status="error",
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -516,17 +892,34 @@ def main(argv=None):
     first_error: Exception | None = None
 
     for split_idx, split in enumerate(splits):
-        summary, err = _evaluate_split(
-            cfg=cfg,
-            cfg_path=cfg_path,
-            split=split,
-            args=args,
-            GraphDataset=GraphDataset,
-            rng_seed=int(args.seed) + split_idx,
-            trained_model_bundle=trained_model_bundle,
-        )
+        if args.debug_vanilla_topk:
+            summary, err = _debug_vanilla_topk_split(
+                cfg=cfg,
+                cfg_path=cfg_path,
+                split=split,
+                args=args,
+                GraphDataset=GraphDataset,
+                rng_seed=int(args.seed) + split_idx,
+                trained_model_bundle=trained_model_bundle,
+            )
+            print(
+                f"\nVanilla Top-k Debug Summary ({split}) "
+                f"scanned={summary['samples_scanned']} "
+                f"mismatches={summary['mismatches_found']} matches={summary.get('matches_found', 0)}"
+            )
+        else:
+            summary, err = _evaluate_split(
+                cfg=cfg,
+                cfg_path=cfg_path,
+                split=split,
+                args=args,
+                GraphDataset=GraphDataset,
+                rng_seed=int(args.seed) + split_idx,
+                trained_model_bundle=trained_model_bundle,
+            )
         per_split[split] = summary
-        _print_summary_block(summary)
+        if not args.debug_vanilla_topk:
+            _print_summary_block(summary)
         if err is not None:
             first_error = err
             break
@@ -539,6 +932,9 @@ def main(argv=None):
             "split": "all",
             "k_anchors": int(args.k),
             "anchor_mode": "trained_model" if args.use_trained_model else "random",
+            "objective_scale": float(args.objective_scale),
+            "row_scale": float(args.row_scale),
+            "debug_vanilla_topk": bool(args.debug_vanilla_topk),
             "splits": per_split,
         }
         if trained_model_bundle is not None:
