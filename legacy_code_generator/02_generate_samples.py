@@ -11,9 +11,31 @@ import pyscipopt as scip
 import utilities
 
 
+def compute_sbs(parent_obj: float, child_one_obj: float, child_zero_obj: float) -> float:
+    """Strong-branching style score from parent/children objectives."""
+
+    if any(np.isnan(v) for v in (parent_obj, child_one_obj, child_zero_obj)):
+        return float("-inf")
+
+    gain_one = max(child_one_obj - parent_obj, 1e-9)
+    gain_zero = max(child_zero_obj - parent_obj, 1e-9)
+    return float(gain_one * gain_zero)
+
+
 class SamplingAgent(scip.Branchrule):
 
-    def __init__(self, episode, instance, seed, out_queue, exploration_policy, query_expert_prob, out_dir, follow_expert=True):
+    def __init__(
+        self,
+        episode,
+        instance,
+        seed,
+        out_queue,
+        exploration_policy,
+        query_expert_prob,
+        out_dir,
+        dual_top_k=8,
+        follow_expert=True,
+    ):
         self.episode = episode
         self.instance = instance
         self.seed = seed
@@ -21,6 +43,7 @@ class SamplingAgent(scip.Branchrule):
         self.exploration_policy = exploration_policy
         self.query_expert_prob = query_expert_prob
         self.out_dir = out_dir
+        self.dual_top_k = int(max(0, dual_top_k))
         self.follow_expert = follow_expert
 
         self.rng = np.random.RandomState(seed)
@@ -29,6 +52,123 @@ class SamplingAgent(scip.Branchrule):
 
     def branchinit(self):
         self.khalil_root_buffer = {}
+        self.dual_state_buffer = None
+
+    def _solve_child_lp_with_dive(self, var, bound_type, bound_value):
+        assert bound_type in {"lb", "ub"}
+
+        self.model.startDive()
+        try:
+            if bound_type == "lb":
+                self.model.chgVarLbDive(var, float(bound_value))
+            else:
+                self.model.chgVarUbDive(var, float(bound_value))
+
+            lperror, cutoff = self.model.solveDiveLP()
+            lpsolstat = int(self.model.getLPSolstat())
+            child = {
+                "lperror": bool(lperror),
+                "cutoff": bool(cutoff),
+                "lp_solstat": lpsolstat,
+                "lp_obj": None,
+                "row_duals": None,
+            }
+
+            if not lperror and not cutoff and lpsolstat == int(scip.SCIP_LPSOLSTAT.OPTIMAL):
+                child["lp_obj"] = float(self.model.getLPObjVal())
+                lp_state = self.model.getState(self.dual_state_buffer)
+                self.dual_state_buffer = lp_state
+                child["row_duals"] = np.asarray(lp_state["row"]["dualsols"], dtype=np.float32).copy()
+
+            return child
+        finally:
+            self.model.endDive()
+
+    def _collect_topk_branching_duals(self, cands, scores):
+        if self.dual_top_k <= 0 or scores is None:
+            return None
+
+        self.dual_state_buffer = None
+        scores = np.asarray(scores, dtype=np.float64)
+        if scores.size == 0:
+            return None
+
+        k_eff = int(min(self.dual_top_k, scores.size))
+        topk_positions = np.argsort(scores)[-k_eff:][::-1]
+        parent_obj = float(self.model.getLPObjVal())
+
+        topk_records = []
+        for pos in topk_positions.tolist():
+            var = cands[pos]
+            lp_pos = int(var.getCol().getLPPos())
+            lpsol = float(var.getLPSol())
+            lb_local = float(var.getLbLocal())
+            ub_local = float(var.getUbLocal())
+            down_ub = min(float(np.floor(lpsol)), ub_local)
+            up_lb = max(float(np.ceil(lpsol)), lb_local)
+
+            down_data = self._solve_child_lp_with_dive(var, "ub", down_ub)
+            up_data = self._solve_child_lp_with_dive(var, "lb", up_lb)
+            child_zero_obj = float("nan") if down_data["lp_obj"] is None else float(down_data["lp_obj"])
+            child_one_obj = float("nan") if up_data["lp_obj"] is None else float(up_data["lp_obj"])
+            computed_score = compute_sbs(parent_obj, child_one_obj, child_zero_obj)
+
+            topk_records.append(
+                {
+                    "cand_position": int(pos),
+                    "cand_lp_pos": lp_pos,
+                    "cand_score": float(scores[pos]),
+                    "lpsol": lpsol,
+                    "lb_local": lb_local,
+                    "ub_local": ub_local,
+                    "down_ub": down_ub,
+                    "up_lb": up_lb,
+                    "parent_lp_obj": parent_obj,
+                    "child_zero_lp_obj": child_zero_obj,
+                    "child_one_lp_obj": child_one_obj,
+                    "computed_score": computed_score,
+                    "down": down_data,
+                    "up": up_data,
+                }
+            )
+
+        original_rank = sorted(
+            topk_records,
+            key=lambda row: (-float(row["cand_score"]), int(row["cand_position"])),
+        )
+        computed_rank = sorted(
+            topk_records,
+            key=lambda row: (-float(row["computed_score"]), int(row["cand_position"])),
+        )
+        original_order = [int(row["cand_position"]) for row in original_rank]
+        computed_order = [int(row["cand_position"]) for row in computed_rank]
+        if original_order != computed_order:
+            print(
+                f"[SB-CHECK][MISMATCH] node={self.model.getCurrentNode().getNumber()} "
+                f"depth={self.model.getCurrentNode().getDepth()} k={k_eff} "
+                f"original={original_order} computed={computed_order}"
+            )
+            for row in topk_records:
+                print(
+                    "[SB-CHECK][MISMATCH] "
+                    f"cand_pos={row['cand_position']} lp_pos={row['cand_lp_pos']} "
+                    f"orig_score={row['cand_score']:.12g} "
+                    f"computed_score={row['computed_score']:.12g} "
+                    f"parent_obj={row['parent_lp_obj']:.12g} "
+                    f"child1_obj={row['child_one_lp_obj']:.12g} "
+                    f"child0_obj={row['child_zero_lp_obj']:.12g}"
+                )
+            raise RuntimeError(
+                "Top-k ranking mismatch between vanillafullstrong scores and computed SBS "
+                f"(original={original_order}, computed={computed_order})"
+            )
+
+        return {
+            "k": k_eff,
+            "topk_by_score": topk_records,
+            "topk_rank_original": original_order,
+            "topk_rank_computed": computed_order,
+        }
 
     def branchexeclp(self, allowaddcons):
 
@@ -40,33 +180,55 @@ class SamplingAgent(scip.Branchrule):
         query_expert = self.rng.rand() < self.query_expert_prob
         if query_expert:
             state = utilities.extract_state(self.model)
-            cands, *_ = self.model.getPseudoBranchCands()
+            cands, *_ = self.model.getLPBranchCands()
             state_khalil = utilities.extract_khalil_variable_features(self.model, cands, self.khalil_root_buffer)
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
             cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
 
             assert result == scip.SCIP_RESULT.DIDNOTRUN
-            assert all([c1.getCol().getLPPos() == c2.getCol().getLPPos() for c1, c2 in zip(cands, cands_)])
+            action_set = [int(c.getCol().getLPPos()) for c in cands]
+            strong_action_set = [int(c.getCol().getLPPos()) for c in cands_]
+            strong_scores = scores
 
-            action_set = [c.getCol().getLPPos() for c in cands]
-            expert_action = action_set[bestcand]
+            if action_set != strong_action_set:
+                # vanillafullstrong_v2 may return a strict subset of LP candidates.
+                # Align state/action data to the returned expert candidate list.
+                action_idx_by_lp = {lp: i for i, lp in enumerate(action_set)}
+                missing = [lp for lp in strong_action_set if lp not in action_idx_by_lp]
+                if missing:
+                    raise RuntimeError(
+                        "vanillafullstrong returned candidates not present in LP candidates; "
+                        f"missing LP positions: {missing[:10]}"
+                    )
+                keep_idx = [action_idx_by_lp[lp] for lp in strong_action_set]
+                state_khalil = state_khalil[keep_idx]
+                action_set = strong_action_set
+                scores_for_data = [float(s) for s in strong_scores]
+                expert_action = action_set[bestcand]
+            else:
+                scores_for_data = [float(s) for s in strong_scores]
+                expert_action = action_set[bestcand]
 
-            data = [state, state_khalil, expert_action, action_set, scores]
+            data = [state, state_khalil, expert_action, action_set, scores_for_data]
 
             # Do not record inconsistent scores. May happen if SCIP was early stopped (time limit).
-            if not any([s < 0 for s in scores]):
+            if not any([s < 0 for s in strong_scores]):
+                topk_branching_duals = self._collect_topk_branching_duals(cands_, strong_scores)
 
                 filename = f'{self.out_dir}/sample_{self.episode}_{self.sample_counter}.pkl'
                 with gzip.open(filename, 'wb') as f:
-                    pickle.dump({
+                    sample_payload = {
                         'episode': self.episode,
                         'instance': self.instance,
                         'seed': self.seed,
                         'node_number': self.model.getCurrentNode().getNumber(),
                         'node_depth': self.model.getCurrentNode().getDepth(),
                         'data': data,
-                        }, f)
+                    }
+                    if topk_branching_duals is not None:
+                        sample_payload['topk_branching_duals'] = topk_branching_duals
+                    pickle.dump(sample_payload, f)
 
                 self.out_queue.put({
                     'type': 'sample',
@@ -107,7 +269,7 @@ def make_samples(in_queue, out_queue):
     """
 
     while True:
-        episode, instance, seed, exploration_policy, query_expert_prob, time_limit, out_dir = in_queue.get()
+        episode, instance, seed, exploration_policy, query_expert_prob, time_limit, out_dir, dual_top_k = in_queue.get()
         print(f'[w {os.getpid()}] episode {episode}, seed {seed}, processing instance \'{instance}\'...')
 
         m = scip.Model()
@@ -124,14 +286,15 @@ def make_samples(in_queue, out_queue):
             out_queue=out_queue,
             exploration_policy=exploration_policy,
             query_expert_prob=query_expert_prob,
-            out_dir=out_dir)
+            out_dir=out_dir,
+            dual_top_k=dual_top_k)
 
         m.includeBranchrule(
             branchrule=branchrule,
             name="Sampling branching rule", desc="",
             priority=666666, maxdepth=-1, maxbounddist=1)
 
-        m.setBoolParam('branching/vanillafullstrong/integralcands', True)
+        m.setBoolParam('branching/vanillafullstrong/integralcands', False)
         m.setBoolParam('branching/vanillafullstrong/scoreall', True)
         m.setBoolParam('branching/vanillafullstrong/collectscores', True)
         m.setBoolParam('branching/vanillafullstrong/donotbranch', True)
@@ -157,7 +320,7 @@ def make_samples(in_queue, out_queue):
         })
 
 
-def send_orders(orders_queue, instances, seed, exploration_policy, query_expert_prob, time_limit, out_dir):
+def send_orders(orders_queue, instances, seed, exploration_policy, query_expert_prob, time_limit, out_dir, dual_top_k):
     """
     Continuously send sampling orders to workers (relies on limited
     queue capacity).
@@ -185,12 +348,12 @@ def send_orders(orders_queue, instances, seed, exploration_policy, query_expert_
     while True:
         instance = rng.choice(instances)
         seed = rng.randint(2**32)
-        orders_queue.put([episode, instance, seed, exploration_policy, query_expert_prob, time_limit, out_dir])
+        orders_queue.put([episode, instance, seed, exploration_policy, query_expert_prob, time_limit, out_dir, dual_top_k])
         episode += 1
 
 
 def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
-                    exploration_policy, query_expert_prob, time_limit):
+                    exploration_policy, query_expert_prob, time_limit, dual_top_k):
     """
     Runs branch-and-bound episodes on the given set of instances, and collects
     randomly (state, action) pairs from the 'vanilla-fullstrong' expert
@@ -236,7 +399,16 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
     # start dispatcher
     dispatcher = mp.Process(
             target=send_orders,
-            args=(orders_queue, instances, rng.randint(2**32), exploration_policy, query_expert_prob, time_limit, tmp_samples_dir),
+            args=(
+                orders_queue,
+                instances,
+                rng.randint(2**32),
+                exploration_policy,
+                query_expert_prob,
+                time_limit,
+                tmp_samples_dir,
+                dual_top_k,
+            ),
             daemon=True)
     dispatcher.start()
 
@@ -300,6 +472,13 @@ if __name__ == '__main__':
         choices=['setcover', 'cauctions', 'facilities', 'indset'],
     )
     parser.add_argument(
+        'mode',
+        nargs='?',
+        default='default',
+        choices=['default', 'debug'],
+        help='Use "debug" to read/write data under *_debug directories.',
+    )
+    parser.add_argument(
         '-s', '--seed',
         help='Random generator seed.',
         type=utilities.valid_seed,
@@ -311,40 +490,53 @@ if __name__ == '__main__':
         type=int,
         default=1,
     )
+    parser.add_argument(
+        '--dual_top_k',
+        help='Number of top-scored candidates for which down/up child LP duals are saved.',
+        type=int,
+        default=8,
+    )
     args = parser.parse_args()
+
+    instance_problem_dir = f"{args.problem}_debug" if args.mode == 'debug' else args.problem
+    sample_problem_dir = f"{args.problem}_debug" if args.mode == 'debug' else args.problem
 
     print(f"seed {args.seed}")
 
     train_size = 100000
     valid_size = 20000
     test_size = 20000
+    if args.mode == 'debug':
+        train_size //= 1000
+        valid_size //= 1000
+        test_size //= 1000
     exploration_strategy = 'pscost'
     node_record_prob = 0.05
     time_limit = 3600
 
     if args.problem == 'setcover':
-        instances_train = glob.glob('data/instances/setcover/train_500r_1000c_0.05d/*.lp')
-        instances_valid = glob.glob('data/instances/setcover/valid_500r_1000c_0.05d/*.lp')
-        instances_test = glob.glob('data/instances/setcover/test_500r_1000c_0.05d/*.lp')
-        out_dir = 'data/samples/setcover/500r_1000c_0.05d'
+        instances_train = glob.glob(f'data/instances/{instance_problem_dir}/train_500r_1000c_0.05d/*.lp')
+        instances_valid = glob.glob(f'data/instances/{instance_problem_dir}/valid_500r_1000c_0.05d/*.lp')
+        instances_test = glob.glob(f'data/instances/{instance_problem_dir}/test_500r_1000c_0.05d/*.lp')
+        out_dir = f'data/samples/{sample_problem_dir}/500r_1000c_0.05d'
 
     elif args.problem == 'cauctions':
-        instances_train = glob.glob('data/instances/cauctions/train_100_500/*.lp')
-        instances_valid = glob.glob('data/instances/cauctions/valid_100_500/*.lp')
-        instances_test = glob.glob('data/instances/cauctions/test_100_500/*.lp')
-        out_dir = 'data/samples/cauctions/100_500'
+        instances_train = glob.glob(f'data/instances/{instance_problem_dir}/train_100_500/*.lp')
+        instances_valid = glob.glob(f'data/instances/{instance_problem_dir}/valid_100_500/*.lp')
+        instances_test = glob.glob(f'data/instances/{instance_problem_dir}/test_100_500/*.lp')
+        out_dir = f'data/samples/{sample_problem_dir}/100_500'
 
     elif args.problem == 'indset':
-        instances_train = glob.glob('data/instances/indset/train_500_4/*.lp')
-        instances_valid = glob.glob('data/instances/indset/valid_500_4/*.lp')
-        instances_test = glob.glob('data/instances/indset/test_500_4/*.lp')
-        out_dir = 'data/samples/indset/500_4'
+        instances_train = glob.glob(f'data/instances/{instance_problem_dir}/train_500_4/*.lp')
+        instances_valid = glob.glob(f'data/instances/{instance_problem_dir}/valid_500_4/*.lp')
+        instances_test = glob.glob(f'data/instances/{instance_problem_dir}/test_500_4/*.lp')
+        out_dir = f'data/samples/{sample_problem_dir}/500_4'
 
     elif args.problem == 'facilities':
-        instances_train = glob.glob('data/instances/facilities/train_100_100_5/*.lp')
-        instances_valid = glob.glob('data/instances/facilities/valid_100_100_5/*.lp')
-        instances_test = glob.glob('data/instances/facilities/test_100_100_5/*.lp')
-        out_dir = 'data/samples/facilities/100_100_5'
+        instances_train = glob.glob(f'data/instances/{instance_problem_dir}/train_100_100_5/*.lp')
+        instances_valid = glob.glob(f'data/instances/{instance_problem_dir}/valid_100_100_5/*.lp')
+        instances_test = glob.glob(f'data/instances/{instance_problem_dir}/test_100_100_5/*.lp')
+        out_dir = f'data/samples/{sample_problem_dir}/100_100_5'
         time_limit = 600
 
     else:
@@ -361,16 +553,19 @@ if __name__ == '__main__':
     collect_samples(instances_train, out_dir + '/train', rng, train_size,
                     args.njobs, exploration_policy=exploration_strategy,
                     query_expert_prob=node_record_prob,
-                    time_limit=time_limit)
+                    time_limit=time_limit,
+                    dual_top_k=args.dual_top_k)
 
     rng = np.random.RandomState(args.seed + 1)
     collect_samples(instances_valid, out_dir + '/valid', rng, test_size,
                     args.njobs, exploration_policy=exploration_strategy,
                     query_expert_prob=node_record_prob,
-                    time_limit=time_limit)
+                    time_limit=time_limit,
+                    dual_top_k=args.dual_top_k)
 
     rng = np.random.RandomState(args.seed + 2)
     collect_samples(instances_test, out_dir + '/test', rng, test_size,
                     args.njobs, exploration_policy=exploration_strategy,
                     query_expert_prob=node_record_prob,
-                    time_limit=time_limit)
+                    time_limit=time_limit,
+                    dual_top_k=args.dual_top_k)

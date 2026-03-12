@@ -13,11 +13,11 @@
 module load anaconda
 conda activate opt-ml-env
 
-# python 01_generate_instances.py setcover
-# echo "***** setcover Done *****"
-python 01_generate_instances.py cauctions
-echo "***** cauctions Done *****"
-python 01_generate_instances.py facilities
-echo "***** facilities Done *****"
-python 01_generate_instances.py indset
-echo "***** indset Done *****"
+python 01_generate_instances.py setcover debug
+echo "***** setcover Done *****"
+# python 01_generate_instances.py cauctions
+# echo "***** cauctions Done *****"
+# python 01_generate_instances.py facilities
+# echo "***** facilities Done *****"
+# python 01_generate_instances.py indset
+# echo "***** indset Done *****"

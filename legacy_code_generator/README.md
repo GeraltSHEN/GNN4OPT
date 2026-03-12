@@ -38,10 +38,19 @@ tar -xf scip-6.0.1.tar
 cd scip-6.0.1/
 ```
 
-Apply patch file in `learn2branch/scip_patch/`
+DON'T Apply patch file in `learn2branch/scip_patch/` !!!!!
 
+`learn2branch/scip_patch/` patch is as follows, 
 ```
 patch -p1 < $RCAC_SCRATCH/GNN4OPT/scip_patch/vanillafullstrong.patch
+```
+Note that SCIP has its own way to assign a value to infeasible child subproblem, i.e.
+```sb_score = (child_one - parent) *  (child_zero - parent)```
+Even if ```child_zero``` is infeasible, SCIP doesn't simply assign a extremely large value to ```child_zero``` to make ```sb_score``` extremely large. Instead, SCIP seems to give a "normal" value.
+
+To make dataset clean for now, I made another version of vanillafullstrong patch, vanillafullstrong_v2.patch, to only include the variable as a candadidate if two childs are both optimal. To apply this patch instead, 
+```
+patch -p1 < $RCAC_SCRATCH/GNN4OPT/scip_patch/vanillafullstrong_v2.patch
 ```
 
 ```
