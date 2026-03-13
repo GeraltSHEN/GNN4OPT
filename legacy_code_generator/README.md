@@ -69,6 +69,11 @@ SCIP's python interface (modified version)
 pip install git+https://github.com/ds4dm/PySCIPOpt.git@ml-branching
 ```
 
+Try my version 
+```
+pip install git+https://github.com/GeraltSHEN/PySCIPOpt.git@ml-branching
+```
+
 
 ### Set Covering
 ```

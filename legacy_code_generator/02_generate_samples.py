@@ -45,6 +45,9 @@ class SamplingAgent(scip.Branchrule):
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
             cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
+            print("Does model have getNNodes()?")
+            print(self.model.getNNodes())
+            print("Does model have getCutoffbound()?")
             cutoffbound = self.model.getCutoffbound()
             print(f"cutoffbound: {cutoffbound}")
 
