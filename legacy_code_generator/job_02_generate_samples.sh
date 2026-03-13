@@ -13,7 +13,7 @@
 module load anaconda
 conda activate opt-ml-env
 
-python 02_generate_samples.py setcover -j 16  # number of available CPUs
+python 02_generate_samples.py setcover_debug -j 1  # number of available CPUs
 echo "setcover Samples Generated"
 
 # python 02_generate_samples.py cauctions -j 8

@@ -45,6 +45,8 @@ class SamplingAgent(scip.Branchrule):
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
             cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
+            cutoffbound = self.model.getCutoffbound() if hasattr(self.model, "getCutoffbound") else np.nan
+            print(f"cutoffbound: {cutoffbound}")
 
             assert result == scip.SCIP_RESULT.DIDNOTRUN
             assert all([c1.getCol().getLPPos() == c2.getCol().getLPPos() for c1, c2 in zip(cands, cands_)])
@@ -52,7 +54,7 @@ class SamplingAgent(scip.Branchrule):
             action_set = [c.getCol().getLPPos() for c in cands]
             expert_action = action_set[bestcand]
 
-            data = [state, state_khalil, expert_action, action_set, scores]
+            data = [state, state_khalil, expert_action, action_set, scores, cutoffbound]
 
             # Do not record inconsistent scores. May happen if SCIP was early stopped (time limit).
             if not any([s < 0 for s in scores]):
@@ -246,6 +248,8 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
     i = 0
     in_buffer = 0
     while i < n_samples:
+        if i == 10:
+            raise ValueError("stop here")
         sample = answers_queue.get()
 
         # add received sample to buffer
