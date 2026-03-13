@@ -45,7 +45,7 @@ class SamplingAgent(scip.Branchrule):
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
             cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
-            cutoffbound = self.model.getCutoffbound() if hasattr(self.model, "getCutoffbound") else np.nan
+            cutoffbound = self.model.getCutoffbound()
             print(f"cutoffbound: {cutoffbound}")
 
             assert result == scip.SCIP_RESULT.DIDNOTRUN
@@ -304,6 +304,13 @@ if __name__ == '__main__':
         choices=['setcover', 'cauctions', 'facilities', 'indset'],
     )
     parser.add_argument(
+        'mode',
+        nargs='?',
+        default='default',
+        choices=['default', 'debug'],
+        help='Use "debug" to write samples under *_debug directories.',
+    )
+    parser.add_argument(
         '-s', '--seed',
         help='Random generator seed.',
         type=utilities.valid_seed,
@@ -317,11 +324,17 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
+    sample_problem_dir = f"{args.problem}_debug" if args.mode == 'debug' else args.problem
+
     print(f"seed {args.seed}")
 
     train_size = 100000
     valid_size = 20000
     test_size = 20000
+    if args.mode == 'debug':
+        train_size //= 1000
+        valid_size //= 1000
+        test_size //= 1000
     exploration_strategy = 'pscost'
     node_record_prob = 0.05
     time_limit = 3600
@@ -330,25 +343,25 @@ if __name__ == '__main__':
         instances_train = glob.glob('data/instances/setcover/train_500r_1000c_0.05d/*.lp')
         instances_valid = glob.glob('data/instances/setcover/valid_500r_1000c_0.05d/*.lp')
         instances_test = glob.glob('data/instances/setcover/test_500r_1000c_0.05d/*.lp')
-        out_dir = 'data/samples/setcover/500r_1000c_0.05d'
+        out_dir = f'data/samples/{sample_problem_dir}/500r_1000c_0.05d'
 
     elif args.problem == 'cauctions':
         instances_train = glob.glob('data/instances/cauctions/train_100_500/*.lp')
         instances_valid = glob.glob('data/instances/cauctions/valid_100_500/*.lp')
         instances_test = glob.glob('data/instances/cauctions/test_100_500/*.lp')
-        out_dir = 'data/samples/cauctions/100_500'
+        out_dir = f'data/samples/{sample_problem_dir}/100_500'
 
     elif args.problem == 'indset':
         instances_train = glob.glob('data/instances/indset/train_500_4/*.lp')
         instances_valid = glob.glob('data/instances/indset/valid_500_4/*.lp')
         instances_test = glob.glob('data/instances/indset/test_500_4/*.lp')
-        out_dir = 'data/samples/indset/500_4'
+        out_dir = f'data/samples/{sample_problem_dir}/500_4'
 
     elif args.problem == 'facilities':
         instances_train = glob.glob('data/instances/facilities/train_100_100_5/*.lp')
         instances_valid = glob.glob('data/instances/facilities/valid_100_100_5/*.lp')
         instances_test = glob.glob('data/instances/facilities/test_100_100_5/*.lp')
-        out_dir = 'data/samples/facilities/100_100_5'
+        out_dir = f'data/samples/{sample_problem_dir}/100_100_5'
         time_limit = 600
 
     else:
@@ -358,8 +371,8 @@ if __name__ == '__main__':
     print(f"{len(instances_valid)} validation instances for {valid_size} samples")
     print(f"{len(instances_test)} test instances for {test_size} samples")
 
-    # create output directory, throws an error if it already exists
-    os.makedirs(out_dir)
+    # create output directory; allow reruns on an existing dataset path
+    os.makedirs(out_dir, exist_ok=True)
 
     rng = np.random.RandomState(args.seed)
     collect_samples(instances_train, out_dir + '/train', rng, train_size,
