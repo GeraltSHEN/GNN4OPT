@@ -45,11 +45,7 @@ class SamplingAgent(scip.Branchrule):
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
             cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
-            print("Does model have getNNodes()?")
-            print(self.model.getNNodes())
-            print("Does model have getCutoffbound()?")
             cutoffbound = self.model.getCutoffbound()
-            print(f"cutoffbound: {cutoffbound}")
 
             assert result == scip.SCIP_RESULT.DIDNOTRUN
             assert all([c1.getCol().getLPPos() == c2.getCol().getLPPos() for c1, c2 in zip(cands, cands_)])
@@ -251,8 +247,6 @@ def collect_samples(instances, out_dir, rng, n_samples, n_jobs,
     i = 0
     in_buffer = 0
     while i < n_samples:
-        if i == 10:
-            raise ValueError("stop here")
         sample = answers_queue.get()
 
         # add received sample to buffer
