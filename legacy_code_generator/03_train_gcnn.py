@@ -199,7 +199,13 @@ if __name__ == '__main__':
             with gzip.open(filename, 'rb') as file:
                 sample = pickle.load(file)
 
-            _, _, _, cands, _ = sample['data']
+            sample_data = sample['data']
+            if not isinstance(sample_data, (list, tuple)) or len(sample_data) < 4:
+                raise ValueError(
+                    f"Expected sample['data'] with at least 4 entries, got {type(sample_data)} "
+                    f"len={len(sample_data) if hasattr(sample_data, '__len__') else 'n/a'}"
+                )
+            cands = sample_data[3]
             ncands += len(cands)
             nsamples += 1
 
@@ -283,4 +289,3 @@ if __name__ == '__main__':
     model.restore_state(os.path.join(running_dir, 'best_params.pkl'))
     valid_loss, valid_kacc = process(model, valid_data, top_k, None)
     log(f"BEST VALID LOSS: {valid_loss:0.3f} " + "".join([f" acc@{k}: {acc:0.3f}" for k, acc in zip(top_k, valid_kacc)]), logfile)
-

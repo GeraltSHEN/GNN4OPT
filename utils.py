@@ -100,7 +100,13 @@ class GraphDataset(Dataset):
         This method loads a node bipartite graph observation as saved on the disk during data collection.
         """
         sample = load_gzip(self.sample_files[index])
-        sample_state, _, sample_action, sample_action_set, sample_scores = sample["data"]
+        sample_data = sample["data"]
+        if not isinstance(sample_data, (list, tuple)) or len(sample_data) < 5:
+            raise ValueError(f"Expected sample['data'] with at least 5 entries, got {type(sample_data)} len={len(sample_data) if hasattr(sample_data, '__len__') else 'n/a'}")
+        sample_state = sample_data[0]
+        sample_action = sample_data[2]
+        sample_action_set = sample_data[3]
+        sample_scores = sample_data[4]
 
         constraint_dict, edge_dict, variable_dict = sample_state
 

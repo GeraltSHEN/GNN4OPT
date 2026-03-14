@@ -86,6 +86,7 @@ def extract_state(model, buffer=None):
 
     row_norms = s['row']['norms']
     row_norms[row_norms == 0] = 1
+    age_norm_denom = float(s['stats']['nlps'] + 5)
 
     # Column features
     n_cols = len(s['col']['types'])
@@ -107,7 +108,7 @@ def extract_state(model, buffer=None):
     col_feats['basis_status'] = np.zeros((n_cols, 4))  # LOWER BASIC UPPER ZERO
     col_feats['basis_status'][np.arange(n_cols), s['col']['basestats']] = 1
     col_feats['reduced_cost'] = s['col']['redcosts'].reshape(-1, 1) / obj_norm
-    col_feats['age'] = s['col']['ages'].reshape(-1, 1) / (s['stats']['nlps'] + 5)
+    col_feats['age'] = s['col']['ages'].reshape(-1, 1) / age_norm_denom
     col_feats['sol_val'] = s['col']['solvals'].reshape(-1, 1)
     col_feats['inc_val'] = s['col']['incvals'].reshape(-1, 1)
     col_feats['avg_inc_val'] = s['col']['avgincvals'].reshape(-1, 1)
@@ -115,10 +116,25 @@ def extract_state(model, buffer=None):
     col_feat_names = [[k, ] if v.shape[1] == 1 else [f'{k}_{i}' for i in range(v.shape[1])] for k, v in col_feats.items()]
     col_feat_names = [n for names in col_feat_names for n in names]
     col_feat_vals = np.concatenate(list(col_feats.values()), axis=-1)
+    try:
+        objective_sense = model.getObjectiveSense()
+    except Exception:
+        objective_sense = "minimize"
+    try:
+        objective_offset = float(model.getObjoffset())
+    except Exception:
+        objective_offset = 0.0
 
     variable_features = {
         'names': col_feat_names,
-        'values': col_feat_vals,}
+        'values': col_feat_vals,
+        'reconstruction': {
+            'objective_sense': objective_sense,
+            'objective_offset': objective_offset,
+            'lbs': np.asarray(s['col']['lbs'], dtype=np.float32),
+            'ubs': np.asarray(s['col']['ubs'], dtype=np.float32),
+        },
+    }
 
     # Row features
 
@@ -143,7 +159,7 @@ def extract_state(model, buffer=None):
 
     row_feats['age'] = np.concatenate((
         s['row']['ages'][has_lhs],
-        s['row']['ages'][has_rhs])).reshape(-1, 1) / (s['stats']['nlps'] + 5)
+        s['row']['ages'][has_rhs])).reshape(-1, 1) / age_norm_denom
 
     # # redundant with is_tight
     # tmp = s['row']['basestats']  # LOWER BASIC UPPER ZERO
@@ -168,9 +184,19 @@ def extract_state(model, buffer=None):
     row_feat_names = [n for names in row_feat_names for n in names]
     row_feat_vals = np.concatenate(list(row_feats.values()), axis=-1)
 
+    constraint_row_norms = np.concatenate((
+        row_norms[has_lhs],
+        row_norms[has_rhs],
+    )).astype(np.float32, copy=False)
     constraint_features = {
         'names': row_feat_names,
-        'values': row_feat_vals,}
+        'values': row_feat_vals,
+        'normalization': {
+            'obj_norm': float(obj_norm),
+            'constraint_row_norms': constraint_row_norms,
+            'age_norm_denom': age_norm_denom,
+        },
+    }
 
     # Edge features
     if 'state' in buffer:
