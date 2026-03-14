@@ -56,14 +56,46 @@ class SamplingAgent(scip.Branchrule):
                 "cutoff": bool(cutoff),
                 "lp_solstat": lpsolstat,
                 "lp_obj": None,
-                "row_duals": None,
+                "rc_obj": None,
+                "dual_solvals": None,
+                "bias": None,
             }
 
             if not lperror and not cutoff and lpsolstat == int(scip.SCIP_LPSOLSTAT.OPTIMAL):
                 child["lp_obj"] = float(self.model.getLPObjVal())
                 lp_state = self.model.getState(self.dual_state_buffer)
                 self.dual_state_buffer = lp_state
-                child["row_duals"] = np.asarray(lp_state["row"]["dualsols"], dtype=np.float32).copy()
+
+                row_lhss = np.asarray(lp_state["row"]["lhss"], dtype=np.float64)
+                row_rhss = np.asarray(lp_state["row"]["rhss"], dtype=np.float64)
+                has_lhs = np.nonzero(~np.isnan(row_lhss))[0]
+                has_rhs = np.nonzero(~np.isnan(row_rhss))[0]
+                row_bias = np.concatenate((
+                    -row_lhss[has_lhs],
+                    +row_rhss[has_rhs],
+                ))
+
+                row_duals_raw = np.asarray(lp_state["row"]["dualsols"], dtype=np.float64)
+                row_duals = np.concatenate((
+                    -row_duals_raw[has_lhs],
+                    +row_duals_raw[has_rhs],
+                ))
+
+                row_obj = float(np.dot(row_duals, row_bias))
+                col_redcosts = np.asarray(lp_state["col"]["redcosts"], dtype=np.float64)
+                col_solvals = np.asarray(lp_state["col"]["solvals"], dtype=np.float64)
+                rc_obj = float(np.dot(col_redcosts, col_solvals))
+                computed_obj = row_obj + rc_obj
+                lp_obj_val = float(self.model.getLPObjVal())
+                if not np.isclose(computed_obj, lp_obj_val, rtol=1e-6, atol=1e-6):
+                    print(
+                        "[DUAL-OBJ-CHECK][FAIL] "
+                        f"row_obj={row_obj} rc_obj={rc_obj} computed_obj={computed_obj} lp_obj={lp_obj_val}"
+                    )
+                    raise RuntimeError("child dual objective check failed in solve_child_lp_with_dive")
+                child["rc_obj"] = rc_obj
+                child["dual_solvals"] = row_duals.astype(np.float32, copy=False).copy()
+                child["bias"] = row_bias.astype(np.float32, copy=False).copy()
             return child
         
         finally:
