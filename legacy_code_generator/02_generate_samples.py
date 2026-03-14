@@ -132,7 +132,7 @@ def make_samples(in_queue, out_queue):
             name="Sampling branching rule", desc="",
             priority=666666, maxdepth=-1, maxbounddist=1)
 
-        m.setBoolParam('branching/vanillafullstrong/integralcands', True)
+        m.setBoolParam('branching/vanillafullstrong/integralcands', False)
         m.setBoolParam('branching/vanillafullstrong/scoreall', True)
         m.setBoolParam('branching/vanillafullstrong/collectscores', True)
         m.setBoolParam('branching/vanillafullstrong/donotbranch', True)
