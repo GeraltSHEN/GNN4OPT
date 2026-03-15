@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import utils
 import scip_data_helper as sdh
 
@@ -61,6 +62,12 @@ def main() -> None:
         type=int,
         default=8,
         help="Top-k candidates (by original score) for strong-branch score reconstruction.",
+    )
+    parser.add_argument(
+        "--anchor_k",
+        type=int,
+        default=8,
+        help="Number of anchor candidates for anchor-dual substitution demonstration.",
     )
     args = parser.parse_args()
 
@@ -141,6 +148,51 @@ def main() -> None:
     print(f"sb_rank_original: {sb_topk['topk_rank_original']}")
     print(f"sb_rank_reconstructed: {sb_topk['topk_rank_computed']}")
     print(f"sb_rank_match: {sb_topk['topk_rank_original'] == sb_topk['topk_rank_computed']}")
+
+    anchor_res = sdh.run_anchor_dual_substitution_with_scip(
+        lp_components=lp,
+        action_set=sample_action_set,
+        candidate_scores=sample_scores,
+        cutoffbound=cutoffbound,
+        anchor_k=args.anchor_k,
+        as_mip=args.scip_as_mip,
+    )
+    print(f"anchor_k_eff: {len(anchor_res['anchor_positions'])}")
+    print(f"anchor_positions: {anchor_res['anchor_positions'].tolist()}")
+    print(f"anchor_lp_positions: {anchor_res['candidate_lp_positions'][anchor_res['anchor_positions']].tolist()}")
+    print(f"anchor_dual_pool_size: {len(anchor_res['dual_pool_records'])}")
+    for row in anchor_res["anchor_child_records"]:
+        down_eval = "None" if row["down_dual_eval_self"] is None else f"{row['down_dual_eval_self']:.12g}"
+        down_gap = "None" if row["down_dual_eval_gap"] is None else f"{row['down_dual_eval_gap']:.3e}"
+        up_eval = "None" if row["up_dual_eval_self"] is None else f"{row['up_dual_eval_self']:.12g}"
+        up_gap = "None" if row["up_dual_eval_gap"] is None else f"{row['up_dual_eval_gap']:.3e}"
+        print(
+            "anchor_child_row: "
+            f"cand_pos={row['cand_position']} "
+            f"lp_pos={row['cand_lp_pos']} "
+            f"down_status={row['down_status']} down_obj={row['down_obj']:.12g} "
+            f"down_dual_status={row['down_dual_status']} "
+            f"down_dual_eval_self={down_eval} down_dual_eval_gap={down_gap} "
+            f"up_status={row['up_status']} up_obj={row['up_obj']:.12g} "
+            f"up_dual_status={row['up_dual_status']} "
+            f"up_dual_eval_self={up_eval} up_dual_eval_gap={up_gap}"
+        )
+
+    pseudo_scores = anchor_res["pseudo_scores"]
+    pseudo_order = np.argsort(pseudo_scores)[-args.strong_branch_top_k:][::-1]
+    print(f"anchor_selected_position: {anchor_res['selected_position']}")
+    print(f"anchor_selected_lp_pos: {anchor_res['selected_lp_pos']}")
+    print(f"anchor_top{args.strong_branch_top_k}_by_pseudo:")
+    for pos in pseudo_order.tolist():
+        print(
+            "anchor_pseudo_row: "
+            f"cand_pos={pos} "
+            f"lp_pos={int(anchor_res['candidate_lp_positions'][pos])} "
+            f"orig_score={float(anchor_res['candidate_scores'][pos]):.12g} "
+            f"pseudo_score={float(anchor_res['pseudo_scores'][pos]):.12g} "
+            f"child1_est={float(anchor_res['child_one_obj_est'][pos]):.12g} "
+            f"child0_est={float(anchor_res['child_zero_obj_est'][pos]):.12g}"
+        )
 
     if args.solve_reconstructed_lp:
         if args.solver == "scip":
