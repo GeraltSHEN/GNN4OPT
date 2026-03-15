@@ -18,15 +18,12 @@ def load_sample(path: Union[str, Path]) -> Dict[str, Any]:
 
 
 def unpack_sample_data(data: Sequence[Any]) -> Tuple[SampleState, int, Sequence[int], Sequence[float]]:
-    if not isinstance(data, (list, tuple)):
-        raise TypeError(f"Expected sample['data'] to be list/tuple, got {type(data)}")
-    if len(data) < 5:
-        raise ValueError(f"Expected at least 5 entries in sample['data'], got {len(data)}")
     sample_state = data[0]
     sample_action = data[2]
     sample_action_set = data[3]
     sample_scores = data[4]
-    return sample_state, sample_action, sample_action_set, sample_scores
+    cutoffbound = data[5]
+    return sample_state, sample_action, sample_action_set, sample_scores, cutoffbound
 
 
 def _column(values: np.ndarray, indices: Dict[str, int], name: str) -> np.ndarray:
@@ -237,6 +234,7 @@ def solve_reconstructed_lp_with_scip(
     lp_components: Dict[str, Any],
     as_mip: bool = False,
     display_verblevel: int = 0,
+    bound_overrides: Union[None, Dict[int, Tuple[Union[float, None], Union[float, None]]]] = None,
 ) -> Dict[str, Any]:
     """
     Solve reconstructed LP/MIP directly with SCIP defaults via PySCIPOpt.
@@ -277,6 +275,23 @@ def solve_reconstructed_lp_with_scip(
     inf = model.infinity()
     for j in range(c.shape[0]):
         lb, ub = bounds[j] if bounds is not None else (None, None)
+        if bound_overrides is not None and j in bound_overrides:
+            lb_override, ub_override = bound_overrides[j]
+            if lb_override is not None:
+                lb = float(lb_override) if lb is None else max(float(lb), float(lb_override))
+            if ub_override is not None:
+                ub = float(ub_override) if ub is None else min(float(ub), float(ub_override))
+
+        if lb is not None and ub is not None and float(lb) > float(ub):
+            return {
+                "success": False,
+                "status": "infeasible",
+                "message": "infeasible after applying bound overrides",
+                "x": None,
+                "objective_value": None,
+                "raw_result": None,
+            }
+
         lbv = -inf if lb is None else float(lb)
         ubv = +inf if ub is None else float(ub)
 
@@ -328,3 +343,115 @@ def solve_reconstructed_lp_with_scip(
         out["objective_value"] = obj
 
     return out
+
+
+def compute_strong_branch_score(parent_obj: float, child_one_obj: float, child_zero_obj: float, cutoffbound: float) -> float:
+    child_one_obj_capped = min(float(child_one_obj), float(cutoffbound))
+    child_zero_obj_capped = min(float(child_zero_obj), float(cutoffbound))
+    gain_one = max(child_one_obj_capped - float(parent_obj), 1e-9)
+    gain_zero = max(child_zero_obj_capped - float(parent_obj), 1e-9)
+    return float(gain_one * gain_zero)
+
+
+def reconstruct_topk_strong_branching_scores(
+    lp_components: Dict[str, Any],
+    action_set: Sequence[int],
+    candidate_scores: Sequence[float],
+    cutoffbound: float,
+    top_k: int = 8,
+    as_mip: bool = False,
+) -> Dict[str, Any]:
+    """
+    Recompute top-k strong-branching scores on reconstructed LP/MIP using SCIP.
+
+    Candidate ordering and score formula follow `legacy_code_generator/02_generate_samples.py`.
+    """
+    action_set = np.asarray(action_set, dtype=np.int64)
+    candidate_scores = np.asarray(candidate_scores, dtype=np.float64)
+    if action_set.shape[0] != candidate_scores.shape[0]:
+        raise ValueError(
+            f"action_set and candidate_scores size mismatch ({action_set.shape[0]} vs {candidate_scores.shape[0]})"
+        )
+    if action_set.size == 0:
+        return {
+            "k": 0,
+            "parent_obj": None,
+            "topk_by_score": [],
+            "topk_rank_original": [],
+            "topk_rank_computed": [],
+        }
+
+    parent_res = solve_reconstructed_lp_with_scip(lp_components, as_mip=as_mip)
+    if not parent_res["success"]:
+        raise RuntimeError(
+            f"Failed to solve reconstructed parent LP/MIP with SCIP: {parent_res['status']} ({parent_res['message']})"
+        )
+    parent_obj = float(parent_res["objective_value"])
+    x_parent = np.asarray(parent_res["x"], dtype=np.float64)
+    bounds = lp_components.get("bounds")
+
+    k_eff = int(min(max(int(top_k), 0), candidate_scores.size))
+    topk_positions = np.argsort(candidate_scores)[-k_eff:][::-1]
+
+    records: List[Dict[str, Any]] = []
+    for pos in topk_positions.tolist():
+        var_idx = int(action_set[pos])
+        lpsol = float(x_parent[var_idx])
+
+        lb_local, ub_local = bounds[var_idx] if bounds is not None else (None, None)
+        lb_local_v = -np.inf if lb_local is None else float(lb_local)
+        ub_local_v = +np.inf if ub_local is None else float(ub_local)
+        down_ub = min(float(np.floor(lpsol)), ub_local_v)
+        up_lb = max(float(np.ceil(lpsol)), lb_local_v)
+
+        down_res = solve_reconstructed_lp_with_scip(
+            lp_components,
+            as_mip=as_mip,
+            bound_overrides={var_idx: (None, down_ub)},
+        )
+        up_res = solve_reconstructed_lp_with_scip(
+            lp_components,
+            as_mip=as_mip,
+            bound_overrides={var_idx: (up_lb, None)},
+        )
+
+        child_zero_obj = float("inf") if not down_res["success"] else float(down_res["objective_value"])
+        child_one_obj = float("inf") if not up_res["success"] else float(up_res["objective_value"])
+        computed_score = compute_strong_branch_score(
+            parent_obj=parent_obj,
+            child_one_obj=child_one_obj,
+            child_zero_obj=child_zero_obj,
+            cutoffbound=float(cutoffbound),
+        )
+
+        records.append(
+            {
+                "cand_position": int(pos),
+                "cand_lp_pos": var_idx,
+                "cand_score": float(candidate_scores[pos]),
+                "lpsol": lpsol,
+                "lb_local": lb_local_v,
+                "ub_local": ub_local_v,
+                "down_ub": down_ub,
+                "up_lb": up_lb,
+                "parent_lp_obj": parent_obj,
+                "child_zero_lp_obj": child_zero_obj,
+                "child_one_lp_obj": child_one_obj,
+                "computed_score": computed_score,
+                "down_status": str(down_res["status"]),
+                "up_status": str(up_res["status"]),
+            }
+        )
+
+    original_rank = sorted(records, key=lambda row: (-float(row["cand_score"]), int(row["cand_position"])))
+    computed_rank = sorted(records, key=lambda row: (-float(row["computed_score"]), int(row["cand_position"])))
+    original_order = [int(row["cand_position"]) for row in original_rank]
+    computed_order = [int(row["cand_position"]) for row in computed_rank]
+
+    return {
+        "k": k_eff,
+        "parent_obj": parent_obj,
+        "topk_by_score": records,
+        "topk_rank_original": original_order,
+        "topk_rank_computed": computed_order,
+    }

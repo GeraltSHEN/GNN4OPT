@@ -56,6 +56,12 @@ def main() -> None:
         action="store_true",
         help="Disable fallback binary bounds [0,1] when explicit lb/ub metadata is unavailable.",
     )
+    parser.add_argument(
+        "--strong_branch_top_k",
+        type=int,
+        default=8,
+        help="Top-k candidates (by original score) for strong-branch score reconstruction.",
+    )
     args = parser.parse_args()
 
     data = utils.load_data(_build_load_args(args.dataset_path, args.eval_batch_size), for_training=False)
@@ -84,7 +90,7 @@ def main() -> None:
 
     # 2) Recover unnormalized features from raw saved state.
     sample = utils.load_gzip(sample_path)
-    sample_state, sample_action, sample_action_set, sample_scores = sdh.unpack_sample_data(sample["data"])
+    sample_state, sample_action, sample_action_set, sample_scores, cutoffbound = sdh.unpack_sample_data(sample["data"])
     unnormalized_state = sdh.reconstruct_unnormalized_state(sample_state)
 
     lp = sdh.extract_lp_components(
@@ -108,6 +114,33 @@ def main() -> None:
     print(f"expert_action_node: {sample_action}")
     print(f"num_action_set: {len(sample_action_set)}")
     print(f"num_scores: {len(sample_scores)}")
+    print(f"cutoffbound: {cutoffbound:.12g}")
+
+    sb_topk = sdh.reconstruct_topk_strong_branching_scores(
+        lp_components=lp,
+        action_set=sample_action_set,
+        candidate_scores=sample_scores,
+        cutoffbound=cutoffbound,
+        top_k=args.strong_branch_top_k,
+        as_mip=args.scip_as_mip,
+    )
+    print(f"reconstructed_strong_branching_topk: {sb_topk['k']}")
+    for row in sb_topk["topk_by_score"]:
+        print(
+            "sb_topk_row: "
+            f"cand_pos={row['cand_position']} "
+            f"lp_pos={row['cand_lp_pos']} "
+            f"orig_score={row['cand_score']:.12g} "
+            f"reconstructed_score={row['computed_score']:.12g} "
+            f"parent_obj={row['parent_lp_obj']:.12g} "
+            f"child1_obj={row['child_one_lp_obj']:.12g} "
+            f"child0_obj={row['child_zero_lp_obj']:.12g} "
+            f"down_status={row['down_status']} "
+            f"up_status={row['up_status']}"
+        )
+    print(f"sb_rank_original: {sb_topk['topk_rank_original']}")
+    print(f"sb_rank_reconstructed: {sb_topk['topk_rank_computed']}")
+    print(f"sb_rank_match: {sb_topk['topk_rank_original'] == sb_topk['topk_rank_computed']}")
 
     if args.solve_reconstructed_lp:
         if args.solver == "scip":
