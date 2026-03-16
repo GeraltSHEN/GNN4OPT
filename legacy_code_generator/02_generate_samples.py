@@ -203,13 +203,13 @@ class SamplingAgent(scip.Branchrule):
         # once in a while, also run the expert policy and record the (state, action) pair
         query_expert = self.rng.rand() < self.query_expert_prob
         if query_expert:
-            state = utilities.extract_state(self.model)
+            cutoffbound = float(self.model.getCutoffbound())
+            state = utilities.extract_state(self.model, cutoffbound=cutoffbound)
             cands, *_ = self.model.getPseudoBranchCands()
             state_khalil = utilities.extract_khalil_variable_features(self.model, cands, self.khalil_root_buffer)
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
             cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
-            cutoffbound = self.model.getCutoffbound()
 
             assert result == scip.SCIP_RESULT.DIDNOTRUN
             assert all([c1.getCol().getLPPos() == c2.getCol().getLPPos() for c1, c2 in zip(cands, cands_)])

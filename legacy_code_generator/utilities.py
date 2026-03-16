@@ -46,7 +46,7 @@ def init_scip_params(model, seed, heuristics=True, presolving=True, separating=T
         model.setHeuristics(scip.SCIP_PARAMSETTING.OFF)
 
 
-def extract_state(model, buffer=None):
+def extract_state(model, buffer=None, cutoffbound=None):
     """
     Compute a bipartite graph representation of the solver. In this
     representation, the variables and constraints of the MILP are the
@@ -84,6 +84,14 @@ def extract_state(model, buffer=None):
         obj_norm = np.linalg.norm(s['col']['coefs'])
         obj_norm = 1 if obj_norm <= 0 else obj_norm
 
+    if cutoffbound is None:
+        try:
+            cutoffbound = float(model.getCutoffbound())
+        except Exception:
+            cutoffbound = float("inf")
+    cutoffbound = float(cutoffbound)
+    cutoffbound_normalized = cutoffbound / float(obj_norm)
+
     row_norms = s['row']['norms']
     row_norms[row_norms == 0] = 1
     age_norm_denom = float(s['stats']['nlps'] + 5)
@@ -112,6 +120,7 @@ def extract_state(model, buffer=None):
     col_feats['sol_val'] = s['col']['solvals'].reshape(-1, 1)
     col_feats['inc_val'] = s['col']['incvals'].reshape(-1, 1)
     col_feats['avg_inc_val'] = s['col']['avgincvals'].reshape(-1, 1)
+    col_feats['cutoffbound_normalized'] = np.full((n_cols, 1), cutoffbound_normalized, dtype=np.float32)
 
     col_feat_names = [[k, ] if v.shape[1] == 1 else [f'{k}_{i}' for i in range(v.shape[1])] for k, v in col_feats.items()]
     col_feat_names = [n for names in col_feat_names for n in names]
@@ -179,6 +188,8 @@ def extract_state(model, buffer=None):
     row_feats['dualsol_val_normalized'] = np.concatenate((
             -tmp[has_lhs],
             +tmp[has_rhs])).reshape(-1, 1)
+    n_rows = len(has_lhs) + len(has_rhs)
+    row_feats['cutoffbound_normalized'] = np.full((n_rows, 1), cutoffbound_normalized, dtype=np.float32)
 
     row_feat_names = [[k, ] if v.shape[1] == 1 else [f'{k}_{i}' for i in range(v.shape[1])] for k, v in row_feats.items()]
     row_feat_names = [n for names in row_feat_names for n in names]
