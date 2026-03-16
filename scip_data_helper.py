@@ -429,12 +429,15 @@ def solve_explicit_dual_with_scip(
     rhs = -b_ub
 
     parent_lbs, parent_ubs = _bounds_to_arrays(lp.bounds, int(c.shape[0]))
-    lbs, ubs, feasible = _apply_bound_overrides(parent_lbs, parent_ubs, bound_overrides)
-    if not feasible:
+    # NOTE: this only checks bound consistency (lb <= ub), not full primal feasibility.
+    lbs, ubs, bounds_consistent = _apply_bound_overrides(parent_lbs, parent_ubs, bound_overrides)
+    if not bounds_consistent:
         return DualSolveResult(
             success=False,
-            status="infeasible",
-            message="infeasible after applying bound overrides",
+            # For the primal child, contradictory bounds imply infeasibility;
+            # with finite bounds, the corresponding dual behavior is unbounded.
+            status="unbounded",
+            message="primal infeasible after applying bound overrides (inconsistent bounds)",
             objective_value=float("inf"),
             y=None,
             alpha=None,
@@ -457,6 +460,10 @@ def solve_explicit_dual_with_scip(
     m_rows, n_vars = A.shape
     model = scip.Model()
     model.setIntParam("display/verblevel", int(display_verblevel))
+    # Keep explicit-dual variables in the original space; with default presolve
+    # SCIP may return transformed/extreme values that do not satisfy dual equalities.
+    model.setIntParam("presolving/maxrounds", 0)
+    model.setIntParam("presolving/maxrestarts", 0)
 
     y = [model.addVar(name=f"y_{i}", vtype="C", lb=0.0) for i in range(m_rows)]
     alpha = [model.addVar(name=f"alpha_{j}", vtype="C", lb=0.0) for j in range(n_vars)]
@@ -480,10 +487,15 @@ def solve_explicit_dual_with_scip(
 
     status = str(model.getStatus()).lower()
     if status != "optimal":
-        obj = float("inf") if status in {"unbounded", "inforunbd"} else float("nan")
+        if status in {"unbounded", "inforunbd", "infeasible"}:
+            mapped_status = "unbounded"
+            obj = float("inf")
+        else:
+            mapped_status = status
+            obj = float("nan")
         return DualSolveResult(
             success=False,
-            status=status,
+            status=mapped_status,
             message=status,
             objective_value=obj,
             y=None,

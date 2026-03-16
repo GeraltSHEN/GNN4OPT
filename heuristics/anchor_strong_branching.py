@@ -168,8 +168,12 @@ def run_anchor_strong_branching(
 
         if zero_res.y is not None and zero_res.alpha is not None and zero_res.beta is not None:
             dual_pool.append((zero_res.y, zero_res.alpha, zero_res.beta))
+        else:
+            print("hi, i find None in dual")
         if one_res.y is not None and one_res.alpha is not None and one_res.beta is not None:
             dual_pool.append((one_res.y, one_res.alpha, one_res.beta))
+        else: 
+            print("hi, i find None in dual")
 
     # Evaluate all pool duals on all child objectives to get pseudo bounds.
     for y, alpha, beta in dual_pool[1:]:
