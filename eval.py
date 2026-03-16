@@ -44,8 +44,6 @@ def evaluate(policy, data_loader, device, stats_filename):
                 batch.edge_index,
                 batch.edge_attr,
                 batch.variable_features,
-                batch.con_var_features if hasattr(batch, "con_var_features") else None, 
-                batch.var_var_features if hasattr(batch, "var_var_features") else None,
                 candidates=batch.candidates,
                 n_constraints_per_graph=batch.n_constraints_per_graph,
                 n_variables_per_graph=batch.n_variables_per_graph,

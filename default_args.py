@@ -24,8 +24,6 @@ BASE_DEFAULTS = {
     "isab_num_inds": 50,
     "gnn_backbone": "bipartite",
     "sage_mlp_layers": 2,
-    "ppgn_mlp_layers": 2,
-    "ppgn_layernorm": True,
     "two_fwl": False,
     "sym_break_layers": 2,
     "mp_layers": 2,

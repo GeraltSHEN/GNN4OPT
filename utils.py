@@ -8,10 +8,8 @@ from typing import Dict, Sequence, Union
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
-from torch_geometric.loader.dataloader import Collater
 from torch_geometric.data import Data, Dataset
-from torch_geometric.data import Batch
+from torch_geometric.loader import DataLoader
 
 from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
 
@@ -41,9 +39,7 @@ class BipartiteNodeData(Data):
         candidate_scores: torch.Tensor,
         candidate_relevance: torch.Tensor,
         n_variables_per_graph: int,
-        n_constraints_per_graph: int,
-        con_var_features: torch.Tensor | None, 
-        var_var_features: torch.Tensor | None
+        n_constraints_per_graph: int
     ):
         super().__init__()
         self.constraint_features = constraint_features
@@ -57,10 +53,6 @@ class BipartiteNodeData(Data):
         self.candidate_relevance = candidate_relevance
         self.n_variables_per_graph = n_variables_per_graph
         self.n_constraints_per_graph = n_constraints_per_graph
-        if con_var_features is not None:
-            self.con_var_features = con_var_features
-        if var_var_features is not None:
-            self.var_var_features = var_var_features
 
     def __inc__(self, key, value, *args, **kwargs):
         if key == "edge_index":
@@ -69,8 +61,6 @@ class BipartiteNodeData(Data):
             )
         elif key == "candidates":
             return self.variable_features.size(0)
-        elif key in {"con_var_features", "var_var_features"}:
-            return 0
         return super().__inc__(key, value, *args, **kwargs)
 
 
@@ -179,12 +169,6 @@ class GraphDataset(Dataset):
                                        candidates_feature.unsqueeze(-1)], dim=-1)
 
         candidate_relevance = self.assign_candidate_relevance(candidate_scores)
-
-        if self.two_fwl:
-            con_var_features, var_var_features = self.init_pairwise_features(constraint_features, 
-                                                                             edge_indices, edge_features, variable_features)
-        else:
-            con_var_features, var_var_features = None, None
         graph = BipartiteNodeData(
             constraint_features,
             edge_indices,
@@ -197,8 +181,6 @@ class GraphDataset(Dataset):
             candidate_relevance,
             variable_features.size(0),
             constraint_features.size(0),
-            con_var_features, 
-            var_var_features
         )
         graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
         return graph
@@ -244,105 +226,6 @@ class GraphDataset(Dataset):
         
         else:
             raise ValueError(f"Unknown relevance_type: {relevance_type}")
-    
-    def init_pairwise_features(self, constraint_features, edge_indices, edge_features, variable_features):
-        """
-        Create pairwise features: con_var_features & var_var_features
-        suppsose constraint_features in shape of (m, f_m), variable_features in shape of (n, f_n)
-
-        con_var_features: (m, n, f_m + f_n + 1)
-        where con_var_features[i, j, k] = constraint_features[i, k] + variable_features[j, k] + adjacency[i, j]
-
-        var_var_features: (n, n, f_n + f_n + 1)
-        where var_var_features[j, j', k] = variable_features[j, k] + variable_features[j', k] + 1_{j=j'}
-        """
-        device = variable_features.device
-        dtype = variable_features.dtype
-
-        m, f_m = constraint_features.shape
-        n, f_n = variable_features.shape
-
-        if edge_features.dim() > 1:
-            edge_features = edge_features.squeeze()
-
-        adjacency = torch.sparse_coo_tensor(edge_indices, edge_features, size=(m, n), device=device, dtype=dtype).to_dense().unsqueeze(-1)
-
-        con_var_features = torch.cat(
-            [
-                constraint_features.unsqueeze(1).expand(m, n, f_m),
-                variable_features.unsqueeze(0).expand(m, n, f_n),
-                adjacency,
-            ],
-            dim=-1,
-        )
-
-        identity = torch.eye(n, dtype=dtype, device=device).unsqueeze(-1)
-        var_var_features = torch.cat(
-            [
-                variable_features.unsqueeze(1).expand(n, n, f_n),
-                variable_features.unsqueeze(0).expand(n, n, f_n),
-                identity,
-            ],
-            dim=-1,
-        )
-        return con_var_features, var_var_features
-
-
-class PairwiseCollater:
-    def __init__(self, dataset, follow_batch=None, exclude_keys=None):
-        self.base = Collater(dataset, follow_batch, exclude_keys)
-
-    def __call__(self, data_list):
-        batch = self.base(data_list)
-        if all(hasattr(g, "con_var_features") and hasattr(g, "var_var_features") for g in data_list):
-            con_var, var_var = _collate_pairwise_features(data_list)
-            batch.con_var_features = con_var
-            batch.var_var_features = var_var
-        return batch
-
-
-def _collate_pairwise_features(graphs: Sequence[Data]) -> tuple[torch.Tensor, torch.Tensor]:
-    batch_size = len(graphs)
-    max_constraints = max(g.n_constraints_per_graph for g in graphs)
-    max_variables = max(g.n_variables_per_graph for g in graphs)
-
-    con_var_dim = graphs[0].con_var_features.size(-1)
-    var_var_dim = graphs[0].var_var_features.size(-1)
-
-    con_var_features = graphs[0].con_var_features.new_zeros(
-        (batch_size, max_constraints, max_variables, con_var_dim)
-    )
-    var_var_features = graphs[0].var_var_features.new_zeros(
-        (batch_size, max_variables, max_variables, var_var_dim)
-    )
-
-    for graph_idx, graph in enumerate(graphs):
-        n_constraints = graph.n_constraints_per_graph
-        n_variables = graph.n_variables_per_graph
-        con_var_features[graph_idx, :n_constraints, :n_variables, :] = graph.con_var_features
-        var_var_features[graph_idx, :n_variables, :n_variables, :] = graph.var_var_features
-
-    return con_var_features, var_var_features
-
-
-def collate_bipartite_batch(graphs: Sequence[Data]) -> Batch:
-    if len(graphs) == 0:
-        raise ValueError("Cannot collate an empty batch.")
-
-    has_con_var = [hasattr(graph, "con_var_features") for graph in graphs]
-    has_var_var = [hasattr(graph, "var_var_features") for graph in graphs]
-    has_pairwise = all(has_con_var) and all(has_var_var)
-    if any(has_con_var) != has_pairwise or any(has_var_var) != has_pairwise:
-        raise ValueError("Inconsistent pairwise feature presence across graphs in a batch.")
-
-    if has_pairwise:
-        batch = Batch.from_data_list(graphs, exclude_keys=["con_var_features", "var_var_features"])
-        con_var_features, var_var_features = _collate_pairwise_features(graphs)
-        batch.con_var_features = con_var_features
-        batch.var_var_features = var_var_features
-        return batch
-
-    return Batch.from_data_list(graphs)
 
 
 def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]]:
@@ -351,7 +234,6 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
     print(f'load dataset from {dataset_root}')
     file_pattern = getattr(args, "file_pattern", "sample_*.pkl")
     edge_nfeats = getattr(args, "edge_nfeats", 1)
-    two_fwl = getattr(args, "two_fwl", False)
     subsamples = getattr(args, "subsamples", None)
     subsample_manifest_name = "sample_files.txt"
     subsample_root = None
@@ -434,7 +316,6 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
             dataset = GraphDataset(
                 sample_files,
                 edge_nfeats=edge_nfeats,
-                two_fwl=two_fwl, 
                 args=args,
             )
             data[split_name] = DataLoader(
@@ -443,7 +324,6 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
                 shuffle=cfg["shuffle"],
                 num_workers=8,
                 pin_memory=True,
-                collate_fn=PairwiseCollater(dataset),
             )
         else:
             data[split_name] = None

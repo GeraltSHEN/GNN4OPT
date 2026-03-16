@@ -385,8 +385,6 @@ class GNNPolicy(nn.Module):
         edge_indices,
         edge_features,
         variable_features,
-        con_var_features,
-        var_var_features,
         candidates=None,
         n_constraints_per_graph=None,
         n_variables_per_graph=None,

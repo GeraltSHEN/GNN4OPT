@@ -276,12 +276,6 @@ def _select_anchor_positions_with_model(graph, model_bundle, k: int) -> np.ndarr
     graph = graph.to(device)
     n_constraints = torch.as_tensor([int(graph.n_constraints_per_graph)], device=device)
     n_variables = torch.as_tensor([int(graph.n_variables_per_graph)], device=device)
-    con_var_features = graph.con_var_features if hasattr(graph, "con_var_features") else None
-    var_var_features = graph.var_var_features if hasattr(graph, "var_var_features") else None
-    if con_var_features is not None and con_var_features.dim() == 3:
-        con_var_features = con_var_features.unsqueeze(0)
-    if var_var_features is not None and var_var_features.dim() == 3:
-        var_var_features = var_var_features.unsqueeze(0)
 
     with torch.no_grad():
         logits = policy(
@@ -289,8 +283,6 @@ def _select_anchor_positions_with_model(graph, model_bundle, k: int) -> np.ndarr
             graph.edge_index,
             graph.edge_attr,
             graph.variable_features,
-            con_var_features,
-            var_var_features,
             candidates=graph.candidates,
             n_constraints_per_graph=n_constraints,
             n_variables_per_graph=n_variables,
