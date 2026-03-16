@@ -1,0 +1,25 @@
+{
+  "run_status": "ok",
+  "error": null,
+  "config": "cfg/set_cover_54",
+  "split": "test",
+  "samples_requested": 10,
+  "samples_evaluated": 10,
+  "failures": 0,
+  "k_anchors": 8,
+  "anchor_mode": "trained_model",
+  "top1_match": {
+    "count": 10,
+    "denom": 10,
+    "ratio": 1.0
+  },
+  "avg_truth_score_gap": 0.0,
+  "avg_num_candidates": 124.5,
+  "anchor_contains_best": {
+    "count": 10,
+    "denom": 10,
+    "ratio": 1.0
+  },
+  "model_dir": "models/raw/set_cover_cfg54",
+  "model_step": 375000
+}
