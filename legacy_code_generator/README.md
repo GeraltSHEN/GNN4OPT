@@ -61,7 +61,7 @@ Required to compile PySCIPOpt and PySVMRank
 conda install "cython<3"
 ```
 
-## PySCIPOpt
+## PySCIPOpt (CHANGED!!!!!!!!!)
 
 SCIP's python interface (modified version)
 

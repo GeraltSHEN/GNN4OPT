@@ -221,7 +221,7 @@ class SamplingAgent(scip.Branchrule):
            
             # Do not record inconsistent scores. May happen if SCIP was early stopped (time limit).
             if not any([s < 0 for s in scores]):
-                topk_branching_duals = self.collect_topk_branching_duals(cands_, scores, cutoffbound)
+                # topk_branching_duals = self.collect_topk_branching_duals(cands_, scores, cutoffbound)
 
                 filename = f'{self.out_dir}/sample_{self.episode}_{self.sample_counter}.pkl'
                 with gzip.open(filename, 'wb') as f:
@@ -501,9 +501,9 @@ if __name__ == '__main__':
     valid_size = 20000
     test_size = 20000
     if args.mode == 'debug':
-        train_size //= 1000
-        valid_size //= 1000
-        test_size //= 1000
+        train_size //= 10
+        valid_size //= 10
+        test_size //= 10
     exploration_strategy = 'pscost'
     node_record_prob = 0.05
     time_limit = 3600
