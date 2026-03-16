@@ -703,6 +703,140 @@ def reconstruct_topk_strong_branching_scores(
     }
 
 
+def run_anchor_strong_branching(
+    context: SCIPBranchingContext,
+    action_set: Sequence[int],
+    top_k_action_set: Sequence[int],
+    cutoffbound: float,
+    top_k: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Anchor strong branching with explicit-dual substitution.
+
+    1) Build a dual pool from the two child duals (down/up) of each variable in `top_k_action_set`.
+    2) Evaluate every dual in the pool on all candidates' down/up children.
+    3) For each candidate, keep max estimated child-zero/child-one objectives over the pool.
+    4) Convert to pseudo strong-branching scores and return best + top-k ranking.
+    """
+    candidate_lp_positions = np.asarray(action_set, dtype=np.int64)
+    anchor_lp_positions = np.asarray(top_k_action_set, dtype=np.int64).reshape(-1)
+    if candidate_lp_positions.size == 0:
+        raise ValueError("No candidates available in action_set.")
+    if anchor_lp_positions.size == 0:
+        raise ValueError("top_k_action_set must be non-empty.")
+
+    candidate_set = set(candidate_lp_positions.tolist())
+    invalid = [int(v) for v in anchor_lp_positions.tolist() if int(v) not in candidate_set]
+    if invalid:
+        raise ValueError(f"top_k_action_set contains vars not in action_set: {invalid}")
+
+    # Remove duplicates while preserving order.
+    seen = set()
+    anchor_lp_positions_unique = []
+    for v in anchor_lp_positions.tolist():
+        iv = int(v)
+        if iv not in seen:
+            seen.add(iv)
+            anchor_lp_positions_unique.append(iv)
+    anchor_lp_positions = np.asarray(anchor_lp_positions_unique, dtype=np.int64)
+
+    parent = context.solve_parent_primal()
+    if not parent.success or parent.objective_value is None:
+        raise RuntimeError(f"Parent LP solve failed: {parent.status} ({parent.message})")
+    parent_obj = float(parent.objective_value)
+
+    cand_pos_lookup = {int(lp_pos): idx for idx, lp_pos in enumerate(candidate_lp_positions.tolist())}
+    anchor_positions = np.asarray([cand_pos_lookup[int(v)] for v in anchor_lp_positions.tolist()], dtype=np.int64)
+    n_candidates = int(candidate_lp_positions.shape[0])
+
+    # Precompute child bound overrides for all candidates once.
+    candidate_branches = [context.create_branch_bounds(int(v)) for v in candidate_lp_positions.tolist()]
+
+    dual_pool: List[Dict[str, Any]] = []
+    for anchor_var in anchor_lp_positions.tolist():
+        branch = context.create_branch_bounds(int(anchor_var))
+        down_dual = solve_explicit_dual_with_scip(
+            context.lp,
+            bound_overrides=branch.down_overrides,
+            cutoffbound=cutoffbound,
+        )
+        up_dual = solve_explicit_dual_with_scip(
+            context.lp,
+            bound_overrides=branch.up_overrides,
+            cutoffbound=cutoffbound,
+        )
+        if down_dual.success and down_dual.y is not None:
+            dual_pool.append({"source": "anchor_down", "anchor_lp_pos": int(anchor_var), "dual": down_dual})
+        if up_dual.success and up_dual.y is not None:
+            dual_pool.append({"source": "anchor_up", "anchor_lp_pos": int(anchor_var), "dual": up_dual})
+
+    if not dual_pool:
+        raise RuntimeError("No valid dual solutions collected from top_k_action_set children.")
+
+    child_zero_obj_est = np.full(n_candidates, float("-inf"), dtype=np.float64)
+    child_one_obj_est = np.full(n_candidates, float("-inf"), dtype=np.float64)
+    dual_pool_records: List[Dict[str, Any]] = []
+
+    for dual_row in dual_pool:
+        dual = dual_row["dual"]
+        down_eval = np.full(n_candidates, float("-inf"), dtype=np.float64)
+        up_eval = np.full(n_candidates, float("-inf"), dtype=np.float64)
+        for idx, branch in enumerate(candidate_branches):
+            down_eval[idx] = evaluate_explicit_dual_on_child(
+                context.lp,
+                dual.y,
+                dual.alpha,
+                dual.beta,
+                bound_overrides=branch.down_overrides,
+            )
+            up_eval[idx] = evaluate_explicit_dual_on_child(
+                context.lp,
+                dual.y,
+                dual.alpha,
+                dual.beta,
+                bound_overrides=branch.up_overrides,
+            )
+
+        np.maximum(child_zero_obj_est, down_eval, out=child_zero_obj_est)
+        np.maximum(child_one_obj_est, up_eval, out=child_one_obj_est)
+        dual_pool_records.append(
+            {
+                "source": str(dual_row["source"]),
+                "anchor_lp_pos": int(dual_row["anchor_lp_pos"]),
+                "down_eval": down_eval,
+                "up_eval": up_eval,
+            }
+        )
+
+    pseudo_scores = np.array(
+        [
+            compute_strong_branch_score(parent_obj, child_one_obj_est[i], child_zero_obj_est[i], cutoffbound)
+            for i in range(n_candidates)
+        ],
+        dtype=np.float64,
+    )
+
+    best_position = int(np.nanargmax(pseudo_scores))
+    k_rank = int(min(max(int(top_k if top_k is not None else anchor_lp_positions.size), 1), n_candidates))
+    topk_positions = np.argsort(pseudo_scores)[-k_rank:][::-1]
+
+    return {
+        "parent_obj": parent_obj,
+        "candidate_lp_positions": candidate_lp_positions,
+        "anchor_lp_positions": anchor_lp_positions,
+        "anchor_positions": anchor_positions,
+        "dual_pool_size": len(dual_pool_records),
+        "dual_pool_records": dual_pool_records,
+        "child_zero_obj_est": child_zero_obj_est,
+        "child_one_obj_est": child_one_obj_est,
+        "pseudo_scores": pseudo_scores,
+        "best_position": best_position,
+        "best_lp_pos": int(candidate_lp_positions[best_position]),
+        "topk_positions": topk_positions.astype(np.int64),
+        "topk_lp_positions": candidate_lp_positions[topk_positions].astype(np.int64),
+    }
+
+
 def run_anchor_dual_substitution_with_scip(
     context: SCIPBranchingContext,
     action_set: Sequence[int],

@@ -62,6 +62,7 @@ def main() -> None:
     parser.add_argument("--eval_batch_size", type=int, default=1)
     parser.add_argument("--top_k", type=int, default=8, help="Top-k candidates by original score for SB reconstruction")
     parser.add_argument("--anchor_k", type=int, default=8, help="Number of anchors for dual-substitution demo")
+    parser.add_argument("--policy_seed", type=int, default=0, help="Random seed for anchor-heuristic policy candidate sampling")
     parser.add_argument("--dual_rc_gap_tol", type=float, default=1e-4, help="Raise error if dual_rc_gap_vs_primal exceeds this")
     parser.add_argument(
         "--pseudo_score_tol",
@@ -178,6 +179,54 @@ def main() -> None:
                 f"lp_pos={int(anchor_res['candidate_lp_positions'][pos])} "
                 f"orig_score={float(anchor_res['candidate_scores'][pos]):.12g} "
                 f"pseudo_score={float(anchor_res['pseudo_scores'][pos]):.12g}"
+            )
+
+        candidate_lp_positions = np.asarray(record.action_set, dtype=np.int64)
+        candidate_scores = np.asarray(record.scores, dtype=np.float64)
+        k_policy = int(min(max(int(args.top_k), 1), candidate_lp_positions.size))
+
+        # Policy: include one true-best candidate, fill remaining with random candidates.
+        true_best_pos = int(np.argmax(candidate_scores))
+        all_positions = np.arange(candidate_lp_positions.size, dtype=np.int64)
+        remaining_positions = all_positions[all_positions != true_best_pos]
+        rng = np.random.RandomState(int(args.policy_seed) + int(sample_idx))
+        n_random = max(k_policy - 1, 0)
+        if n_random > 0:
+            sampled_positions = rng.choice(remaining_positions, size=n_random, replace=False)
+            policy_positions = np.concatenate(([true_best_pos], sampled_positions.astype(np.int64)))
+        else:
+            policy_positions = np.asarray([true_best_pos], dtype=np.int64)
+        policy_action_set = candidate_lp_positions[policy_positions]
+
+        heur_res = sdh.run_anchor_strong_branching(
+            context=context,
+            action_set=candidate_lp_positions,
+            top_k_action_set=policy_action_set,
+            cutoffbound=float(record.cutoffbound),
+            top_k=k_policy,
+        )
+
+        true_topk_positions = np.argsort(candidate_scores)[-k_policy:][::-1]
+        true_topk_lp_positions = candidate_lp_positions[true_topk_positions]
+        heur_topk_lp_positions = heur_res["topk_lp_positions"]
+        heur_top1_lp_pos = int(heur_res["best_lp_pos"])
+
+        print(f"heur_policy_input_top{k_policy}_lp_positions: {policy_action_set.tolist()}")
+        print(f"heur_policy_dual_pool_size: {heur_res['dual_pool_size']}")
+        print(f"heur_policy_top{k_policy}_lp_positions: {heur_topk_lp_positions.tolist()}")
+        print(f"true_top{k_policy}_lp_positions: {true_topk_lp_positions.tolist()}")
+        print(f"heur_policy_top1_lp_pos: {heur_top1_lp_pos}")
+
+        true_best_score = float(np.max(candidate_scores))
+        true_best_positions = np.where(np.isclose(candidate_scores, true_best_score, rtol=1e-12, atol=1e-12))[0]
+        true_best_lp_positions = candidate_lp_positions[true_best_positions]
+        top1_match = heur_top1_lp_pos in set(int(v) for v in true_best_lp_positions.tolist())
+        print(f"true_best_lp_positions: {true_best_lp_positions.tolist()}")
+        print(f"heur_policy_top1_match_true_best_tie: {top1_match}")
+        if not top1_match:
+            raise RuntimeError(
+                f"[sample_index={sample_idx}] run_anchor_strong_branching top-1 mismatch: "
+                f"heur_top1={heur_top1_lp_pos}, true_best_set={true_best_lp_positions.tolist()}"
             )
 
         if dual_rc_gap is not None and dual_rc_gap > args.dual_rc_gap_tol:
