@@ -4,8 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-import utils
+
 import scip_data_helper as sdh
+import utils
 
 
 def _build_load_args(dataset_path: Path, eval_batch_size: int) -> SimpleNamespace:
@@ -30,106 +31,72 @@ def _build_graph_dataset_args() -> SimpleNamespace:
     )
 
 
+def _select_sample_path(dataset_path: Path, split: str, sample_index: int, eval_batch_size: int) -> Path:
+    data = utils.load_data(_build_load_args(dataset_path, eval_batch_size), for_training=False)
+    split_key = f"{split}_files"
+    split_files = data.get(split_key, [])
+    if not split_files:
+        raise RuntimeError(f"No sample files found for split '{split}' under {dataset_path}")
+
+    if sample_index < 0 or sample_index >= len(split_files):
+        raise IndexError(f"sample_index {sample_index} out of range for split '{split}' (size={len(split_files)})")
+
+    return Path(split_files[sample_index])
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Demo: recover unnormalized SCIP features from saved samples.")
+    parser = argparse.ArgumentParser(description="Compact v2 demo: recover unnormalized LP and branch metrics with SCIP only")
     parser.add_argument("dataset_path", type=Path, help="Dataset directory with train/valid/test sample_*.pkl files")
     parser.add_argument("--split", choices=["train", "val", "test"], default="train")
     parser.add_argument("--sample_index", type=int, default=0)
     parser.add_argument("--eval_batch_size", type=int, default=1)
-    parser.add_argument(
-        "--solve_reconstructed_lp",
-        action="store_true",
-        help="Solve reconstructed LP and compare objective with recovered state objective.",
-    )
-    parser.add_argument(
-        "--solver",
-        choices=["scip"],
-        default="scip",
-        help="Solver backend for reconstructed LP (default: scip).",
-    )
-    parser.add_argument(
-        "--scip_as_mip",
-        action="store_true",
-        help="When --solver scip is used, solve as MIP using recovered variable types (default: LP relaxation).",
-    )
-    parser.add_argument(
-        "--no_assume_binary_bounds",
-        action="store_true",
-        help="Disable fallback binary bounds [0,1] when explicit lb/ub metadata is unavailable.",
-    )
-    parser.add_argument(
-        "--strong_branch_top_k",
-        type=int,
-        default=8,
-        help="Top-k candidates (by original score) for strong-branch score reconstruction.",
-    )
-    parser.add_argument(
-        "--anchor_k",
-        type=int,
-        default=8,
-        help="Number of anchor candidates for anchor-dual substitution demonstration.",
-    )
+    parser.add_argument("--top_k", type=int, default=8, help="Top-k candidates by original score for SB reconstruction")
+    parser.add_argument("--anchor_k", type=int, default=8, help="Number of anchors for dual-substitution demo")
     args = parser.parse_args()
 
-    data = utils.load_data(_build_load_args(args.dataset_path, args.eval_batch_size), for_training=False)
-    split_key = f"{args.split}_files"
-    split_files = data.get(split_key, [])
-    if not split_files:
-        raise RuntimeError(f"No sample files found for split '{args.split}' under {args.dataset_path}")
-
-    if args.sample_index < 0 or args.sample_index >= len(split_files):
-        raise IndexError(
-            f"sample_index {args.sample_index} out of range for split '{args.split}' (size={len(split_files)})"
-        )
-
-    sample_path = Path(split_files[args.sample_index])
+    sample_path = _select_sample_path(args.dataset_path, args.split, args.sample_index, args.eval_batch_size)
     print(f"sample_file: {sample_path}")
 
-    # 1) Load via utils.py exactly as training code does.
     graph = utils.GraphDataset([sample_path], args=_build_graph_dataset_args()).get(0)
     print(
         "loaded_with_utils: "
-        f"n_constraints={graph.n_constraints_per_graph}, "
-        f"n_variables={graph.n_variables_per_graph}, "
-        f"n_edges={graph.edge_index.shape[1]}, "
+        f"n_constraints={graph.n_constraints_per_graph} "
+        f"n_variables={graph.n_variables_per_graph} "
+        f"n_edges={graph.edge_index.shape[1]} "
         f"n_candidates={graph.nb_candidates}"
     )
 
-    # 2) Recover unnormalized features from raw saved state.
     sample = utils.load_gzip(sample_path)
-    sample_state, sample_action, sample_action_set, sample_scores, cutoffbound = sdh.unpack_sample_data(sample["data"])
-    unnormalized_state = sdh.reconstruct_unnormalized_state(sample_state)
+    record = sdh.unpack_sample_data(sample["data"])
+    context = sdh.SCIPBranchingContext.from_sample_state(record.sample_state)
 
-    lp = sdh.extract_lp_components(
-        unnormalized_state,
-        assume_binary_bounds=(not args.no_assume_binary_bounds),
-    )
+    obj_from_state = sdh.compute_primal_objective(context.lp)
+    print(f"objective_from_solval_and_coef: {obj_from_state:.12g}")
 
-    # 3) Objective checks aligned with 02_generate_samples.py logic:
-    #    primal: c^T x (+ offset)
-    #    dual+rc: row_duals^T row_bias + redcosts^T solvals
-    obj_primal = sdh.compute_primal_objective(lp)
-    print(f"objective_from_solval_and_coef: {obj_primal:.12g}")
-
-    if lp["row_duals"] is not None and lp["reduced_costs"] is not None:
-        obj_dual_rc = sdh.compute_dual_reduced_cost_objective(lp)
+    if context.lp.row_duals is not None and context.lp.reduced_costs is not None:
+        obj_dual_rc = sdh.compute_dual_plus_reduced_cost_objective(context.lp)
         print(f"objective_from_dual_plus_rc:  {obj_dual_rc:.12g}")
-        print(f"dual_rc_gap_vs_primal:        {abs(obj_dual_rc - obj_primal):.3e}")
+        print(f"dual_rc_gap_vs_primal:        {abs(obj_dual_rc - obj_from_state):.3e}")
     else:
-        print("objective_from_dual_plus_rc:  unavailable (missing duals or reduced costs in features)")
+        print("objective_from_dual_plus_rc:  unavailable")
 
-    print(f"expert_action_node: {sample_action}")
-    print(f"num_action_set: {len(sample_action_set)}")
-    print(f"num_scores: {len(sample_scores)}")
-    print(f"cutoffbound: {cutoffbound:.12g}")
+    parent = context.solve_parent_primal()
+    print(f"parent_lp_status: {parent.status}")
+    if parent.success and parent.objective_value is not None:
+        print(f"objective_from_reconstructed_lp: {parent.objective_value:.12g}")
+        print(f"solve_gap_vs_state_primal:      {abs(float(parent.objective_value) - obj_from_state):.3e}")
+
+    print(f"expert_action_node: {record.action}")
+    print(f"num_action_set: {len(record.action_set)}")
+    print(f"num_scores: {len(record.scores)}")
+    print(f"cutoffbound: {record.cutoffbound:.12g}")
 
     sb_topk = sdh.reconstruct_topk_strong_branching_scores(
-        lp_components=lp,
-        action_set=sample_action_set,
-        candidate_scores=sample_scores,
-        cutoffbound=cutoffbound,
-        top_k=args.strong_branch_top_k,
-        as_mip=args.scip_as_mip,
+        context=context,
+        action_set=record.action_set,
+        candidate_scores=record.scores,
+        cutoffbound=record.cutoffbound,
+        top_k=args.top_k,
     )
     print(f"reconstructed_strong_branching_topk: {sb_topk['k']}")
     for row in sb_topk["topk_by_score"]:
@@ -139,9 +106,6 @@ def main() -> None:
             f"lp_pos={row['cand_lp_pos']} "
             f"orig_score={row['cand_score']:.12g} "
             f"reconstructed_score={row['computed_score']:.12g} "
-            f"parent_obj={row['parent_lp_obj']:.12g} "
-            f"child1_obj={row['child_one_lp_obj']:.12g} "
-            f"child0_obj={row['child_zero_lp_obj']:.12g} "
             f"down_status={row['down_status']} "
             f"up_status={row['up_status']}"
         )
@@ -150,61 +114,42 @@ def main() -> None:
     print(f"sb_rank_match: {sb_topk['topk_rank_original'] == sb_topk['topk_rank_computed']}")
 
     anchor_res = sdh.run_anchor_dual_substitution_with_scip(
-        lp_components=lp,
-        action_set=sample_action_set,
-        candidate_scores=sample_scores,
-        cutoffbound=cutoffbound,
+        context=context,
+        action_set=record.action_set,
+        candidate_scores=record.scores,
+        cutoffbound=record.cutoffbound,
         anchor_k=args.anchor_k,
-        as_mip=args.scip_as_mip,
     )
     print(f"anchor_k_eff: {len(anchor_res['anchor_positions'])}")
     print(f"anchor_positions: {anchor_res['anchor_positions'].tolist()}")
-    print(f"anchor_lp_positions: {anchor_res['candidate_lp_positions'][anchor_res['anchor_positions']].tolist()}")
     print(f"anchor_dual_pool_size: {len(anchor_res['dual_pool_records'])}")
+
     for row in anchor_res["anchor_child_records"]:
-        down_eval = "None" if row["down_dual_eval_self"] is None else f"{row['down_dual_eval_self']:.12g}"
-        down_gap = "None" if row["down_dual_eval_gap"] is None else f"{row['down_dual_eval_gap']:.3e}"
-        up_eval = "None" if row["up_dual_eval_self"] is None else f"{row['up_dual_eval_self']:.12g}"
-        up_gap = "None" if row["up_dual_eval_gap"] is None else f"{row['up_dual_eval_gap']:.3e}"
         print(
             "anchor_child_row: "
             f"cand_pos={row['cand_position']} "
             f"lp_pos={row['cand_lp_pos']} "
             f"down_status={row['down_status']} down_obj={row['down_obj']:.12g} "
             f"down_dual_status={row['down_dual_status']} "
-            f"down_dual_eval_self={down_eval} down_dual_eval_gap={down_gap} "
+            f"down_dual_eval_gap={row['down_dual_eval_gap']} "
             f"up_status={row['up_status']} up_obj={row['up_obj']:.12g} "
             f"up_dual_status={row['up_dual_status']} "
-            f"up_dual_eval_self={up_eval} up_dual_eval_gap={up_gap}"
+            f"up_dual_eval_gap={row['up_dual_eval_gap']}"
         )
 
     pseudo_scores = anchor_res["pseudo_scores"]
-    pseudo_order = np.argsort(pseudo_scores)[-args.strong_branch_top_k:][::-1]
+    top_pseudo_positions = np.argsort(pseudo_scores)[-args.top_k:][::-1]
     print(f"anchor_selected_position: {anchor_res['selected_position']}")
     print(f"anchor_selected_lp_pos: {anchor_res['selected_lp_pos']}")
-    print(f"anchor_top{args.strong_branch_top_k}_by_pseudo:")
-    for pos in pseudo_order.tolist():
+    print(f"anchor_top{args.top_k}_by_pseudo:")
+    for pos in top_pseudo_positions.tolist():
         print(
             "anchor_pseudo_row: "
             f"cand_pos={pos} "
             f"lp_pos={int(anchor_res['candidate_lp_positions'][pos])} "
             f"orig_score={float(anchor_res['candidate_scores'][pos]):.12g} "
-            f"pseudo_score={float(anchor_res['pseudo_scores'][pos]):.12g} "
-            f"child1_est={float(anchor_res['child_one_obj_est'][pos]):.12g} "
-            f"child0_est={float(anchor_res['child_zero_obj_est'][pos]):.12g}"
+            f"pseudo_score={float(anchor_res['pseudo_scores'][pos]):.12g}"
         )
-
-    if args.solve_reconstructed_lp:
-        if args.solver == "scip":
-            result = sdh.solve_reconstructed_lp_with_scip(lp, as_mip=args.scip_as_mip)
-        else:
-            raise NotImplementedError
-        print(f"reconstructed_lp_solved: {result['success']}")
-        print(f"reconstructed_lp_status: {result['status']} ({result['message']})")
-        if result["success"]:
-            obj_solved = float(result["objective_value"])
-            print(f"objective_from_reconstructed_lp: {obj_solved:.12g}")
-            print(f"solve_gap_vs_state_primal:      {abs(obj_solved - obj_primal):.3e}")
 
 
 if __name__ == "__main__":

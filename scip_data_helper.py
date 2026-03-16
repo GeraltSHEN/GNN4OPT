@@ -1,32 +1,101 @@
 import gzip
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import pyscipopt as scip
 
 import numpy as np
 import scipy.sparse as sp
 
 
 SampleState = Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]
+Bound = Tuple[Optional[float], Optional[float]]
+BoundOverrides = Dict[int, Bound]
+
+
+@dataclass(frozen=True)
+class SampleRecord:
+    sample_state: SampleState
+    action: int
+    action_set: np.ndarray
+    scores: np.ndarray
+    cutoffbound: float
+
+
+@dataclass
+class LPComponents:
+    A_ub: sp.csr_matrix
+    b_ub: np.ndarray
+    objective_coefficients: np.ndarray
+    lp_solution: np.ndarray
+    bounds: List[Bound]
+    objective_sense: str
+    objective_offset: float
+    row_duals: Optional[np.ndarray]
+    reduced_costs: Optional[np.ndarray]
+
+
+@dataclass
+class SolveResult:
+    success: bool
+    status: str
+    message: str
+    objective_value: Optional[float]
+    x: Optional[np.ndarray]
+    row_duals: Optional[np.ndarray]
+    reduced_costs: Optional[np.ndarray]
+    raw_result: Any = None
+
+
+@dataclass
+class DualSolveResult:
+    success: bool
+    status: str
+    message: str
+    objective_value: float
+    y: Optional[np.ndarray]
+    alpha: Optional[np.ndarray]
+    beta: Optional[np.ndarray]
+    raw_result: Any = None
+
+
+@dataclass(frozen=True)
+class BranchBounds:
+    var_idx: int
+    lpsol: float
+    lb_local: float
+    ub_local: float
+    down_ub: float
+    up_lb: float
+    down_overrides: BoundOverrides
+    up_overrides: BoundOverrides
 
 
 def load_sample(path: Union[str, Path]) -> Dict[str, Any]:
-    path = Path(path)
-    with gzip.open(path, "rb") as fh:
+    with gzip.open(Path(path), "rb") as fh:
         return pickle.load(fh)
 
 
-def unpack_sample_data(data: Sequence[Any]) -> Tuple[SampleState, int, Sequence[int], Sequence[float], float]:
+def unpack_sample_data(data: Sequence[Any]) -> SampleRecord:
     if not isinstance(data, (list, tuple)):
         raise TypeError(f"Expected sample['data'] to be list/tuple, got {type(data)}")
     if len(data) < 5:
         raise ValueError(f"Expected at least 5 entries in sample['data'], got {len(data)}")
+
     sample_state = data[0]
-    sample_action = data[2]
-    sample_action_set = data[3]
-    sample_scores = data[4]
+    sample_action = int(data[2])
+    sample_action_set = np.asarray(data[3], dtype=np.int64)
+    sample_scores = np.asarray(data[4], dtype=np.float64)
     cutoffbound = float(data[5]) if len(data) >= 6 and data[5] is not None else float("inf")
-    return sample_state, sample_action, sample_action_set, sample_scores, cutoffbound
+
+    return SampleRecord(
+        sample_state=sample_state,
+        action=sample_action,
+        action_set=sample_action_set,
+        scores=sample_scores,
+        cutoffbound=cutoffbound,
+    )
 
 
 def _column(values: np.ndarray, indices: Dict[str, int], name: str) -> np.ndarray:
@@ -41,11 +110,6 @@ def _column(values: np.ndarray, indices: Dict[str, int], name: str) -> np.ndarra
 
 
 def reconstruct_unnormalized_state(sample_state: SampleState) -> SampleState:
-    """
-    Reconstruct unnormalized SCIP features from the normalized state in sample['data'][0].
-
-    Requires metadata emitted by legacy_code_generator.utilities.extract_state.
-    """
     if not isinstance(sample_state, (list, tuple)) or len(sample_state) != 3:
         raise ValueError("sample_state must be a (constraint_dict, edge_dict, variable_dict) tuple/list")
 
@@ -79,7 +143,9 @@ def reconstruct_unnormalized_state(sample_state: SampleState) -> SampleState:
     if "bias" in constraint_feature_indices:
         constraint_values[:, constraint_feature_indices["bias"]] *= constraint_row_norms
     if "dualsol_val_normalized" in constraint_feature_indices:
-        constraint_values[:, constraint_feature_indices["dualsol_val_normalized"]] *= (constraint_row_norms * obj_norm)
+        constraint_values[:, constraint_feature_indices["dualsol_val_normalized"]] *= (
+            constraint_row_norms * obj_norm
+        )
     if "age" in constraint_feature_indices:
         constraint_values[:, constraint_feature_indices["age"]] *= age_norm_denom
 
@@ -113,8 +179,11 @@ def reconstruct_unnormalized_state(sample_state: SampleState) -> SampleState:
     )
 
 
-def _build_bounds(variable_dict: Dict[str, Any], variable_values: np.ndarray, variable_feature_indices: Dict[str, int],
-                  assume_binary_bounds: bool) -> List[Tuple[Union[float, None], Union[float, None]]]:
+def _build_bounds(
+    variable_dict: Dict[str, Any],
+    variable_values: np.ndarray,
+    variable_feature_indices: Dict[str, int],
+) -> List[Bound]:
     n_vars = variable_values.shape[0]
     reconstruction = variable_dict.get("reconstruction", {})
 
@@ -130,14 +199,13 @@ def _build_bounds(variable_dict: Dict[str, Any], variable_values: np.ndarray, va
         if rec_ubs.shape[0] == n_vars:
             ubs = rec_ubs
 
-    if assume_binary_bounds and "type_0" in variable_feature_indices:
-        type_binary = variable_values[:, variable_feature_indices["type_0"]] > 0.5
-        missing_lb = type_binary & np.isnan(lbs)
-        missing_ub = type_binary & np.isnan(ubs)
-        lbs[missing_lb] = 0.0
-        ubs[missing_ub] = 1.0
+    # v2 convention: always assume missing binary bounds are [0, 1].
+    if "type_0" in variable_feature_indices:
+        is_binary = variable_values[:, variable_feature_indices["type_0"]] > 0.5
+        lbs[np.isnan(lbs) & is_binary] = 0.0
+        ubs[np.isnan(ubs) & is_binary] = 1.0
 
-    bounds: List[Tuple[Union[float, None], Union[float, None]]] = []
+    bounds: List[Bound] = []
     for lb, ub in zip(lbs, ubs):
         lbv = None if np.isnan(lb) or np.isinf(lb) else float(lb)
         ubv = None if np.isnan(ub) or np.isinf(ub) else float(ub)
@@ -145,13 +213,7 @@ def _build_bounds(variable_dict: Dict[str, Any], variable_values: np.ndarray, va
     return bounds
 
 
-def extract_lp_components(unnormalized_state: SampleState, assume_binary_bounds: bool = True) -> Dict[str, Any]:
-    """
-    Convert a recovered state into LP data in canonical form:
-    minimize/maximize c^T x + offset, subject to A_ub x <= b_ub and variable bounds.
-
-    The row splitting/sign convention matches 02_generate_samples.py.
-    """
+def extract_lp_components(unnormalized_state: SampleState) -> LPComponents:
     constraint_dict, edge_dict, variable_dict = unnormalized_state
 
     constraint_values = np.asarray(constraint_dict["values"], dtype=np.float64)
@@ -190,180 +252,52 @@ def extract_lp_components(unnormalized_state: SampleState, assume_binary_bounds:
     objective_sense = str(reconstruction.get("objective_sense", "minimize")).lower()
     objective_offset = float(reconstruction.get("objective_offset", 0.0))
 
-    bounds = _build_bounds(variable_dict, variable_values, variable_feature_indices, assume_binary_bounds)
+    bounds = _build_bounds(variable_dict, variable_values, variable_feature_indices)
 
-    return {
-        "A_ub": A_ub,
-        "b_ub": b_ub,
-        "objective_coefficients": c,
-        "lp_solution": x_lp,
-        "reduced_costs": reduced_costs,
-        "row_duals": row_duals,
-        "objective_sense": objective_sense,
-        "objective_offset": objective_offset,
-        "bounds": bounds,
-        "variable_values": variable_values,
-        "variable_feature_indices": variable_feature_indices,
-    }
+    return LPComponents(
+        A_ub=A_ub,
+        b_ub=np.asarray(b_ub, dtype=np.float64),
+        objective_coefficients=np.asarray(c, dtype=np.float64),
+        lp_solution=np.asarray(x_lp, dtype=np.float64),
+        bounds=bounds,
+        objective_sense=objective_sense,
+        objective_offset=objective_offset,
+        row_duals=None if row_duals is None else np.asarray(row_duals, dtype=np.float64),
+        reduced_costs=None if reduced_costs is None else np.asarray(reduced_costs, dtype=np.float64),
+    )
 
 
-def compute_primal_objective(lp_components: Dict[str, Any], x: Union[np.ndarray, None] = None) -> float:
-    coeffs = np.asarray(lp_components["objective_coefficients"], dtype=np.float64)
-    if x is None:
-        x = np.asarray(lp_components["lp_solution"], dtype=np.float64)
-    else:
-        x = np.asarray(x, dtype=np.float64)
-    return float(np.dot(coeffs, x) + float(lp_components.get("objective_offset", 0.0)))
+def compute_primal_objective(lp: LPComponents, x: Optional[np.ndarray] = None) -> float:
+    coeffs = np.asarray(lp.objective_coefficients, dtype=np.float64)
+    vals = lp.lp_solution if x is None else np.asarray(x, dtype=np.float64)
+    return float(np.dot(coeffs, vals) + lp.objective_offset)
 
 
-def compute_dual_reduced_cost_objective(lp_components: Dict[str, Any], include_offset: bool = False) -> float:
-    row_duals = lp_components.get("row_duals")
-    reduced_costs = lp_components.get("reduced_costs")
-    if row_duals is None or reduced_costs is None:
-        raise ValueError("row_duals and reduced_costs are required to compute dual+rc objective")
+def compute_dual_plus_reduced_cost_objective(
+    lp: LPComponents,
+    row_duals: Optional[np.ndarray] = None,
+    reduced_costs: Optional[np.ndarray] = None,
+    x: Optional[np.ndarray] = None,
+    include_offset: bool = False,
+) -> float:
+    y = lp.row_duals if row_duals is None else np.asarray(row_duals, dtype=np.float64)
+    rc = lp.reduced_costs if reduced_costs is None else np.asarray(reduced_costs, dtype=np.float64)
+    if y is None or rc is None:
+        raise ValueError("row_duals and reduced_costs are required")
 
-    row_duals = np.asarray(row_duals, dtype=np.float64)
-    reduced_costs = np.asarray(reduced_costs, dtype=np.float64)
-    row_bias = np.asarray(lp_components["b_ub"], dtype=np.float64)
-    x_lp = np.asarray(lp_components["lp_solution"], dtype=np.float64)
-
-    value = float(np.dot(row_duals, row_bias) + np.dot(reduced_costs, x_lp))
+    vals = lp.lp_solution if x is None else np.asarray(x, dtype=np.float64)
+    value = float(np.dot(y, lp.b_ub) + np.dot(rc, vals))
     if include_offset:
-        value += float(lp_components.get("objective_offset", 0.0))
+        value += lp.objective_offset
     return value
 
 
-def solve_reconstructed_lp_with_scip(
-    lp_components: Dict[str, Any],
-    as_mip: bool = False,
-    display_verblevel: int = 0,
-    bound_overrides: Union[None, Dict[int, Tuple[Union[float, None], Union[float, None]]]] = None,
-) -> Dict[str, Any]:
-    """
-    Solve reconstructed LP/MIP directly with SCIP defaults via PySCIPOpt.
-
-    Parameters
-    ----------
-    lp_components : dict
-        Output of `extract_lp_components`.
-    as_mip : bool
-        If True, recover variable integrality from one-hot variable type features
-        (`type_0`, `type_1`, `type_2`, `type_3`). If False, solve LP relaxation.
-    display_verblevel : int
-        SCIP display verbosity (`display/verblevel`).
-    """
-    try:
-        import pyscipopt as scip
-        from pyscipopt import quicksum
-    except Exception as exc:
-        raise RuntimeError(
-            "PySCIPOpt is required for SCIP-based reconstruction solve."
-        ) from exc
-
-    sense = str(lp_components.get("objective_sense", "minimize")).lower()
-    maximize = sense.startswith("max")
-    c = np.asarray(lp_components["objective_coefficients"], dtype=np.float64)
-    b_ub = np.asarray(lp_components["b_ub"], dtype=np.float64)
-    A_ub = lp_components["A_ub"].tocsr()
-    bounds = lp_components.get("bounds")
-    objective_offset = float(lp_components.get("objective_offset", 0.0))
-
-    variable_values = np.asarray(lp_components.get("variable_values"), dtype=np.float64)
-    variable_feature_indices = lp_components.get("variable_feature_indices", {})
-
-    model = scip.Model()
-    model.setIntParam("display/verblevel", int(display_verblevel))
-
-    vars_ = []
-    inf = model.infinity()
-    for j in range(c.shape[0]):
-        lb, ub = bounds[j] if bounds is not None else (None, None)
-        if bound_overrides is not None and j in bound_overrides:
-            lb_override, ub_override = bound_overrides[j]
-            if lb_override is not None:
-                lb = float(lb_override) if lb is None else max(float(lb), float(lb_override))
-            if ub_override is not None:
-                ub = float(ub_override) if ub is None else min(float(ub), float(ub_override))
-
-        if lb is not None and ub is not None and float(lb) > float(ub):
-            return {
-                "success": False,
-                "status": "infeasible",
-                "message": "infeasible after applying bound overrides",
-                "x": None,
-                "objective_value": None,
-                "raw_result": None,
-            }
-
-        lbv = -inf if lb is None else float(lb)
-        ubv = +inf if ub is None else float(ub)
-
-        vtype = "C"
-        if as_mip and variable_values.size > 0:
-            is_bin = "type_0" in variable_feature_indices and variable_values[j, variable_feature_indices["type_0"]] > 0.5
-            is_int = "type_1" in variable_feature_indices and variable_values[j, variable_feature_indices["type_1"]] > 0.5
-            is_impl = "type_2" in variable_feature_indices and variable_values[j, variable_feature_indices["type_2"]] > 0.5
-            if is_bin:
-                vtype = "B"
-            elif is_int or is_impl:
-                vtype = "I"
-
-        var = model.addVar(
-            name=f"x_{j}",
-            vtype=vtype,
-            lb=lbv,
-            ub=ubv,
-        )
-        vars_.append(var)
-
-    obj_expr = quicksum(float(c[j]) * vars_[j] for j in range(c.shape[0]))
-    model.setObjective(obj_expr, sense="maximize" if maximize else "minimize")
-
-    cons_ = []
-    for i in range(A_ub.shape[0]):
-        row_start, row_end = A_ub.indptr[i], A_ub.indptr[i + 1]
-        idxs = A_ub.indices[row_start:row_end]
-        vals = A_ub.data[row_start:row_end]
-        cons_expr = quicksum(float(v) * vars_[int(j)] for j, v in zip(idxs, vals))
-        cons_.append(model.addCons(cons_expr <= float(b_ub[i]), name=f"c_{i}"))
-
-    model.optimize()
-    status = str(model.getStatus()).lower()
-
-    out = {
-        "success": status == "optimal",
-        "status": status,
-        "message": status,
-        "x": None,
-        "objective_value": None,
-        "row_duals": None,
-        "row_bias": None,
-        "reduced_costs": None,
-        "dual_obj_row_rc": None,
-        "raw_result": model,
-    }
-
-    if status == "optimal":
-        sol = model.getBestSol()
-        x = np.asarray([model.getSolVal(sol, var) for var in vars_], dtype=np.float64)
-        obj = float(model.getObjVal()) + objective_offset
-        out["x"] = x
-        out["objective_value"] = obj
-
-        row_bias = np.asarray(b_ub, dtype=np.float64).copy()
-        row_duals = np.asarray([float(model.getDualsolLinear(cons)) for cons in cons_], dtype=np.float64)
-        reduced_costs = np.asarray([float(model.getVarRedcost(var)) for var in vars_], dtype=np.float64)
-        dual_obj_row_rc = None
-
-        out["row_duals"] = row_duals
-        out["row_bias"] = row_bias
-        out["reduced_costs"] = reduced_costs
-        out["dual_obj_row_rc"] = dual_obj_row_rc
-
-    return out
-
-
-def compute_strong_branch_score(parent_obj: float, child_one_obj: float, child_zero_obj: float, cutoffbound: float) -> float:
+def compute_strong_branch_score(
+    parent_obj: float,
+    child_one_obj: float,
+    child_zero_obj: float,
+    cutoffbound: float,
+) -> float:
     child_one_obj_capped = min(float(child_one_obj), float(cutoffbound))
     child_zero_obj_capped = min(float(child_zero_obj), float(cutoffbound))
     gain_one = max(child_one_obj_capped - float(parent_obj), 1e-9)
@@ -371,7 +305,7 @@ def compute_strong_branch_score(parent_obj: float, child_one_obj: float, child_z
     return float(gain_one * gain_zero)
 
 
-def _bounds_to_arrays(bounds: Sequence[Tuple[Union[float, None], Union[float, None]]], n_vars: int) -> Tuple[np.ndarray, np.ndarray]:
+def _bounds_to_arrays(bounds: Sequence[Bound], n_vars: int) -> Tuple[np.ndarray, np.ndarray]:
     lbs = np.full(n_vars, -np.inf, dtype=np.float64)
     ubs = np.full(n_vars, +np.inf, dtype=np.float64)
     for j in range(n_vars):
@@ -386,12 +320,13 @@ def _bounds_to_arrays(bounds: Sequence[Tuple[Union[float, None], Union[float, No
 def _apply_bound_overrides(
     lbs: np.ndarray,
     ubs: np.ndarray,
-    bound_overrides: Union[None, Dict[int, Tuple[Union[float, None], Union[float, None]]]] = None,
+    bound_overrides: Optional[BoundOverrides],
 ) -> Tuple[np.ndarray, np.ndarray, bool]:
     lbs = np.asarray(lbs, dtype=np.float64).copy()
     ubs = np.asarray(ubs, dtype=np.float64).copy()
     if bound_overrides is None:
         return lbs, ubs, True
+
     for j, (lb_override, ub_override) in bound_overrides.items():
         if lb_override is not None:
             lbs[j] = max(lbs[j], float(lb_override))
@@ -402,224 +337,122 @@ def _apply_bound_overrides(
     return lbs, ubs, True
 
 
-def solve_lp_with_dual_signature_scip(
-    lp_components: Dict[str, Any],
-    bound_overrides: Union[None, Dict[int, Tuple[Union[float, None], Union[float, None]]]] = None,
+def solve_lp_with_scip(
+    lp: LPComponents,
+    bound_overrides: Optional[BoundOverrides] = None,
     display_verblevel: int = 0,
-) -> Dict[str, Any]:
-    """
-    Solve LP with SCIP and return an explicit dual signature:
-    - main row duals (A_ub x <= b_ub)
-    - lower-bound row duals (-x_j <= -lb_j)
-    - upper-bound row duals ( x_j <=  ub_j)
-    """
-    try:
-        import pyscipopt as scip
-        from pyscipopt import quicksum
-    except Exception as exc:
-        raise RuntimeError("PySCIPOpt is required for SCIP-based LP solve.") from exc
+) -> SolveResult:
+    c = np.asarray(lp.objective_coefficients, dtype=np.float64)
+    b_ub = np.asarray(lp.b_ub, dtype=np.float64)
+    A_ub = lp.A_ub.tocsr()
+    maximize = lp.objective_sense.startswith("max")
 
-    c = np.asarray(lp_components["objective_coefficients"], dtype=np.float64)
-    b_ub = np.asarray(lp_components["b_ub"], dtype=np.float64)
-    A_ub = lp_components["A_ub"].tocsr()
-    objective_offset = float(lp_components.get("objective_offset", 0.0))
-    bounds = lp_components.get("bounds")
-    if bounds is None:
-        raise ValueError("lp_components['bounds'] is required for dual-signature solve.")
-
-    parent_lbs, parent_ubs = _bounds_to_arrays(bounds, int(c.shape[0]))
+    parent_lbs, parent_ubs = _bounds_to_arrays(lp.bounds, int(c.shape[0]))
     lbs, ubs, feasible = _apply_bound_overrides(parent_lbs, parent_ubs, bound_overrides)
     if not feasible:
-        return {
-            "success": False,
-            "status": "infeasible",
-            "message": "infeasible after applying bound overrides",
-            "x": None,
-            "objective_value": None,
-            "dual_signature": None,
-            "raw_result": None,
-        }
+        return SolveResult(
+            success=False,
+            status="infeasible",
+            message="infeasible after applying bound overrides",
+            objective_value=None,
+            x=None,
+            row_duals=None,
+            reduced_costs=None,
+            raw_result=None,
+        )
 
     model = scip.Model()
     model.setIntParam("display/verblevel", int(display_verblevel))
 
-    vars_ = [model.addVar(name=f"x_{j}", vtype="C") for j in range(c.shape[0])]
-    obj_expr = quicksum(float(c[j]) * vars_[j] for j in range(c.shape[0]))
-    model.setObjective(obj_expr, sense="minimize")
+    inf = model.infinity()
+    vars_ = []
+    for j in range(c.shape[0]):
+        lbv = -inf if not np.isfinite(lbs[j]) else float(lbs[j])
+        ubv = +inf if not np.isfinite(ubs[j]) else float(ubs[j])
+        vars_.append(model.addVar(name=f"x_{j}", vtype="C", lb=lbv, ub=ubv))
 
-    main_cons = []
+    obj_expr = scip.quicksum(float(c[j]) * vars_[j] for j in range(c.shape[0]))
+    model.setObjective(obj_expr, sense="maximize" if maximize else "minimize")
+
+    cons_ = []
     for i in range(A_ub.shape[0]):
         row_start, row_end = A_ub.indptr[i], A_ub.indptr[i + 1]
         idxs = A_ub.indices[row_start:row_end]
         vals = A_ub.data[row_start:row_end]
-        cons_expr = quicksum(float(v) * vars_[int(j)] for j, v in zip(idxs, vals))
-        main_cons.append(model.addCons(cons_expr <= float(b_ub[i]), name=f"main_{i}"))
-
-    lb_cons = [None] * c.shape[0]
-    ub_cons = [None] * c.shape[0]
-    for j in range(c.shape[0]):
-        if np.isfinite(lbs[j]):
-            lb_cons[j] = model.addCons(-vars_[j] <= float(-lbs[j]), name=f"lb_{j}")
-        if np.isfinite(ubs[j]):
-            ub_cons[j] = model.addCons(vars_[j] <= float(ubs[j]), name=f"ub_{j}")
+        expr = scip.quicksum(float(v) * vars_[int(j)] for j, v in zip(idxs, vals))
+        cons_.append(model.addCons(expr <= float(b_ub[i]), name=f"c_{i}"))
 
     model.optimize()
     status = str(model.getStatus()).lower()
-    out = {
-        "success": status == "optimal",
-        "status": status,
-        "message": status,
-        "x": None,
-        "objective_value": None,
-        "dual_signature": None,
-        "raw_result": model,
-    }
     if status != "optimal":
-        return out
+        return SolveResult(
+            success=False,
+            status=status,
+            message=status,
+            objective_value=None,
+            x=None,
+            row_duals=None,
+            reduced_costs=None,
+            raw_result=model,
+        )
 
     sol = model.getBestSol()
     x = np.asarray([model.getSolVal(sol, var) for var in vars_], dtype=np.float64)
-    obj = float(model.getObjVal()) + objective_offset
-
-    y_main = np.asarray([float(model.getDualsolLinear(cons)) for cons in main_cons], dtype=np.float64)
-    y_lb = np.zeros(c.shape[0], dtype=np.float64)
-    y_ub = np.zeros(c.shape[0], dtype=np.float64)
-    for j in range(c.shape[0]):
-        if lb_cons[j] is not None:
-            y_lb[j] = float(model.getDualsolLinear(lb_cons[j]))
-        if ub_cons[j] is not None:
-            y_ub[j] = float(model.getDualsolLinear(ub_cons[j]))
-
-    dual_signature = {
-        "y_main": y_main,
-        "y_lb": y_lb,
-        "y_ub": y_ub,
-        "b_main": b_ub.copy(),
-        "lb_rhs": -lbs.copy(),  # from -x <= -lb
-        "ub_rhs": ubs.copy(),   # from  x <=  ub
-    }
-
-    out["x"] = x
-    out["objective_value"] = obj
-    out["dual_signature"] = dual_signature
-    return out
-
-
-def evaluate_objective_from_dual_signature(
-    dual_signature: Dict[str, np.ndarray],
-    objective_offset: float = 0.0,
-    lb_rhs_override: Union[None, np.ndarray] = None,
-    ub_rhs_override: Union[None, np.ndarray] = None,
-) -> float:
-    y_main = np.asarray(dual_signature["y_main"], dtype=np.float64)
-    y_lb = np.asarray(dual_signature["y_lb"], dtype=np.float64)
-    y_ub = np.asarray(dual_signature["y_ub"], dtype=np.float64)
-    b_main = np.asarray(dual_signature["b_main"], dtype=np.float64)
-    lb_rhs = np.asarray(dual_signature["lb_rhs"] if lb_rhs_override is None else lb_rhs_override, dtype=np.float64)
-    ub_rhs = np.asarray(dual_signature["ub_rhs"] if ub_rhs_override is None else ub_rhs_override, dtype=np.float64)
-
-    raw = float(np.dot(y_main, b_main) + np.dot(y_lb, lb_rhs) + np.dot(y_ub, ub_rhs))
-    return float(-raw + float(objective_offset))
-
-
-def _evaluate_dual_signature_on_all_candidates(
-    dual_signature: Dict[str, np.ndarray],
-    objective_offset: float,
-    parent_lbs: np.ndarray,
-    parent_ubs: np.ndarray,
-    parent_sol: np.ndarray,
-    candidate_lp_positions: np.ndarray,
-) -> Tuple[float, np.ndarray, np.ndarray]:
-    lb_rhs_parent = -parent_lbs.copy()
-    ub_rhs_parent = parent_ubs.copy()
-    base_obj = evaluate_objective_from_dual_signature(
-        dual_signature=dual_signature,
-        objective_offset=objective_offset,
-        lb_rhs_override=lb_rhs_parent,
-        ub_rhs_override=ub_rhs_parent,
+    row_duals = np.asarray([float(model.getDualsolLinear(cons)) for cons in cons_], dtype=np.float64)
+    reduced_costs = np.asarray([float(model.getVarRedcost(var)) for var in vars_], dtype=np.float64)
+    obj = float(model.getObjVal()) + lp.objective_offset
+    return SolveResult(
+        success=True,
+        status=status,
+        message=status,
+        objective_value=obj,
+        x=x,
+        row_duals=row_duals,
+        reduced_costs=reduced_costs,
+        raw_result=model,
     )
-
-    down_est = np.full(candidate_lp_positions.shape[0], float("-inf"), dtype=np.float64)
-    up_est = np.full(candidate_lp_positions.shape[0], float("-inf"), dtype=np.float64)
-
-    for idx, var_idx in enumerate(candidate_lp_positions.tolist()):
-        lpsol = float(parent_sol[var_idx])
-        down_ub = min(float(np.floor(lpsol)), float(parent_ubs[var_idx]))
-        up_lb = max(float(np.ceil(lpsol)), float(parent_lbs[var_idx]))
-
-        ub_rhs_down = ub_rhs_parent.copy()
-        ub_rhs_down[var_idx] = down_ub
-        down_est[idx] = evaluate_objective_from_dual_signature(
-            dual_signature=dual_signature,
-            objective_offset=objective_offset,
-            lb_rhs_override=lb_rhs_parent,
-            ub_rhs_override=ub_rhs_down,
-        )
-
-        lb_rhs_up = lb_rhs_parent.copy()
-        lb_rhs_up[var_idx] = -up_lb
-        up_est[idx] = evaluate_objective_from_dual_signature(
-            dual_signature=dual_signature,
-            objective_offset=objective_offset,
-            lb_rhs_override=lb_rhs_up,
-            ub_rhs_override=ub_rhs_parent,
-        )
-
-    return base_obj, down_est, up_est
 
 
 def solve_explicit_dual_with_scip(
-    lp_components: Dict[str, Any],
-    bound_overrides: Union[None, Dict[int, Tuple[Union[float, None], Union[float, None]]]] = None,
+    lp: LPComponents,
+    bound_overrides: Optional[BoundOverrides] = None,
     display_verblevel: int = 0,
-) -> Dict[str, Any]:
-    """
-    Solve the explicit dual (heuristics/utils.py form) with SCIP:
-        max rhs^T y - ub^T alpha + lb^T beta
-        s.t. A^T y - alpha + beta = c
-             y, alpha, beta >= 0
-    where A = -A_ub and rhs = -b_ub.
-    """
-    try:
-        import pyscipopt as scip
-        from pyscipopt import quicksum
-    except Exception as exc:
-        raise RuntimeError("PySCIPOpt is required for SCIP-based dual solve.") from exc
+) -> DualSolveResult:
+    if lp.objective_sense.startswith("max"):
+        raise ValueError("Explicit dual solver currently supports minimization problems only.")
 
-    c = np.asarray(lp_components["objective_coefficients"], dtype=np.float64)
-    A_ub = lp_components["A_ub"].tocsr()
-    b_ub = np.asarray(lp_components["b_ub"], dtype=np.float64)
-    bounds = lp_components.get("bounds")
-    if bounds is None:
-        raise ValueError("lp_components['bounds'] is required for dual solve.")
+    c = np.asarray(lp.objective_coefficients, dtype=np.float64)
+    A_ub = lp.A_ub.tocsr()
+    b_ub = np.asarray(lp.b_ub, dtype=np.float64)
 
     A = (-A_ub).tocsr()
     rhs = -b_ub
-    parent_lbs, parent_ubs = _bounds_to_arrays(bounds, int(c.shape[0]))
+
+    parent_lbs, parent_ubs = _bounds_to_arrays(lp.bounds, int(c.shape[0]))
     lbs, ubs, feasible = _apply_bound_overrides(parent_lbs, parent_ubs, bound_overrides)
     if not feasible:
-        return {
-            "success": False,
-            "status": "infeasible",
-            "message": "infeasible after applying bound overrides",
-            "objective_value": float("inf"),
-            "y": None,
-            "alpha": None,
-            "beta": None,
-            "raw_result": None,
-        }
+        return DualSolveResult(
+            success=False,
+            status="infeasible",
+            message="infeasible after applying bound overrides",
+            objective_value=float("inf"),
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=None,
+        )
 
     if np.any(~np.isfinite(lbs)) or np.any(~np.isfinite(ubs)):
-        return {
-            "success": False,
-            "status": "unsupported_infinite_bounds",
-            "message": "Explicit dual solve currently expects finite variable bounds.",
-            "objective_value": float("nan"),
-            "y": None,
-            "alpha": None,
-            "beta": None,
-            "raw_result": None,
-        }
+        return DualSolveResult(
+            success=False,
+            status="unsupported_infinite_bounds",
+            message="Explicit dual solve expects finite variable bounds.",
+            objective_value=float("nan"),
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=None,
+        )
 
     m_rows, n_vars = A.shape
     model = scip.Model()
@@ -631,110 +464,243 @@ def solve_explicit_dual_with_scip(
 
     A_csc = A.tocsc()
     for j in range(n_vars):
-        col_start, col_end = A_csc.indptr[j], A_csc.indptr[j + 1]
-        row_ids = A_csc.indices[col_start:col_end]
-        vals = A_csc.data[col_start:col_end]
-        lhs = quicksum(float(v) * y[int(i)] for i, v in zip(row_ids, vals)) - alpha[j] + beta[j]
+        start, end = A_csc.indptr[j], A_csc.indptr[j + 1]
+        row_ids = A_csc.indices[start:end]
+        vals = A_csc.data[start:end]
+        lhs = scip.quicksum(float(v) * y[int(i)] for i, v in zip(row_ids, vals)) - alpha[j] + beta[j]
         model.addCons(lhs == float(c[j]), name=f"dual_eq_{j}")
 
     obj_expr = (
-        quicksum(float(rhs[i]) * y[i] for i in range(m_rows))
-        - quicksum(float(ubs[j]) * alpha[j] for j in range(n_vars))
-        + quicksum(float(lbs[j]) * beta[j] for j in range(n_vars))
+        scip.quicksum(float(rhs[i]) * y[i] for i in range(m_rows))
+        - scip.quicksum(float(ubs[j]) * alpha[j] for j in range(n_vars))
+        + scip.quicksum(float(lbs[j]) * beta[j] for j in range(n_vars))
     )
     model.setObjective(obj_expr, sense="maximize")
     model.optimize()
 
     status = str(model.getStatus()).lower()
-    out = {
-        "success": status == "optimal",
-        "status": status,
-        "message": status,
-        "objective_value": float("nan"),
-        "y": None,
-        "alpha": None,
-        "beta": None,
-        "raw_result": model,
-    }
-    if status == "optimal":
-        sol = model.getBestSol()
-        y_val = np.asarray([model.getSolVal(sol, v) for v in y], dtype=np.float64)
-        alpha_val = np.asarray([model.getSolVal(sol, v) for v in alpha], dtype=np.float64)
-        beta_val = np.asarray([model.getSolVal(sol, v) for v in beta], dtype=np.float64)
-        out["y"] = y_val
-        out["alpha"] = alpha_val
-        out["beta"] = beta_val
-        out["objective_value"] = float(model.getObjVal()) + float(lp_components.get("objective_offset", 0.0))
-    elif status in {"unbounded", "inforunbd"}:
-        out["objective_value"] = float("inf")
-    return out
+    if status != "optimal":
+        obj = float("inf") if status in {"unbounded", "inforunbd"} else float("nan")
+        return DualSolveResult(
+            success=False,
+            status=status,
+            message=status,
+            objective_value=obj,
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=model,
+        )
+
+    sol = model.getBestSol()
+    y_val = np.asarray([model.getSolVal(sol, var) for var in y], dtype=np.float64)
+    alpha_val = np.asarray([model.getSolVal(sol, var) for var in alpha], dtype=np.float64)
+    beta_val = np.asarray([model.getSolVal(sol, var) for var in beta], dtype=np.float64)
+    obj = float(model.getObjVal()) + lp.objective_offset
+    return DualSolveResult(
+        success=True,
+        status=status,
+        message=status,
+        objective_value=obj,
+        y=y_val,
+        alpha=alpha_val,
+        beta=beta_val,
+        raw_result=model,
+    )
 
 
 def evaluate_explicit_dual_on_child(
-    lp_components: Dict[str, Any],
+    lp: LPComponents,
     y: np.ndarray,
     alpha: np.ndarray,
     beta: np.ndarray,
-    bound_overrides: Union[None, Dict[int, Tuple[Union[float, None], Union[float, None]]]] = None,
+    bound_overrides: Optional[BoundOverrides] = None,
 ) -> float:
-    bounds = lp_components.get("bounds")
-    if bounds is None:
-        raise ValueError("lp_components['bounds'] is required.")
-    c = np.asarray(lp_components["objective_coefficients"], dtype=np.float64)
-    b_ub = np.asarray(lp_components["b_ub"], dtype=np.float64)
+    c = np.asarray(lp.objective_coefficients, dtype=np.float64)
+    b_ub = np.asarray(lp.b_ub, dtype=np.float64)
     rhs = -b_ub
-    lbs, ubs, feasible = _apply_bound_overrides(*_bounds_to_arrays(bounds, int(c.shape[0])), bound_overrides)
+    lbs, ubs, feasible = _apply_bound_overrides(*_bounds_to_arrays(lp.bounds, int(c.shape[0])), bound_overrides)
     if not feasible:
         return float("inf")
     if np.any(~np.isfinite(lbs)) or np.any(~np.isfinite(ubs)):
         return float("nan")
-    objective_offset = float(lp_components.get("objective_offset", 0.0))
-    value = float(np.dot(rhs, y) - np.dot(ubs, alpha) + np.dot(lbs, beta) + objective_offset)
+    value = float(np.dot(rhs, y) - np.dot(ubs, alpha) + np.dot(lbs, beta) + lp.objective_offset)
     return value
 
 
+class SCIPBranchingContext:
+    def __init__(self, lp_components: LPComponents):
+        self.lp = lp_components
+        self._parent_primal: Optional[SolveResult] = None
+        self._parent_dual: Optional[DualSolveResult] = None
+
+        n_vars = int(np.asarray(lp_components.objective_coefficients, dtype=np.float64).shape[0])
+        self.parent_lbs, self.parent_ubs = _bounds_to_arrays(lp_components.bounds, n_vars)
+
+    @classmethod
+    def from_sample_state(cls, sample_state: SampleState) -> "SCIPBranchingContext":
+        unnormalized = reconstruct_unnormalized_state(sample_state)
+        lp = extract_lp_components(unnormalized)
+        return cls(lp)
+
+    def solve_parent_primal(self) -> SolveResult:
+        if self._parent_primal is None:
+            self._parent_primal = solve_lp_with_scip(self.lp)
+        return self._parent_primal
+
+    def solve_parent_dual(self) -> DualSolveResult:
+        if self._parent_dual is None:
+            self._parent_dual = solve_explicit_dual_with_scip(self.lp)
+        return self._parent_dual
+
+    def create_branch_bounds(self, var_idx: int) -> BranchBounds:
+        parent = self.solve_parent_primal()
+        if not parent.success or parent.x is None:
+            raise RuntimeError(f"Parent LP solve failed: {parent.status} ({parent.message})")
+
+        lpsol = float(parent.x[var_idx])
+        lb_local = float(self.parent_lbs[var_idx])
+        ub_local = float(self.parent_ubs[var_idx])
+
+        down_ub = min(float(np.floor(lpsol)), ub_local)
+        up_lb = max(float(np.ceil(lpsol)), lb_local)
+
+        return BranchBounds(
+            var_idx=int(var_idx),
+            lpsol=lpsol,
+            lb_local=lb_local,
+            ub_local=ub_local,
+            down_ub=down_ub,
+            up_lb=up_lb,
+            down_overrides={int(var_idx): (None, down_ub)},
+            up_overrides={int(var_idx): (up_lb, None)},
+        )
+
+    def solve_child_primal(self, var_idx: int, direction: str) -> SolveResult:
+        bounds = self.create_branch_bounds(int(var_idx))
+        if direction == "down":
+            return solve_lp_with_scip(self.lp, bound_overrides=bounds.down_overrides)
+        if direction == "up":
+            return solve_lp_with_scip(self.lp, bound_overrides=bounds.up_overrides)
+        raise ValueError(f"Unknown direction '{direction}', expected 'down' or 'up'")
+
+    def solve_child_dual(self, var_idx: int, direction: str) -> DualSolveResult:
+        bounds = self.create_branch_bounds(int(var_idx))
+        if direction == "down":
+            return solve_explicit_dual_with_scip(self.lp, bound_overrides=bounds.down_overrides)
+        if direction == "up":
+            return solve_explicit_dual_with_scip(self.lp, bound_overrides=bounds.up_overrides)
+        raise ValueError(f"Unknown direction '{direction}', expected 'down' or 'up'")
+
+
+def reconstruct_topk_strong_branching_scores(
+    context: SCIPBranchingContext,
+    action_set: Sequence[int],
+    candidate_scores: Sequence[float],
+    cutoffbound: float,
+    top_k: int = 8,
+) -> Dict[str, Any]:
+    candidate_lp_positions = np.asarray(action_set, dtype=np.int64)
+    candidate_scores = np.asarray(candidate_scores, dtype=np.float64)
+
+    if candidate_lp_positions.shape[0] != candidate_scores.shape[0]:
+        raise ValueError(
+            f"action_set and candidate_scores size mismatch "
+            f"({candidate_lp_positions.shape[0]} vs {candidate_scores.shape[0]})"
+        )
+    if candidate_lp_positions.size == 0:
+        return {
+            "k": 0,
+            "parent_obj": None,
+            "topk_by_score": [],
+            "topk_rank_original": [],
+            "topk_rank_computed": [],
+        }
+
+    parent = context.solve_parent_primal()
+    if not parent.success or parent.objective_value is None:
+        raise RuntimeError(f"Parent LP solve failed: {parent.status} ({parent.message})")
+    parent_obj = float(parent.objective_value)
+
+    k_eff = int(min(max(int(top_k), 0), candidate_scores.size))
+    topk_positions = np.argsort(candidate_scores)[-k_eff:][::-1]
+
+    records: List[Dict[str, Any]] = []
+    for pos in topk_positions.tolist():
+        var_idx = int(candidate_lp_positions[pos])
+        branch = context.create_branch_bounds(var_idx)
+
+        down_res = solve_lp_with_scip(context.lp, bound_overrides=branch.down_overrides)
+        up_res = solve_lp_with_scip(context.lp, bound_overrides=branch.up_overrides)
+
+        child_zero_obj = float("inf") if (not down_res.success or down_res.objective_value is None) else float(down_res.objective_value)
+        child_one_obj = float("inf") if (not up_res.success or up_res.objective_value is None) else float(up_res.objective_value)
+
+        computed_score = compute_strong_branch_score(
+            parent_obj=parent_obj,
+            child_one_obj=child_one_obj,
+            child_zero_obj=child_zero_obj,
+            cutoffbound=float(cutoffbound),
+        )
+
+        records.append(
+            {
+                "cand_position": int(pos),
+                "cand_lp_pos": var_idx,
+                "cand_score": float(candidate_scores[pos]),
+                "lpsol": branch.lpsol,
+                "lb_local": branch.lb_local,
+                "ub_local": branch.ub_local,
+                "down_ub": branch.down_ub,
+                "up_lb": branch.up_lb,
+                "parent_lp_obj": parent_obj,
+                "child_zero_lp_obj": child_zero_obj,
+                "child_one_lp_obj": child_one_obj,
+                "computed_score": computed_score,
+                "down_status": down_res.status,
+                "up_status": up_res.status,
+            }
+        )
+
+    original_rank = sorted(records, key=lambda row: (-float(row["cand_score"]), int(row["cand_position"])))
+    computed_rank = sorted(records, key=lambda row: (-float(row["computed_score"]), int(row["cand_position"])))
+
+    return {
+        "k": k_eff,
+        "parent_obj": parent_obj,
+        "topk_by_score": records,
+        "topk_rank_original": [int(row["cand_position"]) for row in original_rank],
+        "topk_rank_computed": [int(row["cand_position"]) for row in computed_rank],
+    }
+
+
 def run_anchor_dual_substitution_with_scip(
-    lp_components: Dict[str, Any],
+    context: SCIPBranchingContext,
     action_set: Sequence[int],
     candidate_scores: Sequence[float],
     cutoffbound: float,
     anchor_k: int = 8,
-    as_mip: bool = False,
 ) -> Dict[str, Any]:
-    """
-    SCIP-only anchor dual substitution using explicit dual variables (y, alpha, beta).
-    """
     candidate_lp_positions = np.asarray(action_set, dtype=np.int64)
     candidate_scores = np.asarray(candidate_scores, dtype=np.float64)
-    if as_mip:
-        raise ValueError("Anchor dual substitution expects LP solves; set as_mip=False.")
+
     if candidate_lp_positions.shape[0] != candidate_scores.shape[0]:
         raise ValueError(
-            f"action_set and candidate_scores size mismatch ({candidate_lp_positions.shape[0]} vs {candidate_scores.shape[0]})"
+            f"action_set and candidate_scores size mismatch "
+            f"({candidate_lp_positions.shape[0]} vs {candidate_scores.shape[0]})"
         )
     n_candidates = int(candidate_lp_positions.shape[0])
     if n_candidates == 0:
         raise ValueError("No candidates available.")
 
-    parent_res = solve_reconstructed_lp_with_scip(lp_components, as_mip=False)
-    if not parent_res["success"]:
-        raise RuntimeError(
-            f"Failed to solve parent LP with SCIP: {parent_res['status']} ({parent_res['message']})"
-        )
-    parent_obj = float(parent_res["objective_value"])
-    parent_sol = np.asarray(parent_res["x"], dtype=np.float64)
+    parent_primal = context.solve_parent_primal()
+    if not parent_primal.success or parent_primal.objective_value is None:
+        raise RuntimeError(f"Parent LP solve failed: {parent_primal.status} ({parent_primal.message})")
+    parent_obj = float(parent_primal.objective_value)
 
-    parent_dual = solve_explicit_dual_with_scip(lp_components)
-    if not parent_dual["success"] or parent_dual["y"] is None:
-        raise RuntimeError(
-            f"Failed to solve parent explicit dual with SCIP: {parent_dual['status']} ({parent_dual['message']})"
-        )
-
-    bounds = lp_components.get("bounds")
-    if bounds is None:
-        raise ValueError("lp_components['bounds'] is required for anchor dual substitution.")
-    n_vars = int(np.asarray(lp_components["objective_coefficients"], dtype=np.float64).shape[0])
-    parent_lbs, parent_ubs = _bounds_to_arrays(bounds, n_vars)
+    parent_dual = context.solve_parent_dual()
+    if not parent_dual.success or parent_dual.y is None:
+        raise RuntimeError(f"Parent dual solve failed: {parent_dual.status} ({parent_dual.message})")
 
     k_eff = int(min(max(int(anchor_k), 0), n_candidates))
     anchor_positions = np.argsort(candidate_scores)[-k_eff:][::-1]
@@ -744,23 +710,41 @@ def run_anchor_dual_substitution_with_scip(
     dual_pool_records: List[Dict[str, Any]] = []
     anchor_child_records: List[Dict[str, Any]] = []
 
-    def _add_dual_source(source_name: str, src_pos: Union[int, None], y: np.ndarray, alpha: np.ndarray, beta: np.ndarray) -> None:
-        base_obj = evaluate_explicit_dual_on_child(lp_components, y, alpha, beta, bound_overrides=None)
+    def _add_dual_source(source_name: str, src_pos: Optional[int], dual: DualSolveResult) -> None:
+        if dual.y is None or dual.alpha is None or dual.beta is None:
+            return
+
+        base_obj = evaluate_explicit_dual_on_child(
+            context.lp,
+            dual.y,
+            dual.alpha,
+            dual.beta,
+            bound_overrides=None,
+        )
+
         down_eval = np.full(n_candidates, float("-inf"), dtype=np.float64)
         up_eval = np.full(n_candidates, float("-inf"), dtype=np.float64)
+
         for idx, var_idx in enumerate(candidate_lp_positions.tolist()):
-            lpsol = float(parent_sol[var_idx])
-            down_ub = min(float(np.floor(lpsol)), float(parent_ubs[var_idx]))
-            up_lb = max(float(np.ceil(lpsol)), float(parent_lbs[var_idx]))
+            branch = context.create_branch_bounds(int(var_idx))
             down_eval[idx] = evaluate_explicit_dual_on_child(
-                lp_components, y, alpha, beta, bound_overrides={var_idx: (None, down_ub)}
+                context.lp,
+                dual.y,
+                dual.alpha,
+                dual.beta,
+                bound_overrides=branch.down_overrides,
             )
             up_eval[idx] = evaluate_explicit_dual_on_child(
-                lp_components, y, alpha, beta, bound_overrides={var_idx: (up_lb, None)}
+                context.lp,
+                dual.y,
+                dual.alpha,
+                dual.beta,
+                bound_overrides=branch.up_overrides,
             )
 
         np.maximum(child_zero_obj_est, down_eval, out=child_zero_obj_est)
         np.maximum(child_one_obj_est, up_eval, out=child_one_obj_est)
+
         dual_pool_records.append(
             {
                 "source": source_name,
@@ -771,80 +755,64 @@ def run_anchor_dual_substitution_with_scip(
             }
         )
 
-    _add_dual_source("parent", None, parent_dual["y"], parent_dual["alpha"], parent_dual["beta"])
+    _add_dual_source("parent", None, parent_dual)
 
     for pos in anchor_positions.tolist():
         var_idx = int(candidate_lp_positions[pos])
-        lpsol = float(parent_sol[var_idx])
-        lb_local = float(parent_lbs[var_idx])
-        ub_local = float(parent_ubs[var_idx])
-        down_ub = min(float(np.floor(lpsol)), ub_local)
-        up_lb = max(float(np.ceil(lpsol)), lb_local)
+        branch = context.create_branch_bounds(var_idx)
 
-        down_res = solve_reconstructed_lp_with_scip(
-            lp_components,
-            as_mip=False,
-            bound_overrides={var_idx: (None, down_ub)},
-        )
-        up_res = solve_reconstructed_lp_with_scip(
-            lp_components,
-            as_mip=False,
-            bound_overrides={var_idx: (up_lb, None)},
-        )
+        down_primal = solve_lp_with_scip(context.lp, bound_overrides=branch.down_overrides)
+        up_primal = solve_lp_with_scip(context.lp, bound_overrides=branch.up_overrides)
 
+        down_dual = None
         down_dual_eval_self = None
         down_dual_eval_gap = None
-        down_dual = None
-        if down_res["success"]:
-            down_dual = solve_explicit_dual_with_scip(lp_components, bound_overrides={var_idx: (None, down_ub)})
-            if down_dual["success"] and down_dual["y"] is not None:
+        if down_primal.success and down_primal.objective_value is not None:
+            child_zero_obj_est[pos] = max(child_zero_obj_est[pos], float(down_primal.objective_value))
+            down_dual = solve_explicit_dual_with_scip(context.lp, bound_overrides=branch.down_overrides)
+            if down_dual.success and down_dual.y is not None:
                 down_dual_eval_self = evaluate_explicit_dual_on_child(
-                    lp_components,
-                    down_dual["y"],
-                    down_dual["alpha"],
-                    down_dual["beta"],
-                    bound_overrides={var_idx: (None, down_ub)},
+                    context.lp,
+                    down_dual.y,
+                    down_dual.alpha,
+                    down_dual.beta,
+                    bound_overrides=branch.down_overrides,
                 )
-                down_dual_eval_gap = abs(float(down_res["objective_value"]) - float(down_dual_eval_self))
+                down_dual_eval_gap = abs(float(down_primal.objective_value) - float(down_dual_eval_self))
+                _add_dual_source("anchor_down", int(pos), down_dual)
 
+        up_dual = None
         up_dual_eval_self = None
         up_dual_eval_gap = None
-        up_dual = None
-        if up_res["success"]:
-            up_dual = solve_explicit_dual_with_scip(lp_components, bound_overrides={var_idx: (up_lb, None)})
-            if up_dual["success"] and up_dual["y"] is not None:
+        if up_primal.success and up_primal.objective_value is not None:
+            child_one_obj_est[pos] = max(child_one_obj_est[pos], float(up_primal.objective_value))
+            up_dual = solve_explicit_dual_with_scip(context.lp, bound_overrides=branch.up_overrides)
+            if up_dual.success and up_dual.y is not None:
                 up_dual_eval_self = evaluate_explicit_dual_on_child(
-                    lp_components,
-                    up_dual["y"],
-                    up_dual["alpha"],
-                    up_dual["beta"],
-                    bound_overrides={var_idx: (up_lb, None)},
+                    context.lp,
+                    up_dual.y,
+                    up_dual.alpha,
+                    up_dual.beta,
+                    bound_overrides=branch.up_overrides,
                 )
-                up_dual_eval_gap = abs(float(up_res["objective_value"]) - float(up_dual_eval_self))
-
-        if down_res["success"] and down_res["objective_value"] is not None:
-            child_zero_obj_est[pos] = max(child_zero_obj_est[pos], float(down_res["objective_value"]))
-            if down_dual is not None and down_dual["success"] and down_dual["y"] is not None:
-                _add_dual_source("anchor_down", pos, down_dual["y"], down_dual["alpha"], down_dual["beta"])
-        if up_res["success"] and up_res["objective_value"] is not None:
-            child_one_obj_est[pos] = max(child_one_obj_est[pos], float(up_res["objective_value"]))
-            if up_dual is not None and up_dual["success"] and up_dual["y"] is not None:
-                _add_dual_source("anchor_up", pos, up_dual["y"], up_dual["alpha"], up_dual["beta"])
+                up_dual_eval_gap = abs(float(up_primal.objective_value) - float(up_dual_eval_self))
+                _add_dual_source("anchor_up", int(pos), up_dual)
 
         anchor_child_records.append(
             {
                 "cand_position": int(pos),
                 "cand_lp_pos": var_idx,
-                "down_status": str(down_res["status"]),
-                "up_status": str(up_res["status"]),
-                "down_obj": float("inf") if not down_res["success"] else float(down_res["objective_value"]),
-                "up_obj": float("inf") if not up_res["success"] else float(up_res["objective_value"]),
+                "lpsol": branch.lpsol,
+                "down_status": down_primal.status,
+                "up_status": up_primal.status,
+                "down_obj": float("inf") if down_primal.objective_value is None else float(down_primal.objective_value),
+                "up_obj": float("inf") if up_primal.objective_value is None else float(up_primal.objective_value),
+                "down_dual_status": None if down_dual is None else down_dual.status,
+                "up_dual_status": None if up_dual is None else up_dual.status,
                 "down_dual_eval_self": down_dual_eval_self,
                 "down_dual_eval_gap": down_dual_eval_gap,
                 "up_dual_eval_self": up_dual_eval_self,
                 "up_dual_eval_gap": up_dual_eval_gap,
-                "down_dual_status": None if down_dual is None else str(down_dual["status"]),
-                "up_dual_status": None if up_dual is None else str(up_dual["status"]),
             }
         )
 
@@ -869,108 +837,4 @@ def run_anchor_dual_substitution_with_scip(
         "pseudo_scores": pseudo_scores,
         "selected_position": selected_pos,
         "selected_lp_pos": int(candidate_lp_positions[selected_pos]),
-    }
-
-
-def reconstruct_topk_strong_branching_scores(
-    lp_components: Dict[str, Any],
-    action_set: Sequence[int],
-    candidate_scores: Sequence[float],
-    cutoffbound: float,
-    top_k: int = 8,
-    as_mip: bool = False,
-) -> Dict[str, Any]:
-    """
-    Recompute top-k strong-branching scores on reconstructed LP/MIP using SCIP.
-
-    Candidate ordering and score formula follow `legacy_code_generator/02_generate_samples.py`.
-    """
-    action_set = np.asarray(action_set, dtype=np.int64)
-    candidate_scores = np.asarray(candidate_scores, dtype=np.float64)
-    if action_set.shape[0] != candidate_scores.shape[0]:
-        raise ValueError(
-            f"action_set and candidate_scores size mismatch ({action_set.shape[0]} vs {candidate_scores.shape[0]})"
-        )
-    if action_set.size == 0:
-        return {
-            "k": 0,
-            "parent_obj": None,
-            "topk_by_score": [],
-            "topk_rank_original": [],
-            "topk_rank_computed": [],
-        }
-
-    parent_res = solve_reconstructed_lp_with_scip(lp_components, as_mip=as_mip)
-    if not parent_res["success"]:
-        raise RuntimeError(
-            f"Failed to solve reconstructed parent LP/MIP with SCIP: {parent_res['status']} ({parent_res['message']})"
-        )
-    parent_obj = float(parent_res["objective_value"])
-    x_parent = np.asarray(parent_res["x"], dtype=np.float64)
-    bounds = lp_components.get("bounds")
-
-    k_eff = int(min(max(int(top_k), 0), candidate_scores.size))
-    topk_positions = np.argsort(candidate_scores)[-k_eff:][::-1]
-
-    records: List[Dict[str, Any]] = []
-    for pos in topk_positions.tolist():
-        var_idx = int(action_set[pos])
-        lpsol = float(x_parent[var_idx])
-
-        lb_local, ub_local = bounds[var_idx] if bounds is not None else (None, None)
-        lb_local_v = -np.inf if lb_local is None else float(lb_local)
-        ub_local_v = +np.inf if ub_local is None else float(ub_local)
-        down_ub = min(float(np.floor(lpsol)), ub_local_v)
-        up_lb = max(float(np.ceil(lpsol)), lb_local_v)
-
-        down_res = solve_reconstructed_lp_with_scip(
-            lp_components,
-            as_mip=as_mip,
-            bound_overrides={var_idx: (None, down_ub)},
-        )
-        up_res = solve_reconstructed_lp_with_scip(
-            lp_components,
-            as_mip=as_mip,
-            bound_overrides={var_idx: (up_lb, None)},
-        )
-
-        child_zero_obj = float("inf") if not down_res["success"] else float(down_res["objective_value"])
-        child_one_obj = float("inf") if not up_res["success"] else float(up_res["objective_value"])
-        computed_score = compute_strong_branch_score(
-            parent_obj=parent_obj,
-            child_one_obj=child_one_obj,
-            child_zero_obj=child_zero_obj,
-            cutoffbound=float(cutoffbound),
-        )
-
-        records.append(
-            {
-                "cand_position": int(pos),
-                "cand_lp_pos": var_idx,
-                "cand_score": float(candidate_scores[pos]),
-                "lpsol": lpsol,
-                "lb_local": lb_local_v,
-                "ub_local": ub_local_v,
-                "down_ub": down_ub,
-                "up_lb": up_lb,
-                "parent_lp_obj": parent_obj,
-                "child_zero_lp_obj": child_zero_obj,
-                "child_one_lp_obj": child_one_obj,
-                "computed_score": computed_score,
-                "down_status": str(down_res["status"]),
-                "up_status": str(up_res["status"]),
-            }
-        )
-
-    original_rank = sorted(records, key=lambda row: (-float(row["cand_score"]), int(row["cand_position"])))
-    computed_rank = sorted(records, key=lambda row: (-float(row["computed_score"]), int(row["cand_position"])))
-    original_order = [int(row["cand_position"]) for row in original_rank]
-    computed_order = [int(row["cand_position"]) for row in computed_rank]
-
-    return {
-        "k": k_eff,
-        "parent_obj": parent_obj,
-        "topk_by_score": records,
-        "topk_rank_original": original_order,
-        "topk_rank_computed": computed_order,
     }
