@@ -298,6 +298,8 @@ def compute_strong_branch_score(
     child_zero_obj: float,
     cutoffbound: float,
 ) -> float:
+    # if float(child_one_obj) > float(cutoffbound) or float(child_zero_obj) > float(cutoffbound):
+    #     print("cutoff applied!")
     child_one_obj_capped = min(float(child_one_obj), float(cutoffbound))
     child_zero_obj_capped = min(float(child_zero_obj), float(cutoffbound))
     gain_one = max(child_one_obj_capped - float(parent_obj), 1e-9)
@@ -416,6 +418,7 @@ def solve_lp_with_scip(
 def solve_explicit_dual_with_scip(
     lp: LPComponents,
     bound_overrides: Optional[BoundOverrides] = None,
+    cutoffbound: Optional[float] = None,
     display_verblevel: int = 0,
 ) -> DualSolveResult:
     if lp.objective_sense.startswith("max"):
@@ -482,22 +485,26 @@ def solve_explicit_dual_with_scip(
         - scip.quicksum(float(ubs[j]) * alpha[j] for j in range(n_vars))
         + scip.quicksum(float(lbs[j]) * beta[j] for j in range(n_vars))
     )
+    if cutoffbound is not None and np.isfinite(float(cutoffbound)):
+        cutoff_rhs = float(cutoffbound) - float(lp.objective_offset)
+        model.addCons(obj_expr <= float(cutoff_rhs), name="dual_obj_cutoff_cap")
     model.setObjective(obj_expr, sense="maximize")
     model.optimize()
 
     status = str(model.getStatus()).lower()
+    message = status
     if status != "optimal":
         if status in {"unbounded", "inforunbd", "infeasible"}:
             mapped_status = "unbounded"
-            obj = float("inf")
+            obj_value = float("inf")
         else:
             mapped_status = status
-            obj = float("nan")
+            obj_value = float("nan")
         return DualSolveResult(
             success=False,
             status=mapped_status,
-            message=status,
-            objective_value=obj,
+            message=message,
+            objective_value=obj_value,
             y=None,
             alpha=None,
             beta=None,
@@ -508,12 +515,12 @@ def solve_explicit_dual_with_scip(
     y_val = np.asarray([model.getSolVal(sol, var) for var in y], dtype=np.float64)
     alpha_val = np.asarray([model.getSolVal(sol, var) for var in alpha], dtype=np.float64)
     beta_val = np.asarray([model.getSolVal(sol, var) for var in beta], dtype=np.float64)
-    obj = float(model.getObjVal()) + lp.objective_offset
+    obj_value = float(model.getObjVal()) + lp.objective_offset
     return DualSolveResult(
         success=True,
-        status=status,
-        message=status,
-        objective_value=obj,
+        status="optimal",
+        message=message,
+        objective_value=obj_value,
         y=y_val,
         alpha=alpha_val,
         beta=beta_val,
@@ -560,7 +567,9 @@ class SCIPBranchingContext:
             self._parent_primal = solve_lp_with_scip(self.lp)
         return self._parent_primal
 
-    def solve_parent_dual(self) -> DualSolveResult:
+    def solve_parent_dual(self, cutoffbound: Optional[float] = None) -> DualSolveResult:
+        if cutoffbound is not None:
+            return solve_explicit_dual_with_scip(self.lp, cutoffbound=cutoffbound)
         if self._parent_dual is None:
             self._parent_dual = solve_explicit_dual_with_scip(self.lp)
         return self._parent_dual
@@ -596,12 +605,20 @@ class SCIPBranchingContext:
             return solve_lp_with_scip(self.lp, bound_overrides=bounds.up_overrides)
         raise ValueError(f"Unknown direction '{direction}', expected 'down' or 'up'")
 
-    def solve_child_dual(self, var_idx: int, direction: str) -> DualSolveResult:
+    def solve_child_dual(self, var_idx: int, direction: str, cutoffbound: Optional[float] = None) -> DualSolveResult:
         bounds = self.create_branch_bounds(int(var_idx))
         if direction == "down":
-            return solve_explicit_dual_with_scip(self.lp, bound_overrides=bounds.down_overrides)
+            return solve_explicit_dual_with_scip(
+                self.lp,
+                bound_overrides=bounds.down_overrides,
+                cutoffbound=cutoffbound,
+            )
         if direction == "up":
-            return solve_explicit_dual_with_scip(self.lp, bound_overrides=bounds.up_overrides)
+            return solve_explicit_dual_with_scip(
+                self.lp,
+                bound_overrides=bounds.up_overrides,
+                cutoffbound=cutoffbound,
+            )
         raise ValueError(f"Unknown direction '{direction}', expected 'down' or 'up'")
 
 
@@ -710,7 +727,7 @@ def run_anchor_dual_substitution_with_scip(
         raise RuntimeError(f"Parent LP solve failed: {parent_primal.status} ({parent_primal.message})")
     parent_obj = float(parent_primal.objective_value)
 
-    parent_dual = context.solve_parent_dual()
+    parent_dual = context.solve_parent_dual(cutoffbound=cutoffbound)
     if not parent_dual.success or parent_dual.y is None:
         raise RuntimeError(f"Parent dual solve failed: {parent_dual.status} ({parent_dual.message})")
 
@@ -781,7 +798,11 @@ def run_anchor_dual_substitution_with_scip(
         down_dual_eval_gap = None
         if down_primal.success and down_primal.objective_value is not None:
             child_zero_obj_est[pos] = max(child_zero_obj_est[pos], float(down_primal.objective_value))
-            down_dual = solve_explicit_dual_with_scip(context.lp, bound_overrides=branch.down_overrides)
+            down_dual = solve_explicit_dual_with_scip(
+                context.lp,
+                bound_overrides=branch.down_overrides,
+                cutoffbound=cutoffbound,
+            )
             if down_dual.success and down_dual.y is not None:
                 down_dual_eval_self = evaluate_explicit_dual_on_child(
                     context.lp,
@@ -790,7 +811,8 @@ def run_anchor_dual_substitution_with_scip(
                     down_dual.beta,
                     bound_overrides=branch.down_overrides,
                 )
-                down_dual_eval_gap = abs(float(down_primal.objective_value) - float(down_dual_eval_self))
+                down_target = min(float(down_primal.objective_value), float(cutoffbound))
+                down_dual_eval_gap = abs(down_target - float(down_dual_eval_self))
                 _add_dual_source("anchor_down", int(pos), down_dual)
 
         up_dual = None
@@ -798,7 +820,11 @@ def run_anchor_dual_substitution_with_scip(
         up_dual_eval_gap = None
         if up_primal.success and up_primal.objective_value is not None:
             child_one_obj_est[pos] = max(child_one_obj_est[pos], float(up_primal.objective_value))
-            up_dual = solve_explicit_dual_with_scip(context.lp, bound_overrides=branch.up_overrides)
+            up_dual = solve_explicit_dual_with_scip(
+                context.lp,
+                bound_overrides=branch.up_overrides,
+                cutoffbound=cutoffbound,
+            )
             if up_dual.success and up_dual.y is not None:
                 up_dual_eval_self = evaluate_explicit_dual_on_child(
                     context.lp,
@@ -807,7 +833,8 @@ def run_anchor_dual_substitution_with_scip(
                     up_dual.beta,
                     bound_overrides=branch.up_overrides,
                 )
-                up_dual_eval_gap = abs(float(up_primal.objective_value) - float(up_dual_eval_self))
+                up_target = min(float(up_primal.objective_value), float(cutoffbound))
+                up_dual_eval_gap = abs(up_target - float(up_dual_eval_self))
                 _add_dual_source("anchor_up", int(pos), up_dual)
 
         anchor_child_records.append(
@@ -827,7 +854,7 @@ def run_anchor_dual_substitution_with_scip(
                 "up_dual_eval_gap": up_dual_eval_gap,
             }
         )
-
+    
     pseudo_scores = np.array(
         [
             compute_strong_branch_score(parent_obj, child_one_obj_est[i], child_zero_obj_est[i], cutoffbound)
