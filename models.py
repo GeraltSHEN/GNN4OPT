@@ -424,9 +424,52 @@ class GNNPolicy(nn.Module):
 
 
 class HeuristicPolicy(torch.nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        emb_size,
+        cons_nfeats,
+        edge_nfeats,
+        var_nfeats,
+        output_size,
+        n_layers,
+        branching_model,
+        gnn_backbone: str = "bipartite", # sage
+        sage_mlp_layers: int = 2,
+    ):
         super().__init__()
-        # ignore layers for now
+        if n_layers <= 0:
+            raise ValueError("n_layers must be >= 1.")
+        self.n_layers = n_layers
+        self.gnn_backbone = gnn_backbone
+        self.branching_model = branching_model
+
+        # EMBEDDING
+        self.cons_embedding = torch.nn.Sequential(
+                torch.nn.LayerNorm(cons_nfeats),
+                MLP([cons_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
+        self.var_embedding = torch.nn.Sequential(
+                torch.nn.LayerNorm(var_nfeats + 2),
+                MLP([var_nfeats + 2, emb_size, emb_size], act="relu", norm=None, plain_last=False))
+
+        # DATA ENCODER
+        if self.gnn_backbone == "bipartite":
+            self.data_encoder = StackedBipartiteGNN(
+                hidden_channels=emb_size, edge_nfeats=edge_nfeats, n_layers=n_layers
+            )
+        elif self.gnn_backbone == "sage":
+            self.data_encoder = StackedSAGEBipartiteGNN(
+                hidden_channels=emb_size,
+                edge_nfeats=edge_nfeats,
+                n_layers=n_layers,
+                mlp_layers=sage_mlp_layers,
+            )
+        else:
+            raise ValueError(f"{self.gnn_backbone} not available.")
+
+        # FINAL READOUT
+        self.cons_out = torch.nn.Sequential(
+                torch.nn.LayerNorm(emb_size),
+                MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
 
     def init_embedding(
         self,
@@ -435,33 +478,86 @@ class HeuristicPolicy(torch.nn.Module):
         edge_indices,
         edge_features,
         branching_candidates,
+        n_constraints_per_graph,
+        n_variables_per_graph,
+        branching_candidates_are_global: bool = True,
     ):
         """
-        Given n_branching candidates, say T in total
+        Build heuristic branch embeddings from a PyG-style flattened batch.
 
-        Raw data:
-        Y:= constraint_features (B, n_constraints, F)
-        X:= variable_features (B, n_variables, F)
+        Input format:
+        - constraint_features: (sum_i n_constraints_i, F_c)
+        - variable_features: (sum_i n_variables_i, F_v)
+        - edge_indices: (2, E) with global node indices under PyG batching
+        - edge_features: (E, F_e)
+        - branching_candidates: (B, T), local indices by default; if
+          `branching_candidates_are_global=True`, they are interpreted as global
+          variable indices and converted to per-graph local indices.
 
-        Create (B, 1+T, 2, N, F) features, T represents branching, 2 represents 2 subproblems via branching
-        Y:= constraint_features (B, 1+T, 2, n_constraints, F)
-        X:= variable_features (B, 1+T, 2, n_variables, F)
-
-        Add one-hot encodings to X
-        X: (B, 1+T, 2, n_variables, 2+F) such that 
-        X[b, t, 0, :, :] = [[0, 0, X], [0, 0, X]] is the parent
-        X[b, t, 1:, :, :] = [[1_v, 0, X], [0, 1_v, X]] where we use 1_v to distinguish T branchings
-        Y stays the same
-
-        edge_indices, edge_features are augmented correspondingly.
+        Output format:
+        - y_flat: ((B*(1+T)*2*n_constraints_max), F_c)
+        - x_flat: ((B*(1+T)*2*n_variables_max), F_v+2) with one-hot channels first
+        - edge_indices_aug: (2, (1+T)*2*E) over flattened padded graphs
+        - edge_features_aug: ((1+T)*2*E, F_e)
+        - real_y_mask: (B, 1+T, 2, n_constraints_max)
+        - real_x_mask: (B, 1+T, 2, n_variables_max)
+        - shape_info: tuple for reverse transform in later steps
         """
-        if constraint_features.dim() != 3 or variable_features.dim() != 3:
-            raise ValueError("constraint_features and variable_features must be rank-3 tensors: (B, N, F).")
+        del self
 
-        bsz, n_constraints, _ = constraint_features.shape
-        bsz_x, n_variables, _ = variable_features.shape
-        if bsz != bsz_x:
-            raise ValueError("constraint_features and variable_features must have matching batch size.")
+        if constraint_features.dim() != 2 or variable_features.dim() != 2:
+            raise ValueError("constraint_features and variable_features must be rank-2 tensors in PyG batch style.")
+        if edge_indices.dim() != 2 or edge_indices.size(0) != 2:
+            raise ValueError("edge_indices must have shape (2, E).")
+        if edge_features.dim() == 1:
+            edge_features = edge_features.unsqueeze(-1)
+        if edge_features.dim() != 2:
+            raise ValueError("edge_features must have shape (E, F_e).")
+
+        device = variable_features.device
+        dtype = variable_features.dtype
+
+        n_constraints_per_graph = n_constraints_per_graph.to(device=device, dtype=torch.long).reshape(-1)
+        n_variables_per_graph = n_variables_per_graph.to(device=device, dtype=torch.long).reshape(-1)
+        if n_constraints_per_graph.numel() != n_variables_per_graph.numel():
+            raise ValueError("n_constraints_per_graph and n_variables_per_graph must have the same length.")
+
+        bsz = n_constraints_per_graph.numel()
+        n_constraints_total = int(n_constraints_per_graph.sum().item())
+        n_variables_total = int(n_variables_per_graph.sum().item())
+        if n_constraints_total != constraint_features.size(0):
+            raise ValueError("Sum of n_constraints_per_graph must equal constraint_features.size(0).")
+        if n_variables_total != variable_features.size(0):
+            raise ValueError("Sum of n_variables_per_graph must equal variable_features.size(0).")
+
+        n_constraints_max = int(n_constraints_per_graph.max().item())
+        n_variables_max = int(n_variables_per_graph.max().item())
+
+        constraint_offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_constraints_per_graph[:-1])),
+            dim=0,
+        )
+        variable_offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_variables_per_graph[:-1])),
+            dim=0,
+        )
+
+        graph_ids_c = torch.repeat_interleave(torch.arange(bsz, device=device), n_constraints_per_graph)
+        graph_ids_v = torch.repeat_interleave(torch.arange(bsz, device=device), n_variables_per_graph)
+
+        local_c = torch.arange(n_constraints_total, device=device) - constraint_offsets[graph_ids_c]
+        local_v = torch.arange(n_variables_total, device=device) - variable_offsets[graph_ids_v]
+
+        y_dense = constraint_features.new_zeros((bsz, n_constraints_max, constraint_features.size(-1)))
+        y_dense[graph_ids_c, local_c] = constraint_features
+
+        x_dense = variable_features.new_zeros((bsz, n_variables_max, variable_features.size(-1)))
+        x_dense[graph_ids_v, local_v] = variable_features
+
+        real_y_mask = torch.zeros((bsz, n_constraints_max), device=device, dtype=torch.bool)
+        real_y_mask[graph_ids_c, local_c] = True
+        real_x_mask = torch.zeros((bsz, n_variables_max), device=device, dtype=torch.bool)
+        real_x_mask[graph_ids_v, local_v] = True
 
         if branching_candidates.dim() == 1:
             branching_candidates = branching_candidates.unsqueeze(0)
@@ -470,27 +566,30 @@ class HeuristicPolicy(torch.nn.Module):
         if branching_candidates.size(0) != bsz:
             raise ValueError("branching_candidates batch size must match features batch size.")
 
-        t = branching_candidates.size(1)
-        device = variable_features.device
-        dtype = variable_features.dtype
+        branching_candidates = branching_candidates.to(device=device, dtype=torch.long)
+        if branching_candidates_are_global:
+            branching_candidates = branching_candidates - variable_offsets.unsqueeze(1)
+        if not ((branching_candidates >= 0) & (branching_candidates < n_variables_per_graph.unsqueeze(1))).all():
+            raise ValueError("branching_candidates contains indices outside the valid local variable range.")
 
         y_aug = (
-            constraint_features.unsqueeze(1)
+            y_dense.unsqueeze(1)
             .unsqueeze(2)
-            .expand(bsz, 1 + t, 2, n_constraints, constraint_features.size(-1))
+            .expand(bsz, 1 + branching_candidates.size(1), 2, n_constraints_max, y_dense.size(-1))
         )
 
         x_base = (
-            variable_features.unsqueeze(1)
+            x_dense.unsqueeze(1)
             .unsqueeze(2)
-            .expand(bsz, 1 + t, 2, n_variables, variable_features.size(-1))
+            .expand(bsz, 1 + branching_candidates.size(1), 2, n_variables_max, x_dense.size(-1))
         )
 
-        one_hot = torch.zeros((bsz, t, n_variables), device=device, dtype=dtype)
-        one_hot.scatter_(2, branching_candidates.to(device=device, dtype=torch.long).unsqueeze(-1), 1.0)
+        t = branching_candidates.size(1)
+        one_hot = torch.zeros((bsz, t, n_variables_max), device=device, dtype=dtype)
+        one_hot.scatter_(2, branching_candidates.unsqueeze(-1), 1.0)
 
-        parent_flags = torch.zeros((bsz, 1, 2, n_variables, 2), device=device, dtype=dtype)
-        branch_flags = torch.zeros((bsz, t, 2, n_variables, 2), device=device, dtype=dtype)
+        parent_flags = torch.zeros((bsz, 1, 2, n_variables_max, 2), device=device, dtype=dtype)
+        branch_flags = torch.zeros((bsz, t, 2, n_variables_max, 2), device=device, dtype=dtype)
         branch_flags[:, :, 0, :, 0] = one_hot
         branch_flags[:, :, 1, :, 1] = one_hot
 
@@ -498,27 +597,95 @@ class HeuristicPolicy(torch.nn.Module):
         x_branch = torch.cat((branch_flags, x_base[:, 1:]), dim=-1)
         x_aug = torch.cat((x_parent, x_branch), dim=1)
 
-        if edge_indices.dim() == 2:
-            edge_indices = edge_indices.unsqueeze(0).expand(bsz, -1, -1)
-        if edge_indices.dim() != 3 or edge_indices.size(0) != bsz or edge_indices.size(1) != 2:
-            raise ValueError("edge_indices must have shape (2, E) or (B, 2, E).")
-        edge_indices_aug = (
-            edge_indices.unsqueeze(1).unsqueeze(2).expand(bsz, 1 + t, 2, 2, edge_indices.size(-1))
-        )
+        edge_c = edge_indices[0].to(device=device, dtype=torch.long)
+        edge_v = edge_indices[1].to(device=device, dtype=torch.long)
+        edge_graph = graph_ids_c[edge_c]
+        edge_local_c = edge_c - constraint_offsets[edge_graph]
+        edge_local_v = edge_v - variable_offsets[edge_graph]
 
-        if edge_features.dim() == 2:
-            edge_features = edge_features.unsqueeze(0).expand(bsz, -1, -1)
-        if edge_features.dim() != 3 or edge_features.size(0) != bsz:
-            raise ValueError("edge_features must have shape (E, F_e) or (B, E, F_e).")
+        views = (1 + t) * 2
+        view_ids = torch.arange(views, device=device, dtype=torch.long).unsqueeze(1)
+        graph_view_ids = edge_graph.unsqueeze(0) * views + view_ids
+        edge_c_aug = edge_local_c.unsqueeze(0) + graph_view_ids * n_constraints_max
+        edge_v_aug = edge_local_v.unsqueeze(0) + graph_view_ids * n_variables_max
+        edge_indices_aug = torch.stack((edge_c_aug.reshape(-1), edge_v_aug.reshape(-1)), dim=0)
         edge_features_aug = (
-            edge_features.unsqueeze(1).unsqueeze(2).expand(bsz, 1 + t, 2, edge_features.size(1), edge_features.size(2))
+            edge_features.to(device=device)
+            .unsqueeze(0)
+            .expand(views, edge_features.size(0), edge_features.size(1))
+            .reshape(views * edge_features.size(0), edge_features.size(1))
         )
 
-        return y_aug, x_aug, edge_indices_aug, edge_features_aug
+        real_y_mask = real_y_mask.unsqueeze(1).unsqueeze(2).expand(bsz, 1 + t, 2, n_constraints_max)
+        real_x_mask = real_x_mask.unsqueeze(1).unsqueeze(2).expand(bsz, 1 + t, 2, n_variables_max)
+
+        y_flat = y_aug.reshape(-1, y_aug.size(-1)).contiguous()
+        x_flat = x_aug.reshape(-1, x_aug.size(-1)).contiguous()
+        shape_info = (bsz, t, n_constraints_max, n_variables_max)
+
+        return y_flat, x_flat, edge_indices_aug, edge_features_aug, real_y_mask, real_x_mask, shape_info
     
-    # ignore forward
-    def forward(x):
-        return x
+    def forward(
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        candidates=None,
+        n_constraints_per_graph=None,
+        n_variables_per_graph=None,
+    ):
+        # constraint_features: (m1+m2+...+m, d_c) PyG style
+        # variable_features: (n1+n2+...+n, d_v) PyG style
+        # edge_indices for dense matrix in shape of (m1+m2+...+m, n1+n2+...+n)
+
+        # 1. find top-k branching candidates (no shape change needed)
+        with _perf_timer("HeuristicPolicy step 1: find branching candidates"):
+            branching_candidates = self.branching_model(constraint_features,
+                                                    edge_indices,
+                                                    edge_features,
+                                                    variable_features,
+                                                    candidates,
+                                                    n_constraints_per_graph,
+                                                    n_variables_per_graph)
+        
+        # 2. init node/edges features
+        # Y: (B*(1+T)*2*n_constraints_max, F_c) PyG style
+        # X: (B*(1+T)*2*n_variables_max, F_v) PyG style
+        # edge_indices for dense matrix in shape of (B*(1+T)*2*n_constraints_max, B*(1+T)*2*n_variables_max)
+        with _perf_timer("HeuristicPolicy step 2: init node/edges features"):
+            Y, X, edge_indices, edge_features, real_y_mask, real_x_mask, shape_info = self.init_embedding(
+                                constraint_features, variable_features,
+                                edge_indices, edge_features,
+                                branching_candidates,
+                                n_constraints_per_graph, n_variables_per_graph,
+                                branching_candidates_are_global=True)
+
+        # 3. raw features to embeddings in common dimension (PyG's MLP should work fine with both PyG style or (B, 1+T, 2, n_max, F) style)
+        with _perf_timer("HeuristicPolicy step 3: embed raw features"):
+            Y = self.cons_embedding(Y)
+            X = self.var_embedding(X)
+
+        # 4. constraint-variable message passing (bipartite/sage GNN should work better with PyG style)
+        with _perf_timer("HeuristicPolicy step 4: constraint-variable message passing"):
+            Y, X = self.data_encoder(Y,
+                                     edge_indices,
+                                     edge_features,
+                                     X,
+                                     n_variables_per_graph=n_variables_per_graph)
+
+        # 5. readout constraint features
+        # (PyG's MLP should work fine with both PyG style or (B, 1+T, 2, n_max, F) style)
+        with _perf_timer("HeuristicPolicy step 5: output head"):
+            # DEFAULT: (B*(1+T)*2*n_constraints_max,)
+            Y = self.cons_out(Y).squeeze(-1) 
+            # choice 1: (B, 1+T, 2, n_constraints_max)
+            bsz, t, n_constraints_max, _ = shape_info
+            Y = Y.view(bsz, 1 + t, 2, n_constraints_max)
+            Y = Y.masked_fill(~real_y_mask, 0.0)
+            # choice 2: (B*(1+T)*2*(sum_1 n_constraints_i),)
+            Y = Y[real_y_mask.reshape(-1)] # drops padding, real nodes only
+        return Y
 
 
 
