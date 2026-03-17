@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.loader import DataLoader
 
-from models import GNNPolicy, SetCoverHolo, StackedBipartiteGNN
+from models import GNNPolicy, StackedBipartiteGNN
 
 
 def _ensure_sequence(sample_files: Union[str, Path, Sequence[Union[str, Path]]]) -> Sequence[str]:
@@ -117,14 +117,53 @@ class GraphDataset(Dataset):
             if self.args is not None
             else True
         )
+        use_cutoffbound_feature = (
+            bool(getattr(self.args, "use_cutoffbound_feature", True))
+            if self.args is not None
+            else True
+        )
+        cutoff_feature_name = "cutoffbound_normalized"
         if use_default_features:
-            variable_features = variable_default_features
-            constraint_features = constraint_default_features
+            if use_cutoffbound_feature:
+                if cutoff_feature_name not in variable_feature_indices:
+                    raise KeyError(f"Missing variable feature '{cutoff_feature_name}' in sample {self.sample_files[index]}")
+                if cutoff_feature_name not in constraint_feature_indices:
+                    raise KeyError(f"Missing constraint feature '{cutoff_feature_name}' in sample {self.sample_files[index]}")
+                variable_features = variable_default_features
+                constraint_features = constraint_default_features
+            else:
+                variable_keep_names = [name for name in variable_names if name != cutoff_feature_name]
+                constraint_keep_names = [name for name in constraint_names if name != cutoff_feature_name]
+                variable_keep_idxs = [variable_feature_indices[name] for name in variable_keep_names]
+                constraint_keep_idxs = [constraint_feature_indices[name] for name in constraint_keep_names]
+
+                variable_features = variable_default_features[:, variable_keep_idxs]
+                constraint_features = constraint_default_features[:, constraint_keep_idxs]
+                variable_feature_indices = {
+                    name: new_index for new_index, name in enumerate(variable_keep_names)
+                }
+                constraint_feature_indices = {
+                    name: new_index for new_index, name in enumerate(constraint_keep_names)
+                }
         else:
             variable_required = ["type_0", "type_1", "type_2", "type_3", 
                                  "has_lb", "has_ub", "sol_is_at_lb", "sol_is_at_ub", "sol_frac",
                                  "coef_normalized", "sol_val"]
             constraint_required = ["bias", "dualsol_val_normalized"]
+            if use_cutoffbound_feature:
+                variable_required.append(cutoff_feature_name)
+                constraint_required.append(cutoff_feature_name)
+
+            missing_variable = [name for name in variable_required if name not in variable_feature_indices]
+            missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
+            if missing_variable:
+                raise KeyError(
+                    f"Missing variable features {missing_variable} in sample {self.sample_files[index]}"
+                )
+            if missing_constraint:
+                raise KeyError(
+                    f"Missing constraint features {missing_constraint} in sample {self.sample_files[index]}"
+                )
 
             variable_features = torch.stack([variable_default_features[:, variable_feature_indices[name]]
                                     for name in variable_required], 
@@ -403,16 +442,17 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             n_layers=sym_break_layers,
         )
 
-        holo = SetCoverHolo(
-            n_breakings=args.n_breakings,
-            breaking_selector_model=breaking_selector_model,
-            symmetry_breaking_model=symmetry_breaking_model,
-            num_heads=num_heads,
-            isab_num_inds=isab_num_inds,
-            mp_layers=getattr(args, "mp_layers", 2),
-            edge_nfeats=edge_nfeats,
-            use_set_transformer=use_set_transformer,
-        )
+        # holo = SetCoverHolo(
+        #     n_breakings=args.n_breakings,
+        #     breaking_selector_model=breaking_selector_model,
+        #     symmetry_breaking_model=symmetry_breaking_model,
+        #     num_heads=num_heads,
+        #     isab_num_inds=isab_num_inds,
+        #     mp_layers=getattr(args, "mp_layers", 2),
+        #     edge_nfeats=edge_nfeats,
+        #     use_set_transformer=use_set_transformer,
+        # )
+        holo = None
         model = GNNPolicy(emb_size, 
                           cons_nfeats, 
                           edge_nfeats, 

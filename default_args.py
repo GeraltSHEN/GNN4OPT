@@ -31,6 +31,7 @@ BASE_DEFAULTS = {
     "breaking_selector_model_path": None,
     "edge_nfeats": 1,
     "use_default_features": False,
+    "use_cutoffbound_feature": True,
     "remove_bad_candidates": True,
     "file_pattern": "sample_*.pkl",
     "subsamples": None,

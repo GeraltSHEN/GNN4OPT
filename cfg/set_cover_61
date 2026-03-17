@@ -15,7 +15,7 @@ mp_layers: 2
 use_set_transformer: true
 breaking_selector_model_path: null
 edge_nfeats: 1
-use_cutoffbound_feature: true
+use_cutoffbound_feature: false
 use_default_features: false
 remove_bad_candidates: true
 file_pattern: sample_*.pkl

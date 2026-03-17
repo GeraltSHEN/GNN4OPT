@@ -13,9 +13,9 @@
 module load anaconda
 conda activate opt-ml-env
 
-python heuristics/test.py --config cfg/set_cover_54 \
-    --verbose_every 50 \
-    --use_trained_model
+# python heuristics/test.py --config cfg/set_cover_54 \
+#     --verbose_every 50 \
+#     --use_trained_model
 
 python new_heuristics/test.py --config cfg/set_cover_54 \
     --verbose_every 50 \

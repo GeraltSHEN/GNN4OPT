@@ -1,20 +1,22 @@
 #!/bin/sh -l
-# FILENAME:  job_check_deleted
+# FILENAME:  job_run_noaug_raw
 
 #SBATCH -A canli
 #SBATCH --nodes=1 --gpus-per-node=1
 #SBATCH --partition=a100-40gb
-#SBATCH --mem=240G
+#SBATCH --mem=50G
 #SBATCH --cpus-per-task=8
 #SBATCH --time=3-1:30:00
-#SBATCH --job-name check_deleted
-#SBATCH --output=joboutput/job_check_deleteds.out
+#SBATCH --job-name job_run_noaug_raw
+#SBATCH --output=joboutput/job_run_noaug_raw.out
 
 module load anaconda
 conda activate opt-ml-env
 
 DATASETS=("set_cover")
-CFG_IDS=(60)
+CFG_IDS=(61)
+
+echo "ablation: without cutoffbound features"
 
 for DATASET in "${DATASETS[@]}"; do
   echo "** ${DATASET} dataset **"
