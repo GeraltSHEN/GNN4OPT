@@ -480,7 +480,7 @@ class HeuristicPolicy(torch.nn.Module):
                 MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
         self.vars_out = torch.nn.Sequential(
                 torch.nn.LayerNorm(emb_size),
-                MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
+                MLP([emb_size, emb_size, 2], act="relu", norm=None, plain_last=True))
 
     def get_top_k(
         self,
@@ -700,6 +700,7 @@ class HeuristicPolicy(torch.nn.Module):
         nb_candidates,
         n_constraints_per_graph,
         n_variables_per_graph,
+        data=None,
     ):
         # constraint_features: (m1+m2+...+m, d_c) PyG style
         # variable_features: (n1+n2+...+n, d_v) PyG style
@@ -751,19 +752,159 @@ class HeuristicPolicy(torch.nn.Module):
             # DEFAULT: (B*(1+T)*2*n_constraints_max,)
             Y = self.cons_out(Y).squeeze(-1) 
             # choice 1: (B, 1+T, 2, n_constraints_max)
-            Y = Y.view(bsz, 1 + t, 2, n_constraints_max)
-            Y = Y.masked_fill(~real_y_mask, 0.0)
+            Y_choice1 = Y.view(bsz, 1 + t, 2, n_constraints_max)
+            Y_choice1 = Y_choice1.masked_fill(~real_y_mask, 0.0)
             # choice 2: (B*(1+T)*2*(sum_1 n_constraints_i),)
-            Y = Y[real_y_mask.reshape(-1)] # drops padding, real nodes only
+            Y_choice2 = Y_choice1[real_y_mask.reshape(-1)] # drops padding, real nodes only
 
-            # DEFAULT: (B*(1+T)*2*n_variables_max,)
-            X = self.vars_out(X).squeeze(-1) 
-            # choice 1: (B, 1+T, 2, n_variables_max)
-            X = X.view(bsz, 1 + t, 2, n_variables_max)
-            X = X.masked_fill(~real_x_mask, 0.0)
-            # choice 2: (B*(1+T)*2*(sum_1 n_variables_i),)
-            X = X[real_x_mask.reshape(-1)] # drops padding, real nodes only
-        return Y, X
+            # DEFAULT: (B*(1+T)*2*n_variables_max, 2)
+            X = self.vars_out(X)
+            # choice 1: (B, 1+T, 2, n_variables_max, 2)
+            X_choice1 = X.view(bsz, 1 + t, 2, n_variables_max, 2)
+            X_choice1 = X_choice1.masked_fill(~real_x_mask.unsqueeze(-1), 0.0)
+            # choice 2: (B*(1+T)*2*(sum_1 n_variables_i), 2)
+            X_choice2 = X_choice1[real_x_mask.reshape(-1)] # drops padding, real nodes only
+
+        if data is not None:
+            return self.post_process(
+                Y_choice1,
+                X_choice1,
+                candidates,
+                nb_candidates,
+                n_constraints_per_graph,
+                n_variables_per_graph,
+                data=data,
+                real_y_mask=real_y_mask,
+                real_x_mask=real_x_mask,
+            )
+        return Y_choice2, X_choice2
+    
+    def post_process(
+        self,
+        Y,
+        X,
+        candidates,
+        nb_candidates,
+        n_constraints_per_graph,
+        n_variables_per_graph,
+        data,
+        real_y_mask,
+        real_x_mask,
+    ):
+        """
+        Tensorized post-processing with explicit-dual substitution.
+
+        Expected Y: (B, 1+T, 2, n_constraints_max)
+        Expected X: (B, 1+T, 2, n_variables_max, 2) where last dim is [alpha, beta].
+
+        Required data keys:
+            rhs (or b_ub, where rhs=-b_ub),
+            parent_lbs (or lbs),
+            parent_ubs (or ubs),
+            lp_solution (or lpsol),
+            parent_obj,
+            optional cutoffbound, objective_offset.
+        """
+        device = Y.device
+        dtype = Y.dtype
+
+        n_constraints_per_graph = n_constraints_per_graph.to(device=device, dtype=torch.long).reshape(-1)
+        n_variables_per_graph = n_variables_per_graph.to(device=device, dtype=torch.long).reshape(-1)
+        bsz, views, _, n_constraints_max = Y.shape
+        _, _, _, n_variables_max, _ = X.shape
+        t = views - 1
+
+        def _to_float_tensor(v):
+            if torch.is_tensor(v):
+                return v.to(device=device, dtype=dtype)
+            return torch.as_tensor(v, device=device, dtype=dtype)
+
+        def _to_batch(v):
+            t_ = _to_float_tensor(v)
+            if t_.dim() == 0:
+                return t_.repeat(bsz)
+            return t_.reshape(bsz)
+
+        def _to_padded(v, n_per_graph, n_max):
+            t_ = _to_float_tensor(v)
+            if t_.dim() == 2:
+                return t_
+            total = int(n_per_graph.sum().item())
+            row_ids = torch.repeat_interleave(torch.arange(bsz, device=device), n_per_graph)
+            offsets = torch.cumsum(
+                torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_per_graph[:-1])),
+                dim=0,
+            )
+            local_idx = torch.arange(total, device=device) - offsets[row_ids]
+            out = torch.zeros((bsz, n_max), device=device, dtype=dtype)
+            out[row_ids, local_idx] = t_.reshape(total)
+            return out
+
+        rhs_src = data["rhs"] if "rhs" in data else -_to_float_tensor(data["b_ub"])
+        parent_lbs_src = data["parent_lbs"] if "parent_lbs" in data else data["lbs"]
+        parent_ubs_src = data["parent_ubs"] if "parent_ubs" in data else data["ubs"]
+        lp_solution_src = data["lp_solution"] if "lp_solution" in data else data["lpsol"]
+
+        rhs = _to_padded(rhs_src, n_constraints_per_graph, n_constraints_max)
+        parent_lbs = _to_padded(parent_lbs_src, n_variables_per_graph, n_variables_max)
+        parent_ubs = _to_padded(parent_ubs_src, n_variables_per_graph, n_variables_max)
+        lp_solution = _to_padded(lp_solution_src, n_variables_per_graph, n_variables_max)
+
+        parent_obj = _to_batch(data["parent_obj"])
+        cutoffbound = _to_batch(data.get("cutoffbound"))
+        objective_offset = _to_batch(data.get("objective_offset"))
+
+        cons_mask = real_y_mask[:, 0, 0, :].to(dtype)
+        var_mask_bool = real_x_mask[:, 0, 0, :]
+        var_mask = var_mask_bool.to(dtype)
+
+        y_pool = Y[:, 1:, :, :].reshape(bsz, 2 * t, n_constraints_max) * cons_mask.unsqueeze(1)
+        alpha_pool = X[:, 1:, :, :, 0].reshape(bsz, 2 * t, n_variables_max) * var_mask.unsqueeze(1)
+        beta_pool = X[:, 1:, :, :, 1].reshape(bsz, 2 * t, n_variables_max) * var_mask.unsqueeze(1)
+
+        rhs = rhs * cons_mask
+        parent_lbs = parent_lbs * var_mask
+        parent_ubs = parent_ubs * var_mask
+        lp_solution = lp_solution * var_mask
+
+        base_obj = (
+            torch.einsum("bm,bpm->bp", rhs, y_pool)
+            - torch.einsum("bn,bpn->bp", parent_ubs, alpha_pool)
+            + torch.einsum("bn,bpn->bp", parent_lbs, beta_pool)
+            + objective_offset.unsqueeze(1)
+        )
+
+        down_ub = torch.minimum(parent_ubs, torch.floor(lp_solution))
+        up_lb = torch.maximum(parent_lbs, torch.ceil(lp_solution))
+        delta_down = (parent_ubs - down_ub).clamp(min=0.0) * var_mask
+        delta_up = (up_lb - parent_lbs).clamp(min=0.0) * var_mask
+
+        down_obj = base_obj.unsqueeze(-1) + alpha_pool * delta_down.unsqueeze(1)
+        up_obj = base_obj.unsqueeze(-1) + beta_pool * delta_up.unsqueeze(1)
+
+        max_down = down_obj.max(dim=1).values
+        max_up = up_obj.max(dim=1).values
+
+        max_down = torch.minimum(max_down, cutoffbound.unsqueeze(1))
+        max_up = torch.minimum(max_up, cutoffbound.unsqueeze(1))
+
+        gain_down = torch.clamp(max_down - parent_obj.unsqueeze(1), min=1e-9)
+        gain_up = torch.clamp(max_up - parent_obj.unsqueeze(1), min=1e-9)
+        pseudo_scores = gain_down * gain_up
+        pseudo_scores = pseudo_scores.masked_fill(~var_mask_bool, -1e8)
+
+        logits = pseudo_scores[var_mask_bool]
+
+        candidates = candidates.to(device=device, dtype=torch.long).reshape(-1)
+        nb_candidates = nb_candidates.to(device=device, dtype=torch.long).reshape(-1)
+        candidate_logits = logits[candidates]
+        max_pad = int(nb_candidates.max().item())
+        splits = torch.split(candidate_logits, nb_candidates.tolist())
+        padded_logits = torch.stack(
+            [F.pad(slice_, (0, max_pad - slice_.size(0)), "constant", -1e8) for slice_ in splits],
+            dim=0,
+        )
+        return logits, padded_logits, pseudo_scores
 
 
 

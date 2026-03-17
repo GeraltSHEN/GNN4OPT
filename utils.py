@@ -118,17 +118,17 @@ class GraphDataset(Dataset):
             else True
         )
         use_cutoffbound_feature = (
-            bool(getattr(self.args, "use_cutoffbound_feature", True))
+            bool(getattr(self.args, "use_cutoffbound_feature", False))
             if self.args is not None
             else True
         )
         cutoff_feature_name = "cutoffbound_normalized"
         if use_default_features:
             if use_cutoffbound_feature:
-                if cutoff_feature_name not in variable_feature_indices:
-                    raise KeyError(f"Missing variable feature '{cutoff_feature_name}' in sample {self.sample_files[index]}")
-                if cutoff_feature_name not in constraint_feature_indices:
-                    raise KeyError(f"Missing constraint feature '{cutoff_feature_name}' in sample {self.sample_files[index]}")
+                # if cutoff_feature_name not in variable_feature_indices:
+                #     raise KeyError(f"Missing variable feature '{cutoff_feature_name}' in sample {self.sample_files[index]}")
+                # if cutoff_feature_name not in constraint_feature_indices:
+                #     raise KeyError(f"Missing constraint feature '{cutoff_feature_name}' in sample {self.sample_files[index]}")
                 variable_features = variable_default_features
                 constraint_features = constraint_default_features
             else:
@@ -156,14 +156,14 @@ class GraphDataset(Dataset):
 
             missing_variable = [name for name in variable_required if name not in variable_feature_indices]
             missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
-            if missing_variable:
-                raise KeyError(
-                    f"Missing variable features {missing_variable} in sample {self.sample_files[index]}"
-                )
-            if missing_constraint:
-                raise KeyError(
-                    f"Missing constraint features {missing_constraint} in sample {self.sample_files[index]}"
-                )
+            # if missing_variable:
+            #     raise KeyError(
+            #         f"Missing variable features {missing_variable} in sample {self.sample_files[index]}"
+            #     )
+            # if missing_constraint:
+            #     raise KeyError(
+            #         f"Missing constraint features {missing_constraint} in sample {self.sample_files[index]}"
+            #     )
 
             variable_features = torch.stack([variable_default_features[:, variable_feature_indices[name]]
                                     for name in variable_required], 
