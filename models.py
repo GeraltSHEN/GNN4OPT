@@ -435,13 +435,21 @@ class HeuristicPolicy(torch.nn.Module):
         branching_model,
         gnn_backbone: str = "bipartite", # sage
         sage_mlp_layers: int = 2,
+        n_branching: int = 1,
     ):
         super().__init__()
         if n_layers <= 0:
             raise ValueError("n_layers must be >= 1.")
+        if n_branching <= 0:
+            raise ValueError("n_branching must be >= 1.")
         self.n_layers = n_layers
         self.gnn_backbone = gnn_backbone
         self.branching_model = branching_model
+        self.n_branching = int(n_branching)
+        if self.branching_model is not None:
+            self.branching_model.eval()
+            for p in self.branching_model.parameters():
+                p.requires_grad_(False)
 
         # EMBEDDING
         self.cons_embedding = torch.nn.Sequential(
@@ -470,6 +478,63 @@ class HeuristicPolicy(torch.nn.Module):
         self.cons_out = torch.nn.Sequential(
                 torch.nn.LayerNorm(emb_size),
                 MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
+        self.vars_out = torch.nn.Sequential(
+                torch.nn.LayerNorm(emb_size),
+                MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
+
+    def get_top_k(
+        self,
+        constraint_features,
+        edge_indices,
+        edge_features,
+        variable_features,
+        candidates,
+        nb_candidates,
+        n_constraints_per_graph,
+        n_variables_per_graph,
+    ):
+        """
+        Use the pre-trained branching_model (GNNPolicy) to score variables and return
+        per-graph top-k branching candidates as:
+        - branching_candidates_global: (B, K) global variable indices
+        - top_local: (B, K) column indices in the padded candidate matrix
+        """
+        n_variables_per_graph = n_variables_per_graph.to(variable_features.device).long().reshape(-1)
+        n_constraints_per_graph = n_constraints_per_graph.to(constraint_features.device).long().reshape(-1)
+        bsz = n_variables_per_graph.numel()
+        k = self.n_branching
+
+        with torch.no_grad():
+            scores = self.branching_model(
+                constraint_features,
+                edge_indices,
+                edge_features,
+                variable_features,
+                candidates=candidates,
+                n_constraints_per_graph=n_constraints_per_graph,
+                n_variables_per_graph=n_variables_per_graph,
+            )
+        scores = scores.detach()
+        candidates = candidates.to(scores.device).long().reshape(-1)
+        nb_candidates = nb_candidates.to(scores.device).long().reshape(-1)
+        candidate_scores = scores[candidates]
+
+        max_cands = int(nb_candidates.max().item())
+        row_ids = torch.repeat_interleave(torch.arange(bsz, device=scores.device), nb_candidates)
+        cand_offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=scores.device, dtype=torch.long), nb_candidates[:-1])),
+            dim=0,
+        )
+        local_idx = torch.arange(candidates.numel(), device=scores.device) - cand_offsets[row_ids]
+
+        padded_scores = scores.new_full((bsz, max_cands), -1e8)
+        padded_candidates = candidates.new_full((bsz, max_cands), -1)
+        padded_scores[row_ids, local_idx] = candidate_scores
+        padded_candidates[row_ids, local_idx] = candidates
+
+        top_local = padded_scores.topk(k=k, dim=-1).indices
+        branching_candidates_global = padded_candidates.gather(1, top_local)
+        return branching_candidates_global, top_local
 
     def init_embedding(
         self,
@@ -631,23 +696,27 @@ class HeuristicPolicy(torch.nn.Module):
         edge_indices,
         edge_features,
         variable_features,
-        candidates=None,
-        n_constraints_per_graph=None,
-        n_variables_per_graph=None,
+        candidates,
+        nb_candidates,
+        n_constraints_per_graph,
+        n_variables_per_graph,
     ):
         # constraint_features: (m1+m2+...+m, d_c) PyG style
         # variable_features: (n1+n2+...+n, d_v) PyG style
         # edge_indices for dense matrix in shape of (m1+m2+...+m, n1+n2+...+n)
 
-        # 1. find top-k branching candidates (no shape change needed)
+        # 1. find top-k branching candidates from pre-trained GNNPolicy
         with _perf_timer("HeuristicPolicy step 1: find branching candidates"):
-            branching_candidates = self.branching_model(constraint_features,
-                                                    edge_indices,
-                                                    edge_features,
-                                                    variable_features,
-                                                    candidates,
-                                                    n_constraints_per_graph,
-                                                    n_variables_per_graph)
+            branching_candidates, top_local = self.get_top_k(
+                constraint_features=constraint_features,
+                edge_indices=edge_indices,
+                edge_features=edge_features,
+                variable_features=variable_features,
+                candidates=candidates,
+                nb_candidates=nb_candidates,
+                n_constraints_per_graph=n_constraints_per_graph,
+                n_variables_per_graph=n_variables_per_graph,
+            )
         
         # 2. init node/edges features
         # Y: (B*(1+T)*2*n_constraints_max, F_c) PyG style
@@ -677,15 +746,24 @@ class HeuristicPolicy(torch.nn.Module):
         # 5. readout constraint features
         # (PyG's MLP should work fine with both PyG style or (B, 1+T, 2, n_max, F) style)
         with _perf_timer("HeuristicPolicy step 5: output head"):
+            bsz, t, n_constraints_max, n_variables_max = shape_info
+
             # DEFAULT: (B*(1+T)*2*n_constraints_max,)
             Y = self.cons_out(Y).squeeze(-1) 
             # choice 1: (B, 1+T, 2, n_constraints_max)
-            bsz, t, n_constraints_max, _ = shape_info
             Y = Y.view(bsz, 1 + t, 2, n_constraints_max)
             Y = Y.masked_fill(~real_y_mask, 0.0)
             # choice 2: (B*(1+T)*2*(sum_1 n_constraints_i),)
             Y = Y[real_y_mask.reshape(-1)] # drops padding, real nodes only
-        return Y
+
+            # DEFAULT: (B*(1+T)*2*n_variables_max,)
+            X = self.vars_out(X).squeeze(-1) 
+            # choice 1: (B, 1+T, 2, n_variables_max)
+            X = X.view(bsz, 1 + t, 2, n_variables_max)
+            X = X.masked_fill(~real_x_mask, 0.0)
+            # choice 2: (B*(1+T)*2*(sum_1 n_variables_i),)
+            X = X[real_x_mask.reshape(-1)] # drops padding, real nodes only
+        return Y, X
 
 
 
