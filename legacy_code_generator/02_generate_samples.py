@@ -470,8 +470,7 @@ if __name__ == '__main__':
         'mode',
         nargs='?',
         default='default',
-        choices=['default', 'debug'],
-        help='Use "debug" to write samples under *_debug directories.',
+        help='Dataset suffix. Special values: "default" -> base path, "debug" -> *_debug path + reduced sample counts.',
     )
     parser.add_argument(
         '--dual_top_k',
@@ -493,14 +492,21 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
 
-    sample_problem_dir = f"{args.problem}_debug" if args.mode == 'debug' else args.problem
+    mode = str(args.mode).strip()
+    is_debug = mode == 'debug'
+    if mode in {'', 'default'}:
+        sample_problem_dir = args.problem
+    elif is_debug:
+        sample_problem_dir = f"{args.problem}_debug"
+    else:
+        sample_problem_dir = f"{args.problem}_{mode}"
 
     print(f"seed {args.seed}")
 
     train_size = 100000
     valid_size = 20000
     test_size = 20000
-    if args.mode == 'debug':
+    if is_debug:
         train_size //= 10
         valid_size //= 10
         test_size //= 10
