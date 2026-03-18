@@ -532,8 +532,16 @@ class HeuristicPolicy(torch.nn.Module):
         padded_scores[row_ids, local_idx] = candidate_scores
         padded_candidates[row_ids, local_idx] = candidates
 
-        top_local = padded_scores.topk(k=k, dim=-1).indices
+        k_eff = min(k, max_cands)
+        top_local = padded_scores.topk(k=k_eff, dim=-1).indices
+        if k_eff < k:
+            top_local = torch.cat((top_local, top_local[:, :1].expand(-1, k - k_eff)), dim=1)
+
         branching_candidates_global = padded_candidates.gather(1, top_local)
+        fallback_candidates = padded_candidates[:, :1].expand(-1, top_local.size(1))
+        invalid = branching_candidates_global < 0
+        branching_candidates_global = torch.where(invalid, fallback_candidates, branching_candidates_global)
+        top_local = torch.where(invalid, torch.zeros_like(top_local), top_local)
         return branching_candidates_global, top_local
 
     def init_embedding(
@@ -754,16 +762,12 @@ class HeuristicPolicy(torch.nn.Module):
             # choice 1: (B, 1+T, 2, n_constraints_max)
             Y_choice1 = Y.view(bsz, 1 + t, 2, n_constraints_max)
             Y_choice1 = Y_choice1.masked_fill(~real_y_mask, 0.0)
-            # choice 2: (B*(1+T)*2*(sum_1 n_constraints_i),)
-            Y_choice2 = Y_choice1[real_y_mask.reshape(-1)] # drops padding, real nodes only
 
             # DEFAULT: (B*(1+T)*2*n_variables_max, 2)
             X = self.vars_out(X)
             # choice 1: (B, 1+T, 2, n_variables_max, 2)
             X_choice1 = X.view(bsz, 1 + t, 2, n_variables_max, 2)
             X_choice1 = X_choice1.masked_fill(~real_x_mask.unsqueeze(-1), 0.0)
-            # choice 2: (B*(1+T)*2*(sum_1 n_variables_i), 2)
-            X_choice2 = X_choice1[real_x_mask.reshape(-1)] # drops padding, real nodes only
 
         if data is not None:
             return self.post_process(
@@ -777,6 +781,9 @@ class HeuristicPolicy(torch.nn.Module):
                 real_y_mask=real_y_mask,
                 real_x_mask=real_x_mask,
             )
+        # choice 2: drop padding and keep only real nodes
+        Y_choice2 = Y_choice1.reshape(-1)[real_y_mask.reshape(-1)]
+        X_choice2 = X_choice1.reshape(-1, X_choice1.size(-1))[real_x_mask.reshape(-1)]
         return Y_choice2, X_choice2
     
     def post_process(

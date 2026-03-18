@@ -1,17 +1,20 @@
-from __future__ import annotations
-
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+import gzip
+import pickle
 
 import numpy as np
 import torch
 
-from .utils import load_sample
+
+def load_sample(path: Union[str, Path]) -> Dict[str, Any]:
+    with gzip.open(Path(path), "rb") as fh:
+        return pickle.load(fh)
 
 
 class IndexedGraphDataset:
     """
-    Lightweight wrapper that adds `graph_index` to each sample so batched code can
+    Lightweight wrapper that adds `graph_id` to each sample so batched code can
     recover which raw sample file each graph came from.
     """
 
@@ -27,7 +30,7 @@ class IndexedGraphDataset:
 
     def __getitem__(self, index):
         graph = self.base_dataset[index]
-        graph.graph_index = torch.tensor([int(index)], dtype=torch.long)
+        graph.graph_id = torch.tensor([int(index)], dtype=torch.long)
         return graph
 
     def get(self, index):
@@ -84,7 +87,7 @@ class HeuristicPostProcessInterface:
         sample = load_sample(self.sample_files[int(graph_idx)])
         sample_data = sample["data"]
         sample_state = sample_data[0]
-        cutoffbound = float(sample_data[5]) if len(sample_data) >= 6 and sample_data[5] is not None else float("inf")
+        cutoffbound = float(sample_data[5])
 
         constraint_dict, _, variable_dict = sample_state
         constraint_values = np.asarray(constraint_dict["values"], dtype=np.float32)
@@ -92,11 +95,11 @@ class HeuristicPostProcessInterface:
         constraint_names = list(constraint_dict["names"])
         variable_names = list(variable_dict["names"])
 
-        bias = self._col(constraint_values, constraint_names, "bias", 0.0)
+        bias = self._col(constraint_values, constraint_names, "bias")
         rhs = -bias
 
-        lp_solution = self._col(variable_values, variable_names, "sol_val", 0.0)
-        obj_coeffs = self._col(variable_values, variable_names, "coef_normalized", 0.0)
+        lp_solution = self._col(variable_values, variable_names, "sol_val")
+        obj_coeffs = self._col(variable_values, variable_names, "coef_normalized")
 
         parent_lbs, parent_ubs = self._infer_parent_bounds(variable_values, variable_names)
 
@@ -125,8 +128,8 @@ class HeuristicPostProcessInterface:
         self._cache[graph_idx] = out
         return out
 
-    def make_batch_data(self, graph_index: torch.Tensor, device: torch.device, dtype: torch.dtype = torch.float32):
-        graph_ids = graph_index.reshape(-1).detach().cpu().tolist()
+    def make_batch_data(self, graph_id: torch.Tensor, device: torch.device, dtype: torch.dtype = torch.float32):
+        graph_ids = graph_id.reshape(-1).detach().cpu().tolist()
         batch = [self._load_one(int(i)) for i in graph_ids]
 
         rhs = np.concatenate([x["rhs"] for x in batch], axis=0)

@@ -5,7 +5,10 @@ from pathlib import Path
 import pdb
 from typing import Any, Dict, Optional
 
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
 import torch
 import torch.nn.functional as F
 import tqdm
@@ -13,7 +16,7 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.loader import DataLoader
 
-from utils import (
+from tmp_utils import (
     get_optimizer,
     load_model,
     load_data,
@@ -38,6 +41,8 @@ from pytorchltr.loss import LambdaNDCGLoss1, LambdaNDCGLoss2, LambdaARPLoss1, La
 
 def log_cpu_memory_usage(epoch: int, step: Optional[str] = None):
     """Report CPU memory usage at coarse intervals."""
+    if psutil is None:
+        return
     process = psutil.Process(os.getpid())
     memory_info = process.memory_info()
     if epoch == 1 or epoch % 1 == 0:
@@ -62,7 +67,7 @@ def _infer_feature_dimensions(train_loader):
 def _forward_with_optional_postprocess(policy, batch, postprocess_interface=None):
     if hasattr(policy, "post_process"):
         post_data = postprocess_interface.make_batch_data(
-            batch.graph_index,
+            batch.graph_id,
             device=batch.constraint_features.device,
             dtype=batch.constraint_features.dtype,
         )
