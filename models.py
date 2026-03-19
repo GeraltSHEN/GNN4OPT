@@ -709,6 +709,7 @@ class HeuristicPolicy(torch.nn.Module):
         n_constraints_per_graph,
         n_variables_per_graph,
         data=None,
+        return_aux: bool = False,
     ):
         # constraint_features: (m1+m2+...+m, d_c) PyG style
         # variable_features: (n1+n2+...+n, d_v) PyG style
@@ -780,6 +781,9 @@ class HeuristicPolicy(torch.nn.Module):
                 data=data,
                 real_y_mask=real_y_mask,
                 real_x_mask=real_x_mask,
+                top_local=top_local,
+                branching_candidates_global=branching_candidates,
+                return_aux=return_aux,
             )
         # choice 2: drop padding and keep only real nodes
         Y_choice2 = Y_choice1.reshape(-1)[real_y_mask.reshape(-1)]
@@ -797,6 +801,9 @@ class HeuristicPolicy(torch.nn.Module):
         data,
         real_y_mask,
         real_x_mask,
+        top_local=None,
+        branching_candidates_global=None,
+        return_aux: bool = False,
     ):
         """
         Tensorized post-processing with explicit-dual substitution.
@@ -809,7 +816,6 @@ class HeuristicPolicy(torch.nn.Module):
             parent_lbs (or lbs),
             parent_ubs (or ubs),
             lp_solution (or lpsol),
-            parent_obj,
             optional cutoffbound, objective_offset.
         """
         device = Y.device
@@ -857,18 +863,35 @@ class HeuristicPolicy(torch.nn.Module):
         parent_ubs = _to_padded(parent_ubs_src, n_variables_per_graph, n_variables_max)
         lp_solution = _to_padded(lp_solution_src, n_variables_per_graph, n_variables_max)
 
-        parent_obj = _to_batch(data["parent_obj"])
-        cutoffbound = _to_batch(data.get("cutoffbound"))
-        objective_offset = _to_batch(data.get("objective_offset"))
-
         cons_mask = real_y_mask[:, 0, 0, :].to(dtype)
         var_mask_bool = real_x_mask[:, 0, 0, :]
         var_mask = var_mask_bool.to(dtype)
 
+        cutoffbound = (
+            _to_batch(data["cutoffbound"])
+            if "cutoffbound" in data
+            else torch.full((bsz,), float("inf"), device=device, dtype=dtype)
+        )
+        objective_offset = (
+            _to_batch(data["objective_offset"])
+            if "objective_offset" in data
+            else torch.zeros((bsz,), device=device, dtype=dtype)
+        )
+
+        parent_y = Y[:, 0, :, :] * cons_mask.unsqueeze(1)
+        parent_alpha = X[:, 0, :, :, 0] * var_mask.unsqueeze(1)
+        parent_beta = X[:, 0, :, :, 1] * var_mask.unsqueeze(1)
+        parent_obj_views = (
+            torch.einsum("bm,bdm->bd", rhs, parent_y)
+            - torch.einsum("bn,bdn->bd", parent_ubs, parent_alpha)
+            + torch.einsum("bn,bdn->bd", parent_lbs, parent_beta)
+            + objective_offset.unsqueeze(1)
+        )
+        parent_obj = parent_obj_views.mean(dim=1)
+
         y_pool = Y[:, 1:, :, :].reshape(bsz, 2 * t, n_constraints_max) * cons_mask.unsqueeze(1)
         alpha_pool = X[:, 1:, :, :, 0].reshape(bsz, 2 * t, n_variables_max) * var_mask.unsqueeze(1)
         beta_pool = X[:, 1:, :, :, 1].reshape(bsz, 2 * t, n_variables_max) * var_mask.unsqueeze(1)
-
         rhs = rhs * cons_mask
         parent_lbs = parent_lbs * var_mask
         parent_ubs = parent_ubs * var_mask
@@ -907,13 +930,73 @@ class HeuristicPolicy(torch.nn.Module):
         candidate_logits = logits[candidates]
         max_pad = int(nb_candidates.max().item())
         splits = torch.split(candidate_logits, nb_candidates.tolist())
+        candidate_splits = torch.split(candidates, nb_candidates.tolist())
         padded_logits = torch.stack(
             [F.pad(slice_, (0, max_pad - slice_.size(0)), "constant", -1e8) for slice_ in splits],
             dim=0,
         )
-        return logits, padded_logits, pseudo_scores
+        padded_candidates_global = torch.stack(
+            [F.pad(slice_, (0, max_pad - slice_.size(0)), "constant", -1) for slice_ in candidate_splits],
+            dim=0,
+        )
 
+        if branching_candidates_global is None:
+            if top_local is None:
+                raise ValueError("top_local or branching_candidates_global must be provided.")
+            top_local = top_local.to(device=device, dtype=torch.long)
+            branching_candidates_global = padded_candidates_global.gather(1, top_local)
+        else:
+            branching_candidates_global = branching_candidates_global.to(device=device, dtype=torch.long)
 
+        variable_offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_variables_per_graph[:-1])),
+            dim=0,
+        )
+        branching_candidates_local = branching_candidates_global - variable_offsets.unsqueeze(1)
+        valid_topk = (
+            (branching_candidates_local >= 0)
+            & (branching_candidates_local < n_variables_per_graph.unsqueeze(1))
+        )
+        branching_candidates_local_safe = branching_candidates_local.clamp(min=0, max=n_variables_max - 1)
+
+        down_view_idx = torch.arange(t, device=device, dtype=torch.long) * 2
+        up_view_idx = down_view_idx + 1
+        down_obj_topk = down_obj[:, down_view_idx, :].gather(
+            -1, branching_candidates_local_safe.unsqueeze(-1)
+        ).squeeze(-1)
+        up_obj_topk = up_obj[:, up_view_idx, :].gather(
+            -1, branching_candidates_local_safe.unsqueeze(-1)
+        ).squeeze(-1)
+
+        down_obj_topk = torch.minimum(down_obj_topk, cutoffbound.unsqueeze(1))
+        up_obj_topk = torch.minimum(up_obj_topk, cutoffbound.unsqueeze(1))
+        gain_down_topk = torch.clamp(down_obj_topk - parent_obj.unsqueeze(1), min=1e-9)
+        gain_up_topk = torch.clamp(up_obj_topk - parent_obj.unsqueeze(1), min=1e-9)
+        pseudo_scores_topk = (gain_down_topk * gain_up_topk).masked_fill(~valid_topk, -1e8)
+
+        if not return_aux:
+            return logits, padded_logits, pseudo_scores
+
+        y_topk = Y[:, 1:, :, :] * cons_mask.view(bsz, 1, 1, n_constraints_max)
+        alpha_topk = X[:, 1:, :, :, 0] * var_mask.view(bsz, 1, 1, n_variables_max)
+        beta_topk = X[:, 1:, :, :, 1] * var_mask.view(bsz, 1, 1, n_variables_max)
+
+        aux = {
+            "pseudo_scores": pseudo_scores,
+            "top_local": top_local,
+            "branching_candidates_global": branching_candidates_global,
+            "branching_candidates_local": branching_candidates_local_safe,
+            "real_y_mask_topk": real_y_mask[:, 1:, :, :],
+            "real_x_mask_topk": real_x_mask[:, 1:, :, :],
+            "topk_y": y_topk,
+            "topk_alpha": alpha_topk,
+            "topk_beta": beta_topk,
+            "topk_down_obj": down_obj_topk,
+            "topk_up_obj": up_obj_topk,
+            "topk_pseudo_scores": pseudo_scores_topk,
+            "parent_obj": parent_obj,
+        }
+        return logits, padded_logits, aux
 
 # IGNORE. NEVER READ THIS. ONLY CONFUSE PEOPLE
 # class HeuristicPolicy(torch.nn.Module):

@@ -28,6 +28,7 @@ from tmp_utils import (
 from heuristics.postprocess_interface import (
     HeuristicPostProcessInterface,
     IndexedGraphDataset,
+    load_sample,
 )
 from losses import (
     NormalizedPairwiseLogisticLoss,
@@ -64,13 +65,37 @@ def _infer_feature_dimensions(train_loader):
     return cons_nfeats, edge_nfeats, var_nfeats
 
 
-def _forward_with_optional_postprocess(policy, batch, postprocess_interface=None):
+def _forward_with_optional_postprocess(
+    policy,
+    batch,
+    postprocess_interface=None,
+    *,
+    return_aux: bool = False,
+):
     if hasattr(policy, "post_process"):
         post_data = postprocess_interface.make_batch_data(
             batch.graph_id,
             device=batch.constraint_features.device,
             dtype=batch.constraint_features.dtype,
         )
+        if return_aux:
+            logits, padded_logits, aux = policy(
+                batch.constraint_features,
+                batch.edge_index,
+                batch.edge_attr,
+                batch.variable_features,
+                candidates=batch.candidates,
+                nb_candidates=batch.nb_candidates,
+                n_constraints_per_graph=batch.n_constraints_per_graph,
+                n_variables_per_graph=batch.n_variables_per_graph,
+                data=post_data,
+                return_aux=True,
+            )
+            if isinstance(aux, dict):
+                aux = {**aux, "post_data": post_data}
+            else:
+                aux = {"model_aux": aux, "post_data": post_data}
+            return logits, padded_logits, aux
         logits, padded_logits, _ = policy(
             batch.constraint_features,
             batch.edge_index,
@@ -93,6 +118,8 @@ def _forward_with_optional_postprocess(policy, batch, postprocess_interface=None
         n_constraints_per_graph=batch.n_constraints_per_graph,
         n_variables_per_graph=batch.n_variables_per_graph,
     )
+    if return_aux:
+        return logits, None, None
     return logits, None
 
 
@@ -112,6 +139,17 @@ def _wrap_loader_for_postprocess(loader, *, shuffle: bool):
     )
     postprocess_interface = HeuristicPostProcessInterface(indexed_dataset.sample_files)
     return wrapped_loader, postprocess_interface
+
+
+TOPK_TARGET_KEY = "top8_regression_targets"
+
+
+def _load_saved_topk_targets(graph_id: torch.Tensor, postprocess_interface):
+    targets = []
+    for gid in graph_id.reshape(-1).detach().cpu().tolist():
+        sample = load_sample(postprocess_interface.sample_files[int(gid)])
+        targets.append(sample[TOPK_TARGET_KEY])
+    return targets
 
 
 def train(
@@ -134,6 +172,9 @@ def train(
     save_every = args.save_every
     print_every = args.print_every
     loss_option = args.loss_option
+    regression_target = None
+    if loss_option == "regression":
+        regression_target = str(getattr(args, "regression_target", "score")).lower()
     ranking_loss_factories = {
         "LambdaNDCGLoss1": LambdaNDCGLoss1,
         "LambdaNDCGLoss2": LambdaNDCGLoss2,
@@ -224,11 +265,20 @@ def train(
                 )
 
             batch = batch.to(device)
-            flat_logits, precomputed_padded_logits = _forward_with_optional_postprocess(
-                policy,
-                batch,
-                postprocess_interface=train_postprocess_interface,
-            )
+            model_aux = None
+            if loss_option == "regression":
+                flat_logits, precomputed_padded_logits, model_aux = _forward_with_optional_postprocess(
+                    policy,
+                    batch,
+                    postprocess_interface=train_postprocess_interface,
+                    return_aux=True,
+                )
+            else:
+                flat_logits, precomputed_padded_logits = _forward_with_optional_postprocess(
+                    policy,
+                    batch,
+                    postprocess_interface=train_postprocess_interface,
+                )
 
             if score_th < float("inf"):
                 select_indices = (
@@ -258,8 +308,75 @@ def train(
                     if precomputed_padded_logits is not None
                     else pad_tensor(flat_logits[batch.candidates], batch.nb_candidates)
                 )
-                target_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates)
-                loss = F.mse_loss(logits, target_scores)
+                if model_aux is None:
+                    target_scores = pad_tensor(batch.candidate_scores, batch.nb_candidates)
+                    loss = F.mse_loss(logits, target_scores)
+                else:
+                    saved_targets = _load_saved_topk_targets(
+                        batch.graph_id,
+                        train_postprocess_interface,
+                    )
+                    if regression_target == "score":
+                        true_scores = torch.stack(
+                            [
+                                torch.as_tensor(
+                                    target["scores"],
+                                    device=device,
+                                    dtype=model_aux["topk_pseudo_scores"].dtype,
+                                )
+                                for target in saved_targets
+                            ],
+                            dim=0,
+                        )
+                        loss = F.mse_loss(model_aux["topk_pseudo_scores"], true_scores)
+                    elif regression_target == "obj":
+                        pred_obj = torch.stack(
+                            [model_aux["topk_down_obj"], model_aux["topk_up_obj"]],
+                            dim=-1,
+                        )
+                        true_obj = torch.stack(
+                            [
+                                torch.as_tensor(
+                                    target["obj"],
+                                    device=device,
+                                    dtype=pred_obj.dtype,
+                                )
+                                for target in saved_targets
+                            ],
+                            dim=0,
+                        )
+                        loss = F.mse_loss(pred_obj, true_obj)
+                    elif regression_target == "dual":
+                        pred_y = model_aux["topk_y"]
+                        pred_alpha = model_aux["topk_alpha"]
+                        pred_beta = model_aux["topk_beta"]
+
+                        true_y = torch.zeros_like(pred_y)
+                        true_alpha = torch.zeros_like(pred_alpha)
+                        true_beta = torch.zeros_like(pred_beta)
+                        for b_idx, target in enumerate(saved_targets):
+                            y_target = torch.as_tensor(target["y"], device=device, dtype=pred_y.dtype)
+                            alpha_target = torch.as_tensor(
+                                target["alpha"], device=device, dtype=pred_alpha.dtype
+                            )
+                            beta_target = torch.as_tensor(
+                                target["beta"], device=device, dtype=pred_beta.dtype
+                            )
+                            true_y[b_idx, :, :, : y_target.size(-1)] = y_target
+                            true_alpha[b_idx, :, :, : alpha_target.size(-1)] = alpha_target
+                            true_beta[b_idx, :, :, : beta_target.size(-1)] = beta_target
+
+                        y_mask = model_aux["real_y_mask_topk"].to(dtype=pred_y.dtype)
+                        x_mask = model_aux["real_x_mask_topk"].to(dtype=pred_alpha.dtype)
+                        loss = (
+                            F.mse_loss(pred_y * y_mask, true_y * y_mask)
+                            + F.mse_loss(pred_alpha * x_mask, true_alpha * x_mask)
+                            + F.mse_loss(pred_beta * x_mask, true_beta * x_mask)
+                        )
+                    else:
+                        raise ValueError(
+                            f"Unsupported regression_target '{regression_target}'. Use one of: dual, obj, score."
+                        )
             elif ranking_loss_fn is not None:
                 logits = pad_tensor(flat_logits[batch.candidates], batch.nb_candidates,
                                     pad_value=0)
@@ -459,6 +576,12 @@ def parse_args(argv=None):
         type=float,
         default=argparse.SUPPRESS,
         help="Tier-aware pairwise loss coefficient for tier2-tier2 pairs.",
+    )
+    parser.add_argument(
+        "--regression_target",
+        type=str,
+        default="score",
+        help="Regression target for loss_option=regression: one of {dual, obj, score}.",
     )
     return parser.parse_args(argv)
 
