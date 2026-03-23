@@ -120,8 +120,8 @@ def main():
 
         top_local = select_topk_local_positions(all_var_scores, graph_device.candidates, int(args.k))
         top_local_cpu = top_local.detach().cpu()
-        top_candidates = graph.candidates[top_local_cpu].numpy().astype(np.int64)
-        top_scores = graph.candidate_scores[top_local_cpu].numpy().astype(np.float32)
+        top_candidates = graph.candidates[top_local_cpu].detach().cpu().numpy().astype(np.int64)
+        top_scores = graph.candidate_scores[top_local_cpu].detach().cpu().numpy().astype(np.float32)
 
         raw_sample = load_sample(sample_files[idx])
         sample_record = unpack_sample_data(raw_sample["data"])
