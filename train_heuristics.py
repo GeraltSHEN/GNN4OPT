@@ -123,7 +123,13 @@ def _forward_with_optional_postprocess(
     return logits, None
 
 
-def _wrap_loader_for_postprocess(loader, *, shuffle: bool):
+def _wrap_loader_for_postprocess(
+    loader,
+    *,
+    shuffle: bool,
+    dual_option: int = 1,
+    universal_cutoffbound: float = 1e6,
+):
     if loader is None:
         return None, None
 
@@ -137,18 +143,39 @@ def _wrap_loader_for_postprocess(loader, *, shuffle: bool):
         drop_last=loader.drop_last,
         persistent_workers=getattr(loader, "persistent_workers", False),
     )
-    postprocess_interface = HeuristicPostProcessInterface(indexed_dataset.sample_files)
+    postprocess_interface = HeuristicPostProcessInterface(
+        indexed_dataset.sample_files,
+        dual_option=int(dual_option),
+        universal_cutoffbound=float(universal_cutoffbound),
+    )
     return wrapped_loader, postprocess_interface
 
 
 TOPK_TARGET_KEY = "top8_regression_targets"
+TOPK_TARGET_KEY_PREFIX = "top8_regression_targets_option"
 
 
-def _load_saved_topk_targets(graph_id: torch.Tensor, postprocess_interface):
+def _topk_target_key_for_option(dual_option: int) -> str:
+    return f"{TOPK_TARGET_KEY_PREFIX}{int(dual_option)}"
+
+
+def _load_saved_topk_targets(
+    graph_id: torch.Tensor,
+    postprocess_interface,
+    target_key: str,
+    fallback_key: Optional[str] = None,
+):
     targets = []
     for gid in graph_id.reshape(-1).detach().cpu().tolist():
         sample = load_sample(postprocess_interface.sample_files[int(gid)])
-        targets.append(sample[TOPK_TARGET_KEY])
+        if target_key in sample:
+            targets.append(sample[target_key])
+        elif fallback_key is not None and fallback_key in sample:
+            targets.append(sample[fallback_key])
+        else:
+            raise KeyError(
+                f"Missing regression target key '{target_key}' in sample {postprocess_interface.sample_files[int(gid)]}"
+            )
     return targets
 
 
@@ -173,6 +200,9 @@ def train(
     print_every = args.print_every
     loss_option = args.loss_option
     regression_target = None
+    dual_option = int(getattr(args, "dual_option", 1))
+    topk_target_key = _topk_target_key_for_option(dual_option)
+    topk_target_fallback_key = TOPK_TARGET_KEY if dual_option == 1 else None
     if loss_option == "regression":
         regression_target = str(getattr(args, "regression_target", "score")).lower()
     ranking_loss_factories = {
@@ -315,6 +345,8 @@ def train(
                     saved_targets = _load_saved_topk_targets(
                         batch.graph_id,
                         train_postprocess_interface,
+                        target_key=topk_target_key,
+                        fallback_key=topk_target_fallback_key,
                     )
                     if regression_target == "score":
                         true_scores = torch.stack(
@@ -583,6 +615,19 @@ def parse_args(argv=None):
         default="score",
         help="Regression target for loss_option=regression: one of {dual, obj, score}.",
     )
+    parser.add_argument(
+        "--dual_option",
+        type=int,
+        default=1,
+        choices=[1, 2, 3, 4],
+        help="Regression target variant key: top8_regression_targets_option{dual_option}.",
+    )
+    parser.add_argument(
+        "--universal_cutoffbound",
+        type=float,
+        default=1e6,
+        help="Universal cutoffbound used for dual options 2 and 4 in post-process.",
+    )
     return parser.parse_args(argv)
 
 
@@ -625,10 +670,16 @@ def main(argv=None):
     val_postprocess_interface = None
     if hasattr(policy, "post_process"):
         train_loader, train_postprocess_interface = _wrap_loader_for_postprocess(
-            train_loader, shuffle=bool(getattr(args, "train_shuffle", True))
+            train_loader,
+            shuffle=bool(getattr(args, "train_shuffle", True)),
+            dual_option=int(getattr(args, "dual_option", 1)),
+            universal_cutoffbound=float(getattr(args, "universal_cutoffbound", 1e6)),
         )
         val_loader, val_postprocess_interface = _wrap_loader_for_postprocess(
-            val_loader, shuffle=bool(getattr(args, "val_shuffle", False))
+            val_loader,
+            shuffle=bool(getattr(args, "val_shuffle", False)),
+            dual_option=int(getattr(args, "dual_option", 1)),
+            universal_cutoffbound=float(getattr(args, "universal_cutoffbound", 1e6)),
         )
 
     base_model_dir = Path(getattr(args, "model_dir", "./models"))

@@ -3,6 +3,7 @@ import gzip
 import pickle
 from pathlib import Path
 import sys
+import time
 from typing import Optional
 
 import numpy as np
@@ -13,11 +14,34 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from heuristics.utils import SCIPBranchingContext, load_sample, unpack_sample_data
+from heuristics.utils import (
+    DUAL_OPTION_DEFAULT,
+    UNIVERSAL_CUTOFFBOUND_DEFAULT,
+    SCIPBranchingContext,
+    compute_strong_branch_score,
+    load_sample,
+    resolve_effective_cutoffbound,
+    unpack_sample_data,
+)
 from tmp_utils import GraphDataset, load_model
 
 
-TARGET_KEY = "top8_regression_targets"
+LEGACY_TARGET_KEY = "top8_regression_targets"
+TARGET_KEY_PREFIX = "top8_regression_targets_option"
+
+
+def target_key_for_option(option: int) -> str:
+    return f"{TARGET_KEY_PREFIX}{int(option)}"
+
+
+def parse_dual_options(spec: str) -> list[int]:
+    options = [int(x.strip()) for x in str(spec).split(",") if x.strip()]
+    if len(options) == 0:
+        raise ValueError("dual options list is empty")
+    for option in options:
+        if option not in (1, 2, 3, 4):
+            raise ValueError(f"Unsupported dual option {option}. Use values in {{1,2,3,4}}.")
+    return options
 
 
 def resolve_sample_files(cfg: dict, split: str, max_samples: Optional[int]):
@@ -55,6 +79,170 @@ def select_topk_local_positions(all_var_scores: torch.Tensor, candidates: torch.
     return top_local
 
 
+def sample_has_requested_targets(raw_sample: dict, dual_options: list[int]) -> bool:
+    for dual_option in dual_options:
+        option_target = raw_sample.get(target_key_for_option(int(dual_option)))
+        if not isinstance(option_target, dict):
+            return False
+        if int(option_target.get("dual_option", -1)) != int(dual_option):
+            return False
+    return True
+
+
+def build_targets_for_sample(
+    raw_sample: dict,
+    top_positions: np.ndarray,
+    top_candidates: np.ndarray,
+    top_scores: np.ndarray,
+    dual_options: list[int],
+    universal_cutoffbound: float,
+    option_time_limit_sec: float,
+    quick_test: bool = False,
+    quick_test_preview_k: int = 8,
+):
+    top_positions = np.asarray(top_positions, dtype=np.int64)
+    top_candidates = np.asarray(top_candidates, dtype=np.int64)
+    top_scores = np.asarray(top_scores, dtype=np.float32)
+    sample_record = unpack_sample_data(raw_sample["data"])
+    context = SCIPBranchingContext.from_sample_state(sample_record.sample_state)
+    parent_primal = context.solve_parent_primal()
+    if (not parent_primal.success) or (parent_primal.objective_value is None):
+        raise RuntimeError(f"Parent LP solve failed: {parent_primal.status} ({parent_primal.message})")
+    cutoffbound = float(sample_record.cutoffbound)
+    parent_obj = float(parent_primal.objective_value)
+    n_cons = int(context.lp.A_ub.shape[0])
+    n_vars = int(np.asarray(context.lp.objective_coefficients, dtype=np.float64).shape[0])
+    k = int(top_candidates.shape[0])
+    quick_logs = []
+
+    if quick_test:
+        preview = int(min(max(int(quick_test_preview_k), 1), k))
+        quick_logs.append(f"[quick_test] parent_obj={parent_obj:.8g} sample_cutoffbound={cutoffbound:.8g} k={k}")
+        quick_logs.append(f"[quick_test] top_candidates(first {preview})={top_candidates[:preview].tolist()}")
+
+    for dual_option in dual_options:
+        option_start_time = time.perf_counter()
+        option_timed_out = False
+        solved_down = 0
+        solved_up = 0
+        true_y = np.full((k, 2, n_cons), np.nan, dtype=np.float32)
+        true_alpha = np.full((k, 2, n_vars), np.nan, dtype=np.float32)
+        true_beta = np.full((k, 2, n_vars), np.nan, dtype=np.float32)
+        true_obj = np.full((k, 2), np.nan, dtype=np.float32)
+
+        for j, var_idx in enumerate(top_candidates.tolist()):
+            remaining = float(option_time_limit_sec) - (time.perf_counter() - option_start_time)
+            if remaining <= 0.0:
+                option_timed_out = True
+                break
+            down = context.solve_child_dual(
+                int(var_idx),
+                direction="down",
+                cutoffbound=cutoffbound,
+                dual_option=int(dual_option),
+                universal_cutoffbound=float(universal_cutoffbound),
+                time_limit_sec=remaining,
+            )
+            if str(down.status).lower() in {"timelimit", "timelimit_reached"}:
+                option_timed_out = True
+            up = context.solve_child_dual(
+                int(var_idx),
+                direction="up",
+                cutoffbound=cutoffbound,
+                dual_option=int(dual_option),
+                universal_cutoffbound=float(universal_cutoffbound),
+                time_limit_sec=max(
+                    1e-9,
+                    float(option_time_limit_sec) - (time.perf_counter() - option_start_time),
+                ),
+            )
+            if str(up.status).lower() in {"timelimit", "timelimit_reached"}:
+                option_timed_out = True
+
+            if down.success:
+                true_y[j, 0, :] = down.y.astype(np.float32, copy=False)
+                true_alpha[j, 0, :] = down.alpha.astype(np.float32, copy=False)
+                true_beta[j, 0, :] = down.beta.astype(np.float32, copy=False)
+                true_obj[j, 0] = np.float32(down.objective_value)
+                solved_down += 1
+            if up.success:
+                true_y[j, 1, :] = up.y.astype(np.float32, copy=False)
+                true_alpha[j, 1, :] = up.alpha.astype(np.float32, copy=False)
+                true_beta[j, 1, :] = up.beta.astype(np.float32, copy=False)
+                true_obj[j, 1] = np.float32(up.objective_value)
+                solved_up += 1
+            if option_timed_out:
+                break
+
+        effective_cutoffbound = float(
+            resolve_effective_cutoffbound(
+                cutoffbound=cutoffbound,
+                dual_option=int(dual_option),
+                universal_cutoffbound=float(universal_cutoffbound),
+            )
+        )
+
+        if int(dual_option) == int(DUAL_OPTION_DEFAULT):
+            option_scores = top_scores.copy()
+        else:
+            option_scores = np.full((k,), np.nan, dtype=np.float32)
+            for j in range(k):
+                down_obj = float(true_obj[j, 0])
+                up_obj = float(true_obj[j, 1])
+                if np.isfinite(down_obj) and np.isfinite(up_obj):
+                    option_scores[j] = np.float32(
+                        compute_strong_branch_score(
+                            parent_obj=parent_obj,
+                            child_one_obj=up_obj,
+                            child_zero_obj=down_obj,
+                            cutoffbound=effective_cutoffbound,
+                        )
+                    )
+
+        option_target = {
+            "candidate_positions": top_positions.copy(),
+            "candidate_indices": top_candidates.copy(),
+            "scores": option_scores,
+            "sample_scores": top_scores.copy(),
+            "y": true_y,
+            "alpha": true_alpha,
+            "beta": true_beta,
+            "obj": true_obj,
+            "parent_obj": np.float32(parent_obj),
+            "cutoffbound": np.float32(effective_cutoffbound),
+            "sample_cutoffbound": np.float32(cutoffbound),
+            "dual_option": int(dual_option),
+        }
+        raw_sample[target_key_for_option(int(dual_option))] = option_target
+        if int(dual_option) == int(DUAL_OPTION_DEFAULT):
+            raw_sample[LEGACY_TARGET_KEY] = option_target
+
+        if quick_test:
+            down_finite = np.isfinite(true_obj[:, 0])
+            up_finite = np.isfinite(true_obj[:, 1])
+            valid_pairs = down_finite & up_finite
+            preview = int(min(max(int(quick_test_preview_k), 1), k))
+            obj_preview = [
+                (float(true_obj[j, 0]), float(true_obj[j, 1]))
+                for j in range(preview)
+            ]
+            score_preview = option_scores[:preview].tolist()
+            quick_logs.append(
+                f"[quick_test][option {int(dual_option)}] "
+                f"effective_cutoffbound={effective_cutoffbound:.8g} "
+                f"elapsed={time.perf_counter() - option_start_time:.2f}s "
+                f"timeout={option_timed_out} "
+                f"solved_down={solved_down}/{k} solved_up={solved_up}/{k} "
+                f"down_finite={int(down_finite.sum())}/{k} "
+                f"up_finite={int(up_finite.sum())}/{k} "
+                f"valid_pairs={int(valid_pairs.sum())}/{k}"
+            )
+            quick_logs.append(f"[quick_test][option {int(dual_option)}] obj_preview={obj_preview}")
+            quick_logs.append(f"[quick_test][option {int(dual_option)}] score_preview={score_preview}")
+
+    return raw_sample, quick_logs
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate top-8 regression targets and save into sample files.")
     parser.add_argument("--cfg", type=str, default="cfg/set_cover_60")
@@ -68,7 +256,35 @@ def main():
     parser.add_argument("--split", type=str, default="all", choices=["all", "train", "valid", "test"])
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--device", type=str, default=("cuda" if torch.cuda.is_available() else "cpu"))
+    parser.add_argument(
+        "--dual_options",
+        type=str,
+        default="1,2,3,4",
+        help="Comma-separated dual options to generate (values in {1,2,3,4}).",
+    )
+    parser.add_argument(
+        "--universal_cutoffbound",
+        type=float,
+        default=UNIVERSAL_CUTOFFBOUND_DEFAULT,
+        help="Universal cutoff used by dual options 2 and 4.",
+    )
+    parser.add_argument(
+        "--quick_test",
+        action="store_true",
+        help="Run a one-sample sanity check with printed objective summaries.",
+    )
+    parser.add_argument(
+        "--option_time_limit_sec",
+        type=float,
+        default=120.0,
+        help="Per-option wall-clock time budget in seconds (applies across all k candidates).",
+    )
     args = parser.parse_args()
+    quick_test_preview_k = 8
+    dry_run = bool(args.quick_test)
+    if args.quick_test:
+        args.max_samples = 5
+    dual_options = parse_dual_options(args.dual_options)
 
     cfg = yaml.safe_load(Path(args.cfg).read_text())
     sample_files = resolve_sample_files(cfg, args.split, args.max_samples)
@@ -101,12 +317,31 @@ def main():
         args=model_args,
     )
 
+    resume_idx_reported = False
+    n_written = 0
+    n_skipped = 0
+    progress_interval = 50
+    next_progress_report = progress_interval
     for idx in range(len(sample_files)):
+        raw_sample = load_sample(sample_files[idx])
+        if sample_has_requested_targets(raw_sample, dual_options):
+            n_skipped += 1
+            if (n_written + n_skipped) >= next_progress_report:
+                print(
+                    f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
+                    f"(written={n_written}, skipped={n_skipped})"
+                )
+                while (n_written + n_skipped) >= next_progress_report:
+                    next_progress_report += progress_interval
+            continue
+        if not resume_idx_reported:
+            print(f"[resume] starting at {sample_files[idx].name}")
+            resume_idx_reported = True
+
         graph = dataset.get(idx)
         graph_device = graph.to(args.device)
         n_constraints = torch.as_tensor([int(graph.n_constraints_per_graph)], device=args.device)
         n_variables = torch.as_tensor([int(graph.n_variables_per_graph)], device=args.device)
-
         with torch.no_grad():
             all_var_scores = model(
                 graph_device.constraint_features,
@@ -117,58 +352,45 @@ def main():
                 n_constraints_per_graph=n_constraints,
                 n_variables_per_graph=n_variables,
             )
-
         top_local = select_topk_local_positions(all_var_scores, graph_device.candidates, int(args.k))
         top_local_cpu = top_local.detach().cpu()
-        top_candidates = graph.candidates[top_local_cpu].detach().cpu().numpy().astype(np.int64)
-        top_scores = graph.candidate_scores[top_local_cpu].detach().cpu().numpy().astype(np.float32)
+        raw_sample, quick_logs = build_targets_for_sample(
+            raw_sample=raw_sample,
+            top_positions=top_local_cpu.numpy().astype(np.int64),
+            top_candidates=graph.candidates[top_local_cpu].detach().cpu().numpy().astype(np.int64),
+            top_scores=graph.candidate_scores[top_local_cpu].detach().cpu().numpy().astype(np.float32),
+            dual_options=dual_options,
+            universal_cutoffbound=float(args.universal_cutoffbound),
+            option_time_limit_sec=float(args.option_time_limit_sec),
+            quick_test=bool(args.quick_test),
+            quick_test_preview_k=int(quick_test_preview_k),
+        )
+        if args.quick_test:
+            print(f"[quick_test] sample={sample_files[idx]}")
+            for line in quick_logs:
+                print(line)
+        if not dry_run:
+            with gzip.open(sample_files[idx], "wb") as f:
+                pickle.dump(raw_sample, f)
+        n_written += 1
+        if (n_written + n_skipped) >= next_progress_report:
+            print(
+                f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
+                f"(written={n_written}, skipped={n_skipped})"
+            )
+            while (n_written + n_skipped) >= next_progress_report:
+                next_progress_report += progress_interval
 
-        raw_sample = load_sample(sample_files[idx])
-        sample_record = unpack_sample_data(raw_sample["data"])
-        context = SCIPBranchingContext.from_sample_state(sample_record.sample_state)
-        parent_primal = context.solve_parent_primal()
-        cutoffbound = float(sample_record.cutoffbound)
-
-        n_cons = int(graph.n_constraints_per_graph)
-        n_vars = int(graph.n_variables_per_graph)
-        k = int(args.k)
-
-        true_y = np.full((k, 2, n_cons), np.nan, dtype=np.float32)
-        true_alpha = np.full((k, 2, n_vars), np.nan, dtype=np.float32)
-        true_beta = np.full((k, 2, n_vars), np.nan, dtype=np.float32)
-        true_obj = np.full((k, 2), np.nan, dtype=np.float32)
-
-        for j, var_idx in enumerate(top_candidates.tolist()):
-            down = context.solve_child_dual(int(var_idx), direction="down", cutoffbound=cutoffbound)
-            up = context.solve_child_dual(int(var_idx), direction="up", cutoffbound=cutoffbound)
-
-            if down.success:
-                true_y[j, 0, :] = down.y.astype(np.float32, copy=False)
-                true_alpha[j, 0, :] = down.alpha.astype(np.float32, copy=False)
-                true_beta[j, 0, :] = down.beta.astype(np.float32, copy=False)
-                true_obj[j, 0] = np.float32(down.objective_value)
-            if up.success:
-                true_y[j, 1, :] = up.y.astype(np.float32, copy=False)
-                true_alpha[j, 1, :] = up.alpha.astype(np.float32, copy=False)
-                true_beta[j, 1, :] = up.beta.astype(np.float32, copy=False)
-                true_obj[j, 1] = np.float32(up.objective_value)
-
-        raw_sample[TARGET_KEY] = {
-            "candidate_positions": top_local_cpu.numpy().astype(np.int64),
-            "candidate_indices": top_candidates,
-            "scores": top_scores,
-            "y": true_y,
-            "alpha": true_alpha,
-            "beta": true_beta,
-            "obj": true_obj,
-            "parent_obj": np.float32(parent_primal.objective_value),
-            "cutoffbound": np.float32(cutoffbound),
-        }
-
-        with gzip.open(sample_files[idx], "wb") as f:
-            pickle.dump(raw_sample, f)
-
-    print(f"saved {TARGET_KEY} for {len(sample_files)} samples.")
+    options_str = ",".join(str(x) for x in dual_options)
+    if dry_run:
+        print(
+            f"dry_run completed for {n_written} samples (skipped {n_skipped}; options: {options_str})."
+        )
+    else:
+        print(
+            f"saved {TARGET_KEY_PREFIX}* for {n_written} samples "
+            f"(skipped {n_skipped}; options: {options_str})."
+        )
 
 
 if __name__ == "__main__":

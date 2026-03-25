@@ -51,9 +51,23 @@ class HeuristicPostProcessInterface:
       - objective_offset: (B,)
     """
 
-    def __init__(self, sample_files: Sequence[str | Path]):
+    def __init__(
+        self,
+        sample_files: Sequence[str | Path],
+        dual_option: int = 1,
+        universal_cutoffbound: float = 1e6,
+    ):
         self.sample_files = [Path(p) for p in sample_files]
+        self.dual_option = int(dual_option)
+        self.universal_cutoffbound = float(universal_cutoffbound)
         self._cache: Dict[int, Dict[str, np.ndarray | float]] = {}
+
+    def _effective_cutoffbound(self, sample_cutoffbound: float) -> float:
+        if self.dual_option in (1, 3):
+            return float(sample_cutoffbound)
+        if self.dual_option in (2, 4):
+            return float(self.universal_cutoffbound)
+        raise ValueError(f"Unsupported dual_option '{self.dual_option}'. Use one of: 1, 2, 3, 4.")
 
     @staticmethod
     def _col(values: np.ndarray, names: Sequence[str], name: str, default=None):
@@ -87,7 +101,8 @@ class HeuristicPostProcessInterface:
         sample = load_sample(self.sample_files[int(graph_idx)])
         sample_data = sample["data"]
         sample_state = sample_data[0]
-        cutoffbound = float(sample_data[5])
+        sample_cutoffbound = float(sample_data[5])
+        cutoffbound = self._effective_cutoffbound(sample_cutoffbound)
 
         constraint_dict, _, variable_dict = sample_state
         constraint_values = np.asarray(constraint_dict["values"], dtype=np.float32)
@@ -123,6 +138,7 @@ class HeuristicPostProcessInterface:
             "lp_solution": lp_solution.astype(np.float32, copy=False),
             "parent_obj": parent_obj,
             "cutoffbound": cutoffbound,
+            "sample_cutoffbound": sample_cutoffbound,
             "objective_offset": objective_offset,
         }
         self._cache[graph_idx] = out

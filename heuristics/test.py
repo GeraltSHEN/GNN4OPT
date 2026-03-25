@@ -14,10 +14,22 @@ import yaml
 
 try:
     from .anchor_strong_branching import run_anchor_strong_branching
-    from .utils import SCIPBranchingContext, load_sample, unpack_sample_data
+    from .utils import (
+        DUAL_OPTION_DEFAULT,
+        UNIVERSAL_CUTOFFBOUND_DEFAULT,
+        SCIPBranchingContext,
+        load_sample,
+        unpack_sample_data,
+    )
 except Exception:  # pragma: no cover - script execution fallback
     from anchor_strong_branching import run_anchor_strong_branching
-    from utils import SCIPBranchingContext, load_sample, unpack_sample_data
+    from utils import (
+        DUAL_OPTION_DEFAULT,
+        UNIVERSAL_CUTOFFBOUND_DEFAULT,
+        SCIPBranchingContext,
+        load_sample,
+        unpack_sample_data,
+    )
 
 
 def _load_parent_utils_module(project_root: Path):
@@ -296,6 +308,19 @@ def parse_args(argv=None):
         action="store_true",
         help="Use trained model logits to pick top-k anchor candidates (otherwise random).",
     )
+    parser.add_argument(
+        "--dual_option",
+        type=int,
+        default=DUAL_OPTION_DEFAULT,
+        choices=[1, 2, 3, 4],
+        help="Dual solve ablation option in heuristics/utils.py.",
+    )
+    parser.add_argument(
+        "--universal_cutoffbound",
+        type=float,
+        default=UNIVERSAL_CUTOFFBOUND_DEFAULT,
+        help="Universal cutoff used by dual options 2 and 4.",
+    )
     return parser.parse_args(argv)
 
 
@@ -387,6 +412,8 @@ def _evaluate_split(
                     action_set=record.action_set,
                     top_k_action_set=top_k_action_set,
                     cutoffbound=float(record.cutoffbound),
+                    dual_option=int(args.dual_option),
+                    universal_cutoffbound=float(args.universal_cutoffbound),
                     top_k=int(args.k),
                 )
             except Exception as exc:

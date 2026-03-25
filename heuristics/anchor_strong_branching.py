@@ -9,18 +9,24 @@ import numpy as np
 
 try:
     from .utils import (
+        DUAL_OPTION_DEFAULT,
+        UNIVERSAL_CUTOFFBOUND_DEFAULT,
         SCIPBranchingContext,
         compute_strong_branch_score,
         evaluate_explicit_dual_on_child,
         load_sample,
+        resolve_effective_cutoffbound,
         unpack_sample_data,
     )
 except Exception:  # pragma: no cover - script execution fallback
     from utils import (
+        DUAL_OPTION_DEFAULT,
+        UNIVERSAL_CUTOFFBOUND_DEFAULT,
         SCIPBranchingContext,
         compute_strong_branch_score,
         evaluate_explicit_dual_on_child,
         load_sample,
+        resolve_effective_cutoffbound,
         unpack_sample_data,
     )
 
@@ -68,6 +74,8 @@ def run_anchor_strong_branching(
     action_set: Sequence[int],
     top_k_action_set: Sequence[int],
     cutoffbound: float,
+    dual_option: int = DUAL_OPTION_DEFAULT,
+    universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
     top_k: Optional[int] = None,
 ) -> AnchorSBResult:
     """Run anchor SB on one sample using SCIP explicit dual solutions."""
@@ -79,6 +87,14 @@ def run_anchor_strong_branching(
         raise ValueError("No candidates available in action_set.")
     if anchor_input.size == 0:
         raise ValueError("top_k_action_set must be non-empty.")
+
+    effective_cutoffbound = float(
+        resolve_effective_cutoffbound(
+            cutoffbound=float(cutoffbound),
+            dual_option=int(dual_option),
+            universal_cutoffbound=float(universal_cutoffbound),
+        )
+    )
 
     anchor_lp_positions, _ = _sanitize_anchor_action_set(candidate_lp_positions, anchor_input)
 
@@ -92,8 +108,20 @@ def run_anchor_strong_branching(
 
     dual_pool = []
     for anchor_var in anchor_lp_positions.tolist():
-        down_dual = context.solve_child_dual(int(anchor_var), direction="down", cutoffbound=cutoffbound)
-        up_dual = context.solve_child_dual(int(anchor_var), direction="up", cutoffbound=cutoffbound)
+        down_dual = context.solve_child_dual(
+            int(anchor_var),
+            direction="down",
+            cutoffbound=float(cutoffbound),
+            dual_option=int(dual_option),
+            universal_cutoffbound=float(universal_cutoffbound),
+        )
+        up_dual = context.solve_child_dual(
+            int(anchor_var),
+            direction="up",
+            cutoffbound=float(cutoffbound),
+            dual_option=int(dual_option),
+            universal_cutoffbound=float(universal_cutoffbound),
+        )
         if down_dual.success and down_dual.y is not None:
             dual_pool.append({"source": "anchor_down", "anchor_lp_pos": int(anchor_var), "dual": down_dual})
         if up_dual.success and up_dual.y is not None:
@@ -130,7 +158,12 @@ def run_anchor_strong_branching(
 
     pseudo_scores = np.array(
         [
-            compute_strong_branch_score(parent_obj, child_one_obj_est[i], child_zero_obj_est[i], cutoffbound)
+            compute_strong_branch_score(
+                parent_obj,
+                child_one_obj_est[i],
+                child_zero_obj_est[i],
+                effective_cutoffbound,
+            )
             for i in range(n_candidates)
         ],
         dtype=np.float64,
@@ -159,6 +192,8 @@ def run_anchor_strong_branching(
 def run_anchor_strong_branching_from_sample_file(
     sample_path: str,
     k: int = 8,
+    dual_option: int = DUAL_OPTION_DEFAULT,
+    universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
     rng: Optional[np.random.Generator] = None,
 ) -> AnchorSBResult:
     sample = load_sample(sample_path)
@@ -177,5 +212,7 @@ def run_anchor_strong_branching_from_sample_file(
         action_set=record.action_set,
         top_k_action_set=top_k_action_set,
         cutoffbound=float(record.cutoffbound),
+        dual_option=int(dual_option),
+        universal_cutoffbound=float(universal_cutoffbound),
         top_k=k_eff,
     )

@@ -10,12 +10,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pyscipopt as scip
+import scs
 import scipy.sparse as sp
 
 
 SampleState = Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]
 Bound = Tuple[Optional[float], Optional[float]]
 BoundOverrides = Dict[int, Bound]
+DUAL_OPTION_DEFAULT = 1
+UNIVERSAL_CUTOFFBOUND_DEFAULT = 1e6
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,19 @@ def compute_strong_branch_score(
     return float(gain_one * gain_zero)
 
 
+def resolve_effective_cutoffbound(
+    cutoffbound: Optional[float],
+    dual_option: int = DUAL_OPTION_DEFAULT,
+    universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
+) -> Optional[float]:
+    option = int(dual_option)
+    if option in (1, 3):
+        return cutoffbound
+    if option in (2, 4):
+        return float(universal_cutoffbound)
+    raise ValueError(f"Unsupported dual_option '{dual_option}'. Use one of: 1, 2, 3, 4.")
+
+
 def _bounds_to_arrays(bounds: Sequence[Bound], n_vars: int) -> Tuple[np.ndarray, np.ndarray]:
     lbs = np.full(n_vars, -np.inf, dtype=np.float64)
     ubs = np.full(n_vars, +np.inf, dtype=np.float64)
@@ -389,12 +405,228 @@ def solve_lp_with_scip(
     )
 
 
+
+def solve_explicit_dual_with_scs(
+    lp: LPComponents,
+    bound_overrides: Optional[BoundOverrides] = None,
+    obj_val: Optional[float] = None,
+    dual_option: int = DUAL_OPTION_DEFAULT,
+    universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
+    time_limit_sec: Optional[float] = None,
+    display_verblevel: int = 0,
+) -> DualSolveResult:
+    option = int(dual_option)
+    if option not in (3, 4):
+        raise ValueError(f"Unsupported dual_option '{dual_option}'. Use one of: 1, 2, 3, 4.")
+    if lp.objective_sense.startswith("max"):
+        raise ValueError("Explicit dual solver currently supports minimization problems only.")
+
+    c = np.asarray(lp.objective_coefficients, dtype=np.float64)
+    A_ub = lp.A_ub.tocsr()
+    b_ub = np.asarray(lp.b_ub, dtype=np.float64)
+
+    A = (-A_ub).tocsr()
+    rhs = -b_ub
+
+    parent_lbs, parent_ubs = _bounds_to_arrays(lp.bounds, int(c.shape[0]))
+    lbs, ubs, bounds_consistent = _apply_bound_overrides(parent_lbs, parent_ubs, bound_overrides)
+    if not bounds_consistent:
+        return DualSolveResult(
+            success=False,
+            status="unbounded",
+            message="primal infeasible after applying bound overrides (inconsistent bounds)",
+            objective_value=float("inf"),
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=None,
+        )
+
+    if np.any(~np.isfinite(lbs)) or np.any(~np.isfinite(ubs)):
+        return DualSolveResult(
+            success=False,
+            status="unsupported_infinite_bounds",
+            message="Explicit dual solve expects finite variable bounds.",
+            objective_value=float("nan"),
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=None,
+        )
+
+    m_rows, n_vars = A.shape
+    yab_dim = m_rows + 2 * n_vars
+    total_dim = yab_dim + 1
+    t_idx = total_dim - 1
+
+    eq_block = sp.hstack(
+        [
+            A.transpose().tocsr(),
+            -sp.eye(n_vars, dtype=np.float64, format="csr"),
+            sp.eye(n_vars, dtype=np.float64, format="csr"),
+            sp.csr_matrix((n_vars, 1), dtype=np.float64),
+        ],
+        format="csr",
+    )
+    nonneg_block = sp.hstack(
+        [
+            -sp.eye(yab_dim, dtype=np.float64, format="csr"),
+            sp.csr_matrix((yab_dim, 1), dtype=np.float64),
+        ],
+        format="csr",
+    )
+
+    if obj_val is None or not np.isfinite(float(obj_val)):
+        return DualSolveResult(
+            success=False,
+            status="missing_objective_target",
+            message="SCS option 3/4 requires a finite obj_val from option 1/2 solve.",
+            objective_value=float("nan"),
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=None,
+        )
+
+    objective_target = float(obj_val) - float(lp.objective_offset)
+    target_coeffs = np.zeros(total_dim, dtype=np.float64)
+    target_coeffs[:m_rows] = rhs
+    target_coeffs[m_rows : m_rows + n_vars] = -ubs
+    target_coeffs[m_rows + n_vars : m_rows + (2 * n_vars)] = lbs
+
+    eq_block = sp.vstack([eq_block, sp.csr_matrix(target_coeffs.reshape(1, -1))], format="csr")
+    b_eq = np.concatenate([np.asarray(c, dtype=np.float64), np.asarray([objective_target], dtype=np.float64)])
+    z_cone_dim = n_vars + 1
+
+    blocks = [eq_block, nonneg_block]
+    b_parts = [b_eq, np.zeros(yab_dim, dtype=np.float64)]
+    l_cone_dim = yab_dim
+
+    soc_top = sp.csr_matrix(
+        (
+            np.asarray([-1.0], dtype=np.float64),
+            (np.asarray([0], dtype=np.int32), np.asarray([t_idx], dtype=np.int32)),
+        ),
+        shape=(1, total_dim),
+    )
+    soc_rest = sp.hstack(
+        [
+            -sp.eye(yab_dim, dtype=np.float64, format="csr"),
+            sp.csr_matrix((yab_dim, 1), dtype=np.float64),
+        ],
+        format="csr",
+    )
+    soc_block = sp.vstack([soc_top, soc_rest], format="csr")
+    blocks.append(soc_block)
+    b_parts.append(np.zeros(1 + yab_dim, dtype=np.float64))
+
+    A_scs = sp.vstack(blocks, format="csc")
+    b_scs = np.concatenate(b_parts).astype(np.float64, copy=False)
+    c_scs = np.zeros(total_dim, dtype=np.float64)
+    c_scs[t_idx] = 1.0
+    data = {"A": A_scs, "b": b_scs, "c": c_scs}
+    cone = {"z": int(z_cone_dim), "l": int(l_cone_dim), "q": [int(1 + yab_dim)]}
+
+    settings: Dict[str, Any] = {"verbose": bool(int(display_verblevel) > 0)}
+    if time_limit_sec is not None and np.isfinite(float(time_limit_sec)) and float(time_limit_sec) > 0.0:
+        settings["time_limit_secs"] = float(time_limit_sec)
+
+    raw_result = scs.solve(data, cone, **settings)
+    info = raw_result.get("info", {}) if isinstance(raw_result, dict) else {}
+    status_raw = str(info.get("status", "")).lower()
+    status_val = info.get("status_val")
+    if status_val in (1, 2) and isinstance(raw_result, dict) and raw_result.get("x") is not None:
+        x_scs = np.asarray(raw_result["x"], dtype=np.float64).reshape(-1)
+        y_val = x_scs[:m_rows].copy()
+        alpha_val = x_scs[m_rows : m_rows + n_vars].copy()
+        beta_val = x_scs[m_rows + n_vars : m_rows + (2 * n_vars)].copy()
+        obj_value = float(np.dot(rhs, y_val) - np.dot(ubs, alpha_val) + np.dot(lbs, beta_val) + lp.objective_offset)
+
+        target_obj = float(obj_val)
+        obj_gap = abs(float(obj_value) - target_obj)
+        res_pri = abs(float(info.get("res_pri", 0.0) or 0.0))
+        gap = abs(float(info.get("gap", 0.0) or 0.0))
+        obj_tol = max(1e-5, 10.0 * gap, 10.0 * res_pri * max(1.0, abs(target_obj)))
+        min_dual = float(min(np.min(y_val), np.min(alpha_val), np.min(beta_val)))
+        nonneg_tol = max(1e-6, 10.0 * res_pri)
+        if min_dual < -nonneg_tol or obj_gap > obj_tol:
+            return DualSolveResult(
+                success=False,
+                status="numerical_mismatch",
+                message=(
+                    f"scs solution inconsistent with objective target: "
+                    f"obj_gap={obj_gap:.3e}, obj_tol={obj_tol:.3e}, "
+                    f"min_dual={min_dual:.3e}, nonneg_tol={nonneg_tol:.3e}, status={status_raw}"
+                ),
+                objective_value=float("nan"),
+                y=None,
+                alpha=None,
+                beta=None,
+                raw_result=raw_result,
+            )
+        return DualSolveResult(
+            success=True,
+            status="optimal" if status_val == 1 else "optimal_inaccurate",
+            message=status_raw,
+            objective_value=obj_value,
+            y=y_val,
+            alpha=alpha_val,
+            beta=beta_val,
+            raw_result=raw_result,
+        )
+
+    if "infeasible" in status_raw or "unbounded" in status_raw:
+        mapped_status = "unbounded"
+        obj_value = float("inf")
+    else:
+        mapped_status = status_raw or "unknown"
+        obj_value = float("nan")
+    return DualSolveResult(
+        success=False,
+        status=mapped_status,
+        message=status_raw or "unknown",
+        objective_value=obj_value,
+        y=None,
+        alpha=None,
+        beta=None,
+        raw_result=raw_result,
+    )
+
 def solve_explicit_dual_with_scip(
     lp: LPComponents,
     bound_overrides: Optional[BoundOverrides] = None,
     cutoffbound: Optional[float] = None,
+    dual_option: int = DUAL_OPTION_DEFAULT,
+    universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
+    time_limit_sec: Optional[float] = None,
     display_verblevel: int = 0,
 ) -> DualSolveResult:
+    option = int(dual_option)
+    if option in (3, 4):
+        base_option = 1 if option == 3 else 2
+        base_result = solve_explicit_dual_with_scip(
+            lp=lp,
+            bound_overrides=bound_overrides,
+            cutoffbound=cutoffbound,
+            dual_option=base_option,
+            universal_cutoffbound=universal_cutoffbound,
+            time_limit_sec=time_limit_sec,
+            display_verblevel=display_verblevel,
+        )
+        if not base_result.success:
+            return base_result
+        return solve_explicit_dual_with_scs(
+            lp=lp,
+            bound_overrides=bound_overrides,
+            obj_val=float(base_result.objective_value),
+            dual_option=option,
+            universal_cutoffbound=universal_cutoffbound,
+            time_limit_sec=time_limit_sec,
+            display_verblevel=display_verblevel,
+        )
+    if option not in (1, 2):
+        raise ValueError(f"Unsupported dual_option '{dual_option}'. Use one of: 1, 2, 3, 4.")
+
     if lp.objective_sense.startswith("max"):
         raise ValueError("Explicit dual solver currently supports minimization problems only.")
 
@@ -436,6 +668,8 @@ def solve_explicit_dual_with_scip(
     model.setIntParam("display/verblevel", int(display_verblevel))
     model.setIntParam("presolving/maxrounds", 0)
     model.setIntParam("presolving/maxrestarts", 0)
+    if time_limit_sec is not None and np.isfinite(float(time_limit_sec)) and float(time_limit_sec) > 0.0:
+        model.setRealParam("limits/time", float(time_limit_sec))
 
     y = [model.addVar(name=f"y_{i}", vtype="C", lb=0.0) for i in range(m_rows)]
     alpha = [model.addVar(name=f"alpha_{j}", vtype="C", lb=0.0) for j in range(n_vars)]
@@ -454,9 +688,15 @@ def solve_explicit_dual_with_scip(
         - scip.quicksum(float(ubs[j]) * alpha[j] for j in range(n_vars))
         + scip.quicksum(float(lbs[j]) * beta[j] for j in range(n_vars))
     )
-    if cutoffbound is not None and np.isfinite(float(cutoffbound)):
-        cutoff_rhs = float(cutoffbound) - float(lp.objective_offset)
+    effective_cutoffbound = resolve_effective_cutoffbound(
+        cutoffbound=cutoffbound,
+        dual_option=int(dual_option),
+        universal_cutoffbound=float(universal_cutoffbound),
+    )
+    if effective_cutoffbound is not None and np.isfinite(float(effective_cutoffbound)):
+        cutoff_rhs = float(effective_cutoffbound) - float(lp.objective_offset)
         model.addCons(obj_expr <= float(cutoff_rhs), name="dual_obj_cutoff_cap")
+
     model.setObjective(obj_expr, sense="maximize")
     model.optimize()
 
@@ -484,7 +724,7 @@ def solve_explicit_dual_with_scip(
     y_val = np.asarray([model.getSolVal(sol, var) for var in y], dtype=np.float64)
     alpha_val = np.asarray([model.getSolVal(sol, var) for var in alpha], dtype=np.float64)
     beta_val = np.asarray([model.getSolVal(sol, var) for var in beta], dtype=np.float64)
-    obj_value = float(model.getObjVal()) + lp.objective_offset
+    obj_value = float(np.dot(rhs, y_val) - np.dot(ubs, alpha_val) + np.dot(lbs, beta_val) + lp.objective_offset)
     return DualSolveResult(
         success=True,
         status="optimal",
@@ -537,11 +777,32 @@ class SCIPBranchingContext:
             self._parent_primal = solve_lp_with_scip(self.lp)
         return self._parent_primal
 
-    def solve_parent_dual(self, cutoffbound: Optional[float] = None) -> DualSolveResult:
-        if cutoffbound is not None:
-            return solve_explicit_dual_with_scip(self.lp, cutoffbound=cutoffbound)
+    def solve_parent_dual(
+        self,
+        cutoffbound: Optional[float] = None,
+        dual_option: int = DUAL_OPTION_DEFAULT,
+        universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
+        time_limit_sec: Optional[float] = None,
+    ) -> DualSolveResult:
+        if (
+            cutoffbound is not None
+            or int(dual_option) != int(DUAL_OPTION_DEFAULT)
+            or float(universal_cutoffbound) != float(UNIVERSAL_CUTOFFBOUND_DEFAULT)
+        ):
+            return solve_explicit_dual_with_scip(
+                self.lp,
+                cutoffbound=cutoffbound,
+                dual_option=dual_option,
+                universal_cutoffbound=universal_cutoffbound,
+                time_limit_sec=time_limit_sec,
+            )
         if self._parent_dual is None:
-            self._parent_dual = solve_explicit_dual_with_scip(self.lp)
+            self._parent_dual = solve_explicit_dual_with_scip(
+                self.lp,
+                dual_option=dual_option,
+                universal_cutoffbound=universal_cutoffbound,
+                time_limit_sec=time_limit_sec,
+            )
         return self._parent_dual
 
     def create_branch_bounds(self, var_idx: int) -> BranchBounds:
@@ -567,18 +828,32 @@ class SCIPBranchingContext:
             up_overrides={int(var_idx): (up_lb, None)},
         )
 
-    def solve_child_dual(self, var_idx: int, direction: str, cutoffbound: Optional[float] = None) -> DualSolveResult:
+    def solve_child_dual(
+        self,
+        var_idx: int,
+        direction: str,
+        cutoffbound: Optional[float] = None,
+        dual_option: int = DUAL_OPTION_DEFAULT,
+        universal_cutoffbound: float = UNIVERSAL_CUTOFFBOUND_DEFAULT,
+        time_limit_sec: Optional[float] = None,
+    ) -> DualSolveResult:
         bounds = self.create_branch_bounds(int(var_idx))
         if direction == "down":
             return solve_explicit_dual_with_scip(
                 self.lp,
                 bound_overrides=bounds.down_overrides,
                 cutoffbound=cutoffbound,
+                dual_option=dual_option,
+                universal_cutoffbound=universal_cutoffbound,
+                time_limit_sec=time_limit_sec,
             )
         if direction == "up":
             return solve_explicit_dual_with_scip(
                 self.lp,
                 bound_overrides=bounds.up_overrides,
                 cutoffbound=cutoffbound,
+                dual_option=dual_option,
+                universal_cutoffbound=universal_cutoffbound,
+                time_limit_sec=time_limit_sec,
             )
         raise ValueError(f"Unknown direction '{direction}', expected 'down' or 'up'")
