@@ -1,5 +1,7 @@
 import argparse
+import concurrent.futures as cf
 import gzip
+import multiprocessing as mp
 import pickle
 from pathlib import Path
 import sys
@@ -243,6 +245,41 @@ def build_targets_for_sample(
     return raw_sample, quick_logs
 
 
+def process_sample_worker(task: tuple):
+    (
+        sample_path_str,
+        top_positions,
+        top_candidates,
+        top_scores,
+        dual_options,
+        universal_cutoffbound,
+        option_time_limit_sec,
+        dry_run,
+        quick_test,
+        quick_test_preview_k,
+    ) = task
+    sample_path = Path(sample_path_str)
+    try:
+        raw_sample = load_sample(sample_path)
+        raw_sample, quick_logs = build_targets_for_sample(
+            raw_sample=raw_sample,
+            top_positions=top_positions,
+            top_candidates=top_candidates,
+            top_scores=top_scores,
+            dual_options=dual_options,
+            universal_cutoffbound=float(universal_cutoffbound),
+            option_time_limit_sec=float(option_time_limit_sec),
+            quick_test=bool(quick_test),
+            quick_test_preview_k=int(quick_test_preview_k),
+        )
+        if not bool(dry_run):
+            with gzip.open(sample_path, "wb") as f:
+                pickle.dump(raw_sample, f)
+        return {"sample_path": str(sample_path), "quick_logs": quick_logs}
+    except Exception as exc:
+        raise RuntimeError(f"Failed to process {sample_path}: {exc}") from exc
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate top-8 regression targets and save into sample files.")
     parser.add_argument("--cfg", type=str, default="cfg/set_cover_60")
@@ -279,11 +316,21 @@ def main():
         default=120.0,
         help="Per-option wall-clock time budget in seconds (applies across all k candidates).",
     )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for dual solve/write stage.",
+    )
     args = parser.parse_args()
     quick_test_preview_k = 8
     dry_run = bool(args.quick_test)
     if args.quick_test:
         args.max_samples = 5
+    num_workers = max(1, int(args.num_workers))
+    if args.quick_test and num_workers > 1:
+        print("[quick_test] forcing --num_workers=1 for deterministic logging.", flush=True)
+        num_workers = 1
     dual_options = parse_dual_options(args.dual_options)
 
     cfg = yaml.safe_load(Path(args.cfg).read_text())
@@ -322,74 +369,118 @@ def main():
     n_skipped = 0
     progress_interval = 50
     next_progress_report = progress_interval
-    for idx in range(len(sample_files)):
-        raw_sample = load_sample(sample_files[idx])
-        if sample_has_requested_targets(raw_sample, dual_options):
-            n_skipped += 1
+    executor = None
+    pending_futures: dict[cf.Future, str] = {}
+    max_in_flight = max(2, num_workers * 3)
+    if num_workers > 1:
+        executor = cf.ProcessPoolExecutor(max_workers=num_workers, mp_context=mp.get_context("spawn"))
+
+    try:
+        for idx in range(len(sample_files)):
+            raw_sample = load_sample(sample_files[idx])
+            if sample_has_requested_targets(raw_sample, dual_options):
+                n_skipped += 1
+                if (n_written + n_skipped) >= next_progress_report:
+                    print(
+                        f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
+                        f"(written={n_written}, skipped={n_skipped}, in_flight={len(pending_futures)})",
+                        flush=True,
+                    )
+                    while (n_written + n_skipped) >= next_progress_report:
+                        next_progress_report += progress_interval
+                continue
+            if not resume_idx_reported:
+                print(f"[resume] starting at {sample_files[idx].name}", flush=True)
+                resume_idx_reported = True
+
+            graph = dataset.get(idx)
+            graph_device = graph.to(args.device)
+            n_constraints = torch.as_tensor([int(graph.n_constraints_per_graph)], device=args.device)
+            n_variables = torch.as_tensor([int(graph.n_variables_per_graph)], device=args.device)
+            with torch.no_grad():
+                all_var_scores = model(
+                    graph_device.constraint_features,
+                    graph_device.edge_index,
+                    graph_device.edge_attr,
+                    graph_device.variable_features,
+                    candidates=graph_device.candidates,
+                    n_constraints_per_graph=n_constraints,
+                    n_variables_per_graph=n_variables,
+                )
+            top_local = select_topk_local_positions(all_var_scores, graph_device.candidates, int(args.k))
+            top_local_cpu = top_local.detach().cpu()
+            task = (
+                str(sample_files[idx]),
+                top_local_cpu.numpy().astype(np.int64),
+                graph.candidates[top_local_cpu].detach().cpu().numpy().astype(np.int64),
+                graph.candidate_scores[top_local_cpu].detach().cpu().numpy().astype(np.float32),
+                dual_options,
+                float(args.universal_cutoffbound),
+                float(args.option_time_limit_sec),
+                bool(dry_run),
+                bool(args.quick_test),
+                int(quick_test_preview_k),
+            )
+
+            if executor is None:
+                result = process_sample_worker(task)
+                n_written += 1
+                if args.quick_test:
+                    print(f"[quick_test] sample={result['sample_path']}", flush=True)
+                    for line in result["quick_logs"]:
+                        print(line, flush=True)
+                if (n_written + n_skipped) >= next_progress_report:
+                    print(
+                        f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
+                        f"(written={n_written}, skipped={n_skipped}, in_flight={len(pending_futures)})",
+                        flush=True,
+                    )
+                    while (n_written + n_skipped) >= next_progress_report:
+                        next_progress_report += progress_interval
+            else:
+                future = executor.submit(process_sample_worker, task)
+                pending_futures[future] = str(sample_files[idx])
+                if len(pending_futures) >= max_in_flight:
+                    done, _ = cf.wait(pending_futures, return_when=cf.FIRST_COMPLETED)
+                    for finished in done:
+                        _ = finished.result()
+                        pending_futures.pop(finished, None)
+                        n_written += 1
+                        if (n_written + n_skipped) >= next_progress_report:
+                            print(
+                                f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
+                                f"(written={n_written}, skipped={n_skipped}, in_flight={len(pending_futures)})",
+                                flush=True,
+                            )
+                            while (n_written + n_skipped) >= next_progress_report:
+                                next_progress_report += progress_interval
+
+        for finished in cf.as_completed(list(pending_futures.keys())):
+            _ = finished.result()
+            n_written += 1
             if (n_written + n_skipped) >= next_progress_report:
                 print(
                     f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
-                    f"(written={n_written}, skipped={n_skipped})"
+                    f"(written={n_written}, skipped={n_skipped}, in_flight={len(pending_futures)})",
+                    flush=True,
                 )
                 while (n_written + n_skipped) >= next_progress_report:
                     next_progress_report += progress_interval
-            continue
-        if not resume_idx_reported:
-            print(f"[resume] starting at {sample_files[idx].name}")
-            resume_idx_reported = True
-
-        graph = dataset.get(idx)
-        graph_device = graph.to(args.device)
-        n_constraints = torch.as_tensor([int(graph.n_constraints_per_graph)], device=args.device)
-        n_variables = torch.as_tensor([int(graph.n_variables_per_graph)], device=args.device)
-        with torch.no_grad():
-            all_var_scores = model(
-                graph_device.constraint_features,
-                graph_device.edge_index,
-                graph_device.edge_attr,
-                graph_device.variable_features,
-                candidates=graph_device.candidates,
-                n_constraints_per_graph=n_constraints,
-                n_variables_per_graph=n_variables,
-            )
-        top_local = select_topk_local_positions(all_var_scores, graph_device.candidates, int(args.k))
-        top_local_cpu = top_local.detach().cpu()
-        raw_sample, quick_logs = build_targets_for_sample(
-            raw_sample=raw_sample,
-            top_positions=top_local_cpu.numpy().astype(np.int64),
-            top_candidates=graph.candidates[top_local_cpu].detach().cpu().numpy().astype(np.int64),
-            top_scores=graph.candidate_scores[top_local_cpu].detach().cpu().numpy().astype(np.float32),
-            dual_options=dual_options,
-            universal_cutoffbound=float(args.universal_cutoffbound),
-            option_time_limit_sec=float(args.option_time_limit_sec),
-            quick_test=bool(args.quick_test),
-            quick_test_preview_k=int(quick_test_preview_k),
-        )
-        if args.quick_test:
-            print(f"[quick_test] sample={sample_files[idx]}")
-            for line in quick_logs:
-                print(line)
-        if not dry_run:
-            with gzip.open(sample_files[idx], "wb") as f:
-                pickle.dump(raw_sample, f)
-        n_written += 1
-        if (n_written + n_skipped) >= next_progress_report:
-            print(
-                f"[progress] done={n_written + n_skipped}/{len(sample_files)} "
-                f"(written={n_written}, skipped={n_skipped})"
-            )
-            while (n_written + n_skipped) >= next_progress_report:
-                next_progress_report += progress_interval
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     options_str = ",".join(str(x) for x in dual_options)
     if dry_run:
         print(
-            f"dry_run completed for {n_written} samples (skipped {n_skipped}; options: {options_str})."
+            f"dry_run completed for {n_written} samples (skipped {n_skipped}; options: {options_str}).",
+            flush=True,
         )
     else:
         print(
             f"saved {TARGET_KEY_PREFIX}* for {n_written} samples "
-            f"(skipped {n_skipped}; options: {options_str})."
+            f"(skipped {n_skipped}; options: {options_str}).",
+            flush=True,
         )
 
 
