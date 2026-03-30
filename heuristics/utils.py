@@ -321,7 +321,6 @@ def solve_lp_with_scip(
     c = np.asarray(lp.objective_coefficients, dtype=np.float64)
     b_ub = np.asarray(lp.b_ub, dtype=np.float64)
     A_ub = lp.A_ub.tocsr()
-    maximize = lp.objective_sense.startswith("max")
 
     parent_lbs, parent_ubs = _bounds_to_arrays(lp.bounds, int(c.shape[0]))
     lbs, ubs, feasible = _apply_bound_overrides(parent_lbs, parent_ubs, bound_overrides)
@@ -348,7 +347,8 @@ def solve_lp_with_scip(
         vars_.append(model.addVar(name=f"x_{j}", vtype="C", lb=lbv, ub=ubv))
 
     obj_expr = scip.quicksum(float(c[j]) * vars_[j] for j in range(c.shape[0]))
-    model.setObjective(obj_expr, sense="maximize" if maximize else "minimize")
+    # Coefficients extracted from SCIP state are already in SCIP's transformed minimization space.
+    model.setObjective(obj_expr, sense="minimize")
 
     cons_ = []
     for i in range(A_ub.shape[0]):
@@ -395,9 +395,6 @@ def solve_explicit_dual_with_scip(
     cutoffbound: Optional[float] = None,
     display_verblevel: int = 0,
 ) -> DualSolveResult:
-    if lp.objective_sense.startswith("max"):
-        raise ValueError("Explicit dual solver currently supports minimization problems only.")
-
     c = np.asarray(lp.objective_coefficients, dtype=np.float64)
     A_ub = lp.A_ub.tocsr()
     b_ub = np.asarray(lp.b_ub, dtype=np.float64)
