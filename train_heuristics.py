@@ -3,7 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import pdb
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 try:
     import psutil
@@ -162,20 +162,21 @@ def _topk_target_key_for_option(dual_option: int) -> str:
 def _load_saved_topk_targets(
     graph_id: torch.Tensor,
     postprocess_interface,
-    target_key: str,
-    fallback_key: Optional[str] = None,
+    target_keys: Sequence[str],
 ):
     targets = []
     for gid in graph_id.reshape(-1).detach().cpu().tolist():
         sample = load_sample(postprocess_interface.sample_files[int(gid)])
-        if target_key in sample:
-            targets.append(sample[target_key])
-        elif fallback_key is not None and fallback_key in sample:
-            targets.append(sample[fallback_key])
-        else:
+        selected = None
+        for key in target_keys:
+            if key in sample:
+                selected = sample[key]
+                break
+        if selected is None:
             raise KeyError(
-                f"Missing regression target key '{target_key}' in sample {postprocess_interface.sample_files[int(gid)]}"
+                f"Missing regression target keys {list(target_keys)} in sample {postprocess_interface.sample_files[int(gid)]}"
             )
+        targets.append(selected)
     return targets
 
 
@@ -201,8 +202,20 @@ def train(
     loss_option = args.loss_option
     regression_target = None
     dual_option = int(getattr(args, "dual_option", 1))
-    topk_target_key = _topk_target_key_for_option(dual_option)
-    topk_target_fallback_key = TOPK_TARGET_KEY if dual_option == 1 else None
+    if dual_option not in (1, 2):
+        raise ValueError(f"Unsupported dual_option '{dual_option}'. Use one of: 1, 2.")
+    if dual_option == 1:
+        topk_target_keys = [
+            _topk_target_key_for_option(1),
+            TOPK_TARGET_KEY,
+            _topk_target_key_for_option(2),
+        ]
+    else:
+        topk_target_keys = [
+            _topk_target_key_for_option(2),
+            _topk_target_key_for_option(1),
+            TOPK_TARGET_KEY,
+        ]
     if loss_option == "regression":
         regression_target = str(getattr(args, "regression_target", "score")).lower()
     ranking_loss_factories = {
@@ -345,8 +358,7 @@ def train(
                     saved_targets = _load_saved_topk_targets(
                         batch.graph_id,
                         train_postprocess_interface,
-                        target_key=topk_target_key,
-                        fallback_key=topk_target_fallback_key,
+                        target_keys=topk_target_keys,
                     )
                     if regression_target == "score":
                         true_scores = torch.stack(
@@ -619,7 +631,7 @@ def parse_args(argv=None):
         "--dual_option",
         type=int,
         default=1,
-        choices=[1, 2, 3, 4],
+        choices=[1, 2],
         help="Regression target variant key: top8_regression_targets_option{dual_option}.",
     )
     parser.add_argument(
