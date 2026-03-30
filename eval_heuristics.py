@@ -89,7 +89,8 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
     n_samples_processed = 0
 
     ranking_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(ranking_csv_path, "w", newline="", encoding="utf-8") as ranking_fh:
+    tmp_ranking_csv_path = ranking_csv_path.with_suffix(f"{ranking_csv_path.suffix}.tmp")
+    with open(tmp_ranking_csv_path, "w", newline="", encoding="utf-8") as ranking_fh:
         writer = csv.writer(ranking_fh)
         writer.writerow(
             [
@@ -99,6 +100,7 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
                 "top1_correct",
             ]
         )
+        ranking_fh.flush()
 
         policy.eval()
         with torch.no_grad():
@@ -185,6 +187,7 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
                             int(top1_correct[row_idx].item()),
                         ]
                     )
+                ranking_fh.flush()
 
                 mean_loss += loss.item() * batch.num_graphs
                 mean_acc += accuracy * batch.num_graphs
@@ -199,6 +202,7 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
                 mean_all_cand_score_diff += all_cand_score_diff * batch.num_graphs
                 mean_all_cand_normalized_score_diff += all_cand_normalized_score_diff * batch.num_graphs
                 n_samples_processed += batch.num_graphs
+    tmp_ranking_csv_path.replace(ranking_csv_path)
 
     mean_loss /= n_samples_processed
     mean_acc /= n_samples_processed
