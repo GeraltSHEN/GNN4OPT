@@ -505,6 +505,7 @@ def load_model(args, cons_nfeats, edge_nfeats, var_nfeats) -> torch.nn.Module:
             gnn_backbone=gnn_backbone,
             sage_mlp_layers=sage_mlp_layers,
             n_branching=int(getattr(args, "n_branching", 1)),
+            use_cutoff_minimum=bool(getattr(args, "use_cutoff_minimum", True)),
         )
     else:
         raise NotImplementedError(f"Unknown model type '{args.model}'.")

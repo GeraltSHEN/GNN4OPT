@@ -436,6 +436,7 @@ class HeuristicPolicy(torch.nn.Module):
         gnn_backbone: str = "bipartite", # sage
         sage_mlp_layers: int = 2,
         n_branching: int = 1,
+        use_cutoff_minimum: bool = True,
     ):
         super().__init__()
         if n_layers <= 0:
@@ -446,6 +447,7 @@ class HeuristicPolicy(torch.nn.Module):
         self.gnn_backbone = gnn_backbone
         self.branching_model = branching_model
         self.n_branching = int(n_branching)
+        self.use_cutoff_minimum = bool(use_cutoff_minimum)
         if self.branching_model is not None:
             self.branching_model.eval()
             for p in self.branching_model.parameters():
@@ -915,8 +917,9 @@ class HeuristicPolicy(torch.nn.Module):
         max_down = down_obj.max(dim=1).values
         max_up = up_obj.max(dim=1).values
 
-        max_down = torch.minimum(max_down, cutoffbound.unsqueeze(1))
-        max_up = torch.minimum(max_up, cutoffbound.unsqueeze(1))
+        if self.use_cutoff_minimum:
+            max_down = torch.minimum(max_down, cutoffbound.unsqueeze(1))
+            max_up = torch.minimum(max_up, cutoffbound.unsqueeze(1))
 
         gain_down = torch.clamp(max_down - parent_obj.unsqueeze(1), min=1e-9)
         gain_up = torch.clamp(max_up - parent_obj.unsqueeze(1), min=1e-9)
@@ -968,8 +971,9 @@ class HeuristicPolicy(torch.nn.Module):
             -1, branching_candidates_local_safe.unsqueeze(-1)
         ).squeeze(-1)
 
-        down_obj_topk = torch.minimum(down_obj_topk, cutoffbound.unsqueeze(1))
-        up_obj_topk = torch.minimum(up_obj_topk, cutoffbound.unsqueeze(1))
+        if self.use_cutoff_minimum:
+            down_obj_topk = torch.minimum(down_obj_topk, cutoffbound.unsqueeze(1))
+            up_obj_topk = torch.minimum(up_obj_topk, cutoffbound.unsqueeze(1))
         gain_down_topk = torch.clamp(down_obj_topk - parent_obj.unsqueeze(1), min=1e-9)
         gain_up_topk = torch.clamp(up_obj_topk - parent_obj.unsqueeze(1), min=1e-9)
         pseudo_scores_topk = (gain_down_topk * gain_up_topk).masked_fill(~valid_topk, -1e8)

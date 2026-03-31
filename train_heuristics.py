@@ -640,6 +640,13 @@ def parse_args(argv=None):
         default=1e6,
         help="Universal cutoffbound used for dual options 2 and 4 in post-process.",
     )
+    parser.add_argument(
+        "--use_cutoff_minimum",
+        type=int,
+        default=argparse.SUPPRESS,
+        choices=[0, 1],
+        help="Whether to apply cutoff-based torch.minimum operations in HeuristicPolicy post-process.",
+    )
     return parser.parse_args(argv)
 
 
@@ -658,6 +665,9 @@ def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
 
     args.model_id = f"{args.dataset}_cfg{args.cfg_idx}"
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    if not hasattr(args, "use_cutoff_minimum"):
+        args.use_cutoff_minimum = True
+    args.use_cutoff_minimum = bool(args.use_cutoff_minimum)
     return args
 
 
