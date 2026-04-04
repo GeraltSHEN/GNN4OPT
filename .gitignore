@@ -16,3 +16,6 @@ pytorchltr/
 policy-learn/
 SDP/
 heuristics/results/
+cfg/
+data/results_summary/
+scripts/
