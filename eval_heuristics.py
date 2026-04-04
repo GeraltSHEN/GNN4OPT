@@ -96,7 +96,9 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
             [
                 "graph_id",
                 "predicted_topk_global",
+                "predicted_topk_scores",
                 "true_topk_global",
+                "true_topk_scores",
                 "top1_correct",
             ]
         )
@@ -172,6 +174,8 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
                 true_rank_local = topk_true_scores.argsort(dim=-1, descending=True)
                 predicted_rank_global = topk_candidate_global.gather(1, predicted_rank_local)
                 true_rank_global = topk_candidate_global.gather(1, true_rank_local)
+                predicted_rank_scores = topk_logits.gather(1, predicted_rank_local)
+                true_rank_scores = topk_true_scores.gather(1, true_rank_local)
                 top1_correct = (
                     topk_true_scores.gather(-1, predicted_rank_local[:, :1]) == topk_bestscore
                 ).to(dtype=torch.long)
@@ -179,11 +183,15 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
                 for row_idx, graph_id in enumerate(graph_ids):
                     pred_list = predicted_rank_global[row_idx].detach().cpu().tolist()
                     true_list = true_rank_global[row_idx].detach().cpu().tolist()
+                    pred_score_list = predicted_rank_scores[row_idx].detach().cpu().tolist()
+                    true_score_list = true_rank_scores[row_idx].detach().cpu().tolist()
                     writer.writerow(
                         [
                             int(graph_id),
                             " ".join(str(x) for x in pred_list),
+                            " ".join(f"{float(x):.10g}" for x in pred_score_list),
                             " ".join(str(x) for x in true_list),
+                            " ".join(f"{float(x):.10g}" for x in true_score_list),
                             int(top1_correct[row_idx].item()),
                         ]
                     )

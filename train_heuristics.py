@@ -582,19 +582,19 @@ def parse_args(argv=None):
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=100000,
+        default=-1234,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--save_every",
         type=int,
-        default=250000,
+        default=140000,
         help="Checkpoint frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--print_every",
         type=int,
-        default=100000,
+        default=140000,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
@@ -679,10 +679,14 @@ def main(argv=None):
     for key, value in vars(args).items():
         print(f"{key}: {value}")
 
-    data = load_data(args)
     set_seed(args.seed)
+    eval_disabled = int(getattr(args, "eval_every", 0)) <= 0
+    if eval_disabled:
+        args.max_val_samples = 0
+        args.max_test_samples = 0
+    data = load_data(args)
     train_loader = data.get("train")
-    val_loader = data.get("val")
+    val_loader = None if eval_disabled else data.get("val")
     cons_nfeats, edge_nfeats, var_nfeats = _infer_feature_dimensions(train_loader)
 
     policy = load_model(args, cons_nfeats, edge_nfeats, var_nfeats)
