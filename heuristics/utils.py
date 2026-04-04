@@ -415,6 +415,7 @@ def solve_explicit_dual_with_scs(
     time_limit_sec: Optional[float] = None,
     display_verblevel: int = 0,
 ) -> DualSolveResult:
+    """Solve dual option 3/4 via SCS QP with fixed objective target and min L2-norm solution."""
     option = int(dual_option)
     if option not in (3, 4):
         raise ValueError(f"Unsupported dual_option '{dual_option}'. Use one of: 1, 2, 3, 4.")
@@ -454,28 +455,6 @@ def solve_explicit_dual_with_scs(
             raw_result=None,
         )
 
-    m_rows, n_vars = A.shape
-    yab_dim = m_rows + 2 * n_vars
-    total_dim = yab_dim + 1
-    t_idx = total_dim - 1
-
-    eq_block = sp.hstack(
-        [
-            A.transpose().tocsr(),
-            -sp.eye(n_vars, dtype=np.float64, format="csr"),
-            sp.eye(n_vars, dtype=np.float64, format="csr"),
-            sp.csr_matrix((n_vars, 1), dtype=np.float64),
-        ],
-        format="csr",
-    )
-    nonneg_block = sp.hstack(
-        [
-            -sp.eye(yab_dim, dtype=np.float64, format="csr"),
-            sp.csr_matrix((yab_dim, 1), dtype=np.float64),
-        ],
-        format="csr",
-    )
-
     if obj_val is None or not np.isfinite(float(obj_val)):
         return DualSolveResult(
             success=False,
@@ -488,55 +467,68 @@ def solve_explicit_dual_with_scs(
             raw_result=None,
         )
 
+    m_rows, n_vars = A.shape
+    yab_dim = m_rows + 2 * n_vars
     objective_target = float(obj_val) - float(lp.objective_offset)
-    target_coeffs = np.zeros(total_dim, dtype=np.float64)
+
+    eq_block = sp.hstack(
+        [
+            A.transpose().tocsr(),
+            -sp.eye(n_vars, dtype=np.float64, format="csr"),
+            sp.eye(n_vars, dtype=np.float64, format="csr"),
+        ],
+        format="csr",
+    )
+
+    target_coeffs = np.zeros(yab_dim, dtype=np.float64)
     target_coeffs[:m_rows] = rhs
     target_coeffs[m_rows : m_rows + n_vars] = -ubs
     target_coeffs[m_rows + n_vars : m_rows + (2 * n_vars)] = lbs
 
     eq_block = sp.vstack([eq_block, sp.csr_matrix(target_coeffs.reshape(1, -1))], format="csr")
     b_eq = np.concatenate([np.asarray(c, dtype=np.float64), np.asarray([objective_target], dtype=np.float64)])
-    z_cone_dim = n_vars + 1
 
-    blocks = [eq_block, nonneg_block]
-    b_parts = [b_eq, np.zeros(yab_dim, dtype=np.float64)]
-    l_cone_dim = yab_dim
-
-    soc_top = sp.csr_matrix(
-        (
-            np.asarray([-1.0], dtype=np.float64),
-            (np.asarray([0], dtype=np.int32), np.asarray([t_idx], dtype=np.int32)),
-        ),
-        shape=(1, total_dim),
-    )
-    soc_rest = sp.hstack(
-        [
-            -sp.eye(yab_dim, dtype=np.float64, format="csr"),
-            sp.csr_matrix((yab_dim, 1), dtype=np.float64),
-        ],
-        format="csr",
-    )
-    soc_block = sp.vstack([soc_top, soc_rest], format="csr")
-    blocks.append(soc_block)
-    b_parts.append(np.zeros(1 + yab_dim, dtype=np.float64))
-
-    A_scs = sp.vstack(blocks, format="csc")
-    b_scs = np.concatenate(b_parts).astype(np.float64, copy=False)
-    c_scs = np.zeros(total_dim, dtype=np.float64)
-    c_scs[t_idx] = 1.0
-    data = {"A": A_scs, "b": b_scs, "c": c_scs}
-    cone = {"z": int(z_cone_dim), "l": int(l_cone_dim), "q": [int(1 + yab_dim)]}
+    nonneg_block = -sp.eye(yab_dim, dtype=np.float64, format="csr")
+    A_scs = sp.vstack([eq_block, nonneg_block], format="csc")
+    b_scs = np.concatenate([b_eq, np.zeros(yab_dim, dtype=np.float64)]).astype(np.float64, copy=False)
+    c_scs = np.zeros(yab_dim, dtype=np.float64)
+    P_scs = sp.eye(yab_dim, dtype=np.float64, format="csc")
+    data = {"P": P_scs, "A": A_scs, "b": b_scs, "c": c_scs}
+    cone = {"z": int(n_vars + 1), "l": int(yab_dim)}
 
     settings: Dict[str, Any] = {"verbose": bool(int(display_verblevel) > 0)}
     if time_limit_sec is not None and np.isfinite(float(time_limit_sec)) and float(time_limit_sec) > 0.0:
         settings["time_limit_secs"] = float(time_limit_sec)
 
-    raw_result = scs.solve(data, cone, **settings)
+    try:
+        raw_result = scs.solve(data, cone, **settings)
+    except Exception as exc:
+        return DualSolveResult(
+            success=False,
+            status="solver_error",
+            message=f"scs exception: {exc}",
+            objective_value=float("nan"),
+            y=None,
+            alpha=None,
+            beta=None,
+            raw_result=None,
+        )
     info = raw_result.get("info", {}) if isinstance(raw_result, dict) else {}
     status_raw = str(info.get("status", "")).lower()
     status_val = info.get("status_val")
     if status_val in (1, 2) and isinstance(raw_result, dict) and raw_result.get("x") is not None:
         x_scs = np.asarray(raw_result["x"], dtype=np.float64).reshape(-1)
+        if x_scs.shape[0] < yab_dim:
+            return DualSolveResult(
+                success=False,
+                status="invalid_solution_dimension",
+                message=f"scs returned x with dim={x_scs.shape[0]}, expected at least {yab_dim}",
+                objective_value=float("nan"),
+                y=None,
+                alpha=None,
+                beta=None,
+                raw_result=raw_result,
+            )
         y_val = x_scs[:m_rows].copy()
         alpha_val = x_scs[m_rows : m_rows + n_vars].copy()
         beta_val = x_scs[m_rows + n_vars : m_rows + (2 * n_vars)].copy()
@@ -545,8 +537,14 @@ def solve_explicit_dual_with_scs(
         target_obj = float(obj_val)
         obj_gap = abs(float(obj_value) - target_obj)
         res_pri = abs(float(info.get("res_pri", 0.0) or 0.0))
+        res_dual = abs(float(info.get("res_dual", 0.0) or 0.0))
         gap = abs(float(info.get("gap", 0.0) or 0.0))
-        obj_tol = max(1e-5, 10.0 * gap, 10.0 * res_pri * max(1.0, abs(target_obj)))
+        obj_tol = max(
+            1e-5,
+            10.0 * gap,
+            10.0 * res_pri * max(1.0, abs(target_obj)),
+            10.0 * res_dual * max(1.0, abs(target_obj)),
+        )
         min_dual = float(min(np.min(y_val), np.min(alpha_val), np.min(beta_val)))
         nonneg_tol = max(1e-6, 10.0 * res_pri)
         if min_dual < -nonneg_tol or obj_gap > obj_tol:
