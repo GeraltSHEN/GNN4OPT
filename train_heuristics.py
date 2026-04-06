@@ -65,6 +65,61 @@ def _infer_feature_dimensions(train_loader):
     return cons_nfeats, edge_nfeats, var_nfeats
 
 
+_BATCH_POSTPROCESS_KEYS = (
+    "post_rhs",
+    "post_parent_lbs",
+    "post_parent_ubs",
+    "post_lp_solution",
+    "post_parent_obj",
+    "post_cutoffbound",
+    "post_objective_offset",
+)
+
+
+def _build_batch_postprocess_data(batch):
+    if not all(hasattr(batch, key) for key in _BATCH_POSTPROCESS_KEYS):
+        return None
+    device = batch.constraint_features.device
+    dtype = batch.constraint_features.dtype
+    return {
+        "rhs": batch.post_rhs.to(device=device, dtype=dtype),
+        "parent_lbs": batch.post_parent_lbs.to(device=device, dtype=dtype),
+        "parent_ubs": batch.post_parent_ubs.to(device=device, dtype=dtype),
+        "lp_solution": batch.post_lp_solution.to(device=device, dtype=dtype),
+        "parent_obj": batch.post_parent_obj.reshape(-1).to(device=device, dtype=dtype),
+        "cutoffbound": batch.post_cutoffbound.reshape(-1).to(device=device, dtype=dtype),
+        "objective_offset": batch.post_objective_offset.reshape(-1).to(device=device, dtype=dtype),
+    }
+
+
+def _extract_topk_targets_from_batch(batch):
+    if batch is None or not hasattr(batch, "topk_targets"):
+        return None
+    batched_targets = batch.topk_targets
+    if not isinstance(batched_targets, dict):
+        return None
+
+    batch_size = int(getattr(batch, "num_graphs", 0))
+    if batch_size <= 0:
+        return None
+
+    targets = []
+    for idx in range(batch_size):
+        sample_target = {}
+        for key, value in batched_targets.items():
+            if isinstance(value, list):
+                sample_target[key] = value[idx]
+            elif torch.is_tensor(value):
+                sample_target[key] = value[idx]
+            else:
+                try:
+                    sample_target[key] = value[idx]
+                except Exception:
+                    sample_target[key] = value
+        targets.append(sample_target)
+    return targets
+
+
 def _forward_with_optional_postprocess(
     policy,
     batch,
@@ -73,11 +128,17 @@ def _forward_with_optional_postprocess(
     return_aux: bool = False,
 ):
     if hasattr(policy, "post_process"):
-        post_data = postprocess_interface.make_batch_data(
-            batch.graph_id,
-            device=batch.constraint_features.device,
-            dtype=batch.constraint_features.dtype,
-        )
+        post_data = _build_batch_postprocess_data(batch)
+        if post_data is None:
+            if postprocess_interface is None:
+                raise ValueError(
+                    "Post-process data not found on batch and postprocess_interface is None."
+                )
+            post_data = postprocess_interface.make_batch_data(
+                batch.graph_id,
+                device=batch.constraint_features.device,
+                dtype=batch.constraint_features.dtype,
+            )
         if return_aux:
             logits, padded_logits, aux = policy(
                 batch.constraint_features,
@@ -129,13 +190,14 @@ def _wrap_loader_for_postprocess(
     shuffle: bool,
     dual_option: int = 1,
     universal_cutoffbound: float = 1e6,
+    max_cache_size: int = 128,
 ):
     if loader is None:
         return None, None
 
     indexed_dataset = IndexedGraphDataset(loader.dataset)
-    wrapped_loader = DataLoader(
-        indexed_dataset,
+    loader_kwargs = dict(
+        dataset=indexed_dataset,
         batch_size=loader.batch_size,
         shuffle=shuffle,
         num_workers=loader.num_workers,
@@ -143,10 +205,15 @@ def _wrap_loader_for_postprocess(
         drop_last=loader.drop_last,
         persistent_workers=getattr(loader, "persistent_workers", False),
     )
+    prefetch_factor = getattr(loader, "prefetch_factor", None)
+    if loader.num_workers > 0 and prefetch_factor is not None:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+    wrapped_loader = DataLoader(**loader_kwargs)
     postprocess_interface = HeuristicPostProcessInterface(
         indexed_dataset.sample_files,
         dual_option=int(dual_option),
         universal_cutoffbound=float(universal_cutoffbound),
+        max_cache_size=int(max_cache_size),
     )
     return wrapped_loader, postprocess_interface
 
@@ -163,7 +230,19 @@ def _load_saved_topk_targets(
     graph_id: torch.Tensor,
     postprocess_interface,
     target_keys: Sequence[str],
+    batch=None,
 ):
+    batch_targets = _extract_topk_targets_from_batch(batch)
+    if batch_targets is not None:
+        return batch_targets
+    if postprocess_interface is None:
+        raise ValueError(
+            "Unable to load top-k targets: missing both batched topk_targets and postprocess interface."
+        )
+    if graph_id is None:
+        raise ValueError(
+            "Unable to load top-k targets from files: graph_id is missing on the batch."
+        )
     targets = []
     for gid in graph_id.reshape(-1).detach().cpu().tolist():
         sample = load_sample(postprocess_interface.sample_files[int(gid)])
@@ -244,6 +323,7 @@ def train(
     else:
         ranking_loss_fn = ranking_loss_cls()
     score_th = float('inf')
+    train_tb_every = max(int(getattr(args, "train_tb_every", 100)), 1)
 
     model_dir = Path(model_dir)
     log_dir = Path(log_dir)
@@ -307,7 +387,7 @@ def train(
                     f"[relative] {mean_normalized_score_diff / n_samples_processed:.3f}"
                 )
 
-            batch = batch.to(device)
+            batch = batch.to(device, non_blocking=True)
             model_aux = None
             if loss_option == "regression":
                 flat_logits, precomputed_padded_logits, model_aux = _forward_with_optional_postprocess(
@@ -356,9 +436,10 @@ def train(
                     loss = F.mse_loss(logits, target_scores)
                 else:
                     saved_targets = _load_saved_topk_targets(
-                        batch.graph_id,
+                        getattr(batch, "graph_id", None),
                         train_postprocess_interface,
                         target_keys=topk_target_keys,
+                        batch=batch,
                     )
                     if regression_target == "score":
                         true_scores = torch.stack(
@@ -438,7 +519,7 @@ def train(
             else:
                 raise ValueError(f"Unsupported loss option: {loss_option}")
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             num_gradient_steps += 1
@@ -455,17 +536,17 @@ def train(
             n_samples_processed += batch.num_graphs
 
             # torch.save(policy.state_dict(), "trained_params.pkl")
-            writer.add_scalar("Loss/train", loss.item(), num_gradient_steps)
-            writer.add_scalar("Accuracy/train", accuracy, num_gradient_steps)
-            writer.add_scalar("Top5_Accuracy/train", top5_acc, num_gradient_steps)
-            # New stats
             score_diff = (true_bestscore - true_scores.gather(-1, predicted_bestindex).clip(0)).mean().item()
             normalized_score_diff = ((true_bestscore - true_scores.gather(-1, predicted_bestindex).clip(0)) / true_bestscore).mean().item()
             mean_score_diff += score_diff * batch.num_graphs
             mean_normalized_score_diff += normalized_score_diff * batch.num_graphs
 
-            writer.add_scalar("Score_diff/train", score_diff, num_gradient_steps)
-            writer.add_scalar("Normalized_score_diff/train", normalized_score_diff, num_gradient_steps)
+            if num_gradient_steps % train_tb_every == 0:
+                writer.add_scalar("Loss/train", loss.item(), num_gradient_steps)
+                writer.add_scalar("Accuracy/train", accuracy, num_gradient_steps)
+                writer.add_scalar("Top5_Accuracy/train", top5_acc, num_gradient_steps)
+                writer.add_scalar("Score_diff/train", score_diff, num_gradient_steps)
+                writer.add_scalar("Normalized_score_diff/train", normalized_score_diff, num_gradient_steps)
 
         if n_samples_processed == 0:
             print_dash_str(f"No samples processed in epoch {epoch + 1}.")
@@ -504,7 +585,7 @@ def evaluate(policy, data_loader, device, writer, num_gradient_steps, postproces
     n_samples_processed = 0
     with torch.no_grad():
         for batch in tqdm.tqdm(data_loader, disable=True):
-            batch = batch.to(device)
+            batch = batch.to(device, non_blocking=True)
             flat_logits, precomputed_padded_logits = _forward_with_optional_postprocess(
                 policy,
                 batch,
@@ -559,8 +640,10 @@ def pad_tensor(input_, pad_sizes, pad_value=-1e8):
     """
     This utility function splits a tensor and pads each split to make them all the same size, then stacks them.
     """
-    max_pad_size = pad_sizes.max()
-    output = input_.split(pad_sizes.cpu().numpy().tolist())
+    if pad_sizes.numel() == 1:
+        return input_.unsqueeze(0)
+    max_pad_size = int(pad_sizes.max().item())
+    output = input_.split(pad_sizes.detach().cpu().tolist())
     output = torch.stack(
         [
             F.pad(slice_, (0, max_pad_size - slice_.size(0)), "constant", pad_value)
@@ -647,6 +730,44 @@ def parse_args(argv=None):
         choices=[0, 1],
         help="Whether to apply cutoff-based torch.minimum operations in HeuristicPolicy post-process.",
     )
+    parser.add_argument(
+        "--train_tb_every",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="TensorBoard write frequency in gradient steps for train metrics.",
+    )
+    parser.add_argument(
+        "--postprocess_cache_size",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Max number of post-process samples cached in memory.",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="DataLoader worker count.",
+    )
+    parser.add_argument(
+        "--persistent_workers",
+        type=int,
+        choices=[0, 1],
+        default=argparse.SUPPRESS,
+        help="Enable DataLoader persistent workers.",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="DataLoader prefetch_factor (workers only).",
+    )
+    parser.add_argument(
+        "--pin_memory",
+        type=int,
+        choices=[0, 1],
+        default=argparse.SUPPRESS,
+        help="Enable DataLoader pin_memory.",
+    )
     return parser.parse_args(argv)
 
 
@@ -668,6 +789,10 @@ def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
     if not hasattr(args, "use_cutoff_minimum"):
         args.use_cutoff_minimum = True
     args.use_cutoff_minimum = bool(args.use_cutoff_minimum)
+    if hasattr(args, "persistent_workers"):
+        args.persistent_workers = bool(args.persistent_workers)
+    if hasattr(args, "pin_memory"):
+        args.pin_memory = bool(args.pin_memory)
     return args
 
 
@@ -700,12 +825,14 @@ def main(argv=None):
             shuffle=bool(getattr(args, "train_shuffle", True)),
             dual_option=int(getattr(args, "dual_option", 1)),
             universal_cutoffbound=float(getattr(args, "universal_cutoffbound", 1e6)),
+            max_cache_size=int(getattr(args, "postprocess_cache_size", 128)),
         )
         val_loader, val_postprocess_interface = _wrap_loader_for_postprocess(
             val_loader,
             shuffle=bool(getattr(args, "val_shuffle", False)),
             dual_option=int(getattr(args, "dual_option", 1)),
             universal_cutoffbound=float(getattr(args, "universal_cutoffbound", 1e6)),
+            max_cache_size=int(getattr(args, "postprocess_cache_size", 128)),
         )
 
     base_model_dir = Path(getattr(args, "model_dir", "./models"))

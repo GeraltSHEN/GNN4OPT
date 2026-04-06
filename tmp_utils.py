@@ -4,7 +4,7 @@ import os
 import random
 import pickle
 from pathlib import Path
-from typing import Dict, Sequence, Union
+from typing import Any, Dict, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -81,9 +81,126 @@ class GraphDataset(Dataset):
         self.edge_nfeats = edge_nfeats
         self.two_fwl = two_fwl
         self.args = args
+        self._feature_index_cache: Dict[Tuple[str, ...], Dict[str, int]] = {}
+        model_name = str(getattr(args, "model", "")).lower() if args is not None else ""
+        self._attach_postprocess_data = bool(
+            getattr(args, "attach_postprocess_data", model_name == "heuristics")
+        ) if args is not None else False
+        loss_option = str(getattr(args, "loss_option", "")).lower() if args is not None else ""
+        self._attach_topk_targets = bool(
+            getattr(args, "attach_topk_targets", loss_option == "regression")
+        ) if args is not None else False
+        self._dual_option = int(getattr(args, "dual_option", 1)) if args is not None else 1
+        self._universal_cutoffbound = float(
+            getattr(args, "universal_cutoffbound", 1e6)
+        ) if args is not None else 1e6
+        self._topk_target_keys = self._resolve_topk_target_keys()
 
     def len(self):
         return len(self.sample_files)
+
+    def _name_to_index(self, names: Sequence[str]) -> Dict[str, int]:
+        key = tuple(names)
+        cached = self._feature_index_cache.get(key)
+        if cached is None:
+            cached = {name: idx for idx, name in enumerate(names)}
+            self._feature_index_cache[key] = cached
+        return dict(cached)
+
+    def _resolve_topk_target_keys(self) -> Sequence[str]:
+        if self._dual_option == 1:
+            return (
+                "top8_regression_targets_option1",
+                "top8_regression_targets",
+                "top8_regression_targets_option2",
+            )
+        if self._dual_option == 2:
+            return (
+                "top8_regression_targets_option2",
+                "top8_regression_targets_option1",
+                "top8_regression_targets",
+            )
+        return (
+            "top8_regression_targets",
+            "top8_regression_targets_option1",
+            "top8_regression_targets_option2",
+        )
+
+    def _effective_cutoffbound(self, sample_cutoffbound: float) -> float:
+        if self._dual_option in (1, 3):
+            return float(sample_cutoffbound)
+        if self._dual_option in (2, 4):
+            return float(self._universal_cutoffbound)
+        raise ValueError(
+            f"Unsupported dual_option '{self._dual_option}'. Use one of: 1, 2, 3, 4."
+        )
+
+    def _attach_postprocess_fields(
+        self,
+        graph: BipartiteNodeData,
+        sample_data: Sequence[Any],
+        constraint_default_features: torch.Tensor,
+        constraint_default_feature_indices: Dict[str, int],
+        variable_default_features: torch.Tensor,
+        variable_default_feature_indices: Dict[str, int],
+        variable_dict: Dict[str, Any],
+    ) -> None:
+        if len(sample_data) < 6:
+            return
+        bias_idx = constraint_default_feature_indices.get("bias")
+        sol_val_idx = variable_default_feature_indices.get("sol_val")
+        coef_idx = variable_default_feature_indices.get("coef_normalized")
+        if bias_idx is None or sol_val_idx is None or coef_idx is None:
+            return
+
+        rhs = -constraint_default_features[:, bias_idx].to(torch.float32).contiguous()
+        lp_solution = variable_default_features[:, sol_val_idx].to(torch.float32).contiguous()
+        obj_coeffs = variable_default_features[:, coef_idx].to(torch.float32).contiguous()
+
+        n_vars = int(variable_default_features.size(0))
+        parent_lbs = torch.zeros(n_vars, dtype=torch.float32)
+        parent_ubs = torch.ones(n_vars, dtype=torch.float32)
+        type0_idx = variable_default_feature_indices.get("type_0")
+        if type0_idx is not None:
+            binary = variable_default_features[:, type0_idx] > 0.5
+            parent_lbs[binary] = 0.0
+            parent_ubs[binary] = 1.0
+
+        reconstruction = variable_dict.get("reconstruction", {})
+        if "lbs" in reconstruction:
+            rec_lbs = torch.as_tensor(reconstruction["lbs"], dtype=torch.float32).reshape(-1)
+            if rec_lbs.numel() == n_vars:
+                parent_lbs = rec_lbs.contiguous()
+        if "ubs" in reconstruction:
+            rec_ubs = torch.as_tensor(reconstruction["ubs"], dtype=torch.float32).reshape(-1)
+            if rec_ubs.numel() == n_vars:
+                parent_ubs = rec_ubs.contiguous()
+
+        objective_offset = float(reconstruction.get("objective_offset", 0.0))
+        parent_obj = (
+            torch.dot(obj_coeffs.to(torch.float64), lp_solution.to(torch.float64)).to(torch.float32)
+            + objective_offset
+        )
+        sample_cutoffbound = float(sample_data[5])
+        cutoffbound = self._effective_cutoffbound(sample_cutoffbound)
+
+        graph.post_rhs = rhs
+        graph.post_parent_lbs = parent_lbs
+        graph.post_parent_ubs = parent_ubs
+        graph.post_lp_solution = lp_solution
+        graph.post_parent_obj = torch.tensor([float(parent_obj)], dtype=torch.float32)
+        graph.post_cutoffbound = torch.tensor([cutoffbound], dtype=torch.float32)
+        graph.post_objective_offset = torch.tensor([objective_offset], dtype=torch.float32)
+
+    def _attach_topk_target_fields(self, graph: BipartiteNodeData, sample: Dict[str, Any]) -> None:
+        selected = None
+        for key in self._topk_target_keys:
+            if key in sample:
+                selected = sample[key]
+                break
+        if selected is None:
+            return
+        graph.topk_targets = selected
 
     def get(self, index):
         """
@@ -103,12 +220,14 @@ class GraphDataset(Dataset):
         edge_indices = torch.as_tensor(edge_dict["indices"], dtype=torch.int64)
         edge_features = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
 
-        variable_names = variable_dict["names"]
-        variable_feature_indices = {name: variable_names.index(name) for name in variable_names}
+        variable_names = list(variable_dict["names"])
+        variable_default_feature_indices = self._name_to_index(variable_names)
+        variable_feature_indices = dict(variable_default_feature_indices)
         variable_default_features = torch.as_tensor(variable_dict["values"], dtype=torch.float32)
 
-        constraint_names = constraint_dict["names"]
-        constraint_feature_indices = {name: constraint_names.index(name) for name in constraint_names}
+        constraint_names = list(constraint_dict["names"])
+        constraint_default_feature_indices = self._name_to_index(constraint_names)
+        constraint_feature_indices = dict(constraint_default_feature_indices)
         constraint_default_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
 
         # pick problem data features
@@ -222,6 +341,18 @@ class GraphDataset(Dataset):
             constraint_features.size(0),
         )
         graph.num_nodes = constraint_features.shape[0] + variable_features.shape[0]
+        if self._attach_postprocess_data:
+            self._attach_postprocess_fields(
+                graph,
+                sample_data,
+                constraint_default_features,
+                constraint_default_feature_indices,
+                variable_default_features,
+                variable_default_feature_indices,
+                variable_dict,
+            )
+        if self._attach_topk_targets:
+            self._attach_topk_target_fields(graph, sample)
         return graph
     
     def clean_candidates(self, candidates: torch.Tensor, candidate_scores: torch.Tensor, 
@@ -323,6 +454,10 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
 
     data: Dict[str, Union[torch.utils.data.DataLoader, Sequence[Path]]] = {}
     metadata: Dict[str, Sequence[Path]] = {}
+    num_workers = int(getattr(args, "num_workers", 8))
+    pin_memory = bool(getattr(args, "pin_memory", True))
+    persistent_workers = bool(getattr(args, "persistent_workers", num_workers > 0))
+    prefetch_factor = getattr(args, "prefetch_factor", None)
     for split_name, cfg in splits.items():
         split_dir = dataset_root / cfg["subdir"]
         sample_files = None
@@ -357,13 +492,17 @@ def load_data(args, for_training: bool = True) -> Dict[str, Union[torch.utils.da
                 edge_nfeats=edge_nfeats,
                 args=args,
             )
-            data[split_name] = DataLoader(
-                dataset,
+            loader_kwargs = dict(
                 batch_size=cfg["batch_size"],
                 shuffle=cfg["shuffle"],
-                num_workers=8,
-                pin_memory=True,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
             )
+            if num_workers > 0:
+                loader_kwargs["persistent_workers"] = persistent_workers
+                if prefetch_factor is not None:
+                    loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+            data[split_name] = DataLoader(dataset, **loader_kwargs)
         else:
             data[split_name] = None
     data.update(metadata)

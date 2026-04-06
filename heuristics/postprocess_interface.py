@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import gzip
 import pickle
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -56,11 +57,13 @@ class HeuristicPostProcessInterface:
         sample_files: Sequence[str | Path],
         dual_option: int = 1,
         universal_cutoffbound: float = 1e6,
+        max_cache_size: int = 128,
     ):
         self.sample_files = [Path(p) for p in sample_files]
         self.dual_option = int(dual_option)
         self.universal_cutoffbound = float(universal_cutoffbound)
-        self._cache: Dict[int, Dict[str, np.ndarray | float]] = {}
+        self.max_cache_size = max(int(max_cache_size), 0)
+        self._cache: "OrderedDict[int, Dict[str, np.ndarray | float]]" = OrderedDict()
 
     def _effective_cutoffbound(self, sample_cutoffbound: float) -> float:
         if self.dual_option in (1, 3):
@@ -96,6 +99,7 @@ class HeuristicPostProcessInterface:
     def _load_one(self, graph_idx: int):
         cached = self._cache.get(graph_idx)
         if cached is not None:
+            self._cache.move_to_end(graph_idx)
             return cached
 
         sample = load_sample(self.sample_files[int(graph_idx)])
@@ -141,7 +145,11 @@ class HeuristicPostProcessInterface:
             "sample_cutoffbound": sample_cutoffbound,
             "objective_offset": objective_offset,
         }
-        self._cache[graph_idx] = out
+        if self.max_cache_size > 0:
+            self._cache[graph_idx] = out
+            self._cache.move_to_end(graph_idx)
+            while len(self._cache) > self.max_cache_size:
+                self._cache.popitem(last=False)
         return out
 
     def make_batch_data(self, graph_id: torch.Tensor, device: torch.device, dtype: torch.dtype = torch.float32):
