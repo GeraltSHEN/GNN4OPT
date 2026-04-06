@@ -176,9 +176,7 @@ def evaluate_topk(policy, data_loader, device, postprocess_interface, ranking_cs
                 true_rank_global = topk_candidate_global.gather(1, true_rank_local)
                 predicted_rank_scores = topk_logits.gather(1, predicted_rank_local)
                 true_rank_scores = topk_true_scores.gather(1, true_rank_local)
-                top1_correct = (
-                    topk_true_scores.gather(-1, predicted_rank_local[:, :1]) == topk_bestscore
-                ).to(dtype=torch.long)
+                top1_correct = (predicted_score == topk_bestscore).to(dtype=torch.long)
                 graph_ids = batch.graph_id.reshape(-1).detach().cpu().tolist()
                 for row_idx, graph_id in enumerate(graph_ids):
                     pred_list = predicted_rank_global[row_idx].detach().cpu().tolist()
