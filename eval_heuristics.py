@@ -286,6 +286,13 @@ def parse_args(argv=None):
         choices=[0, 1],
         help="Whether to apply cutoff-based torch.minimum operations in HeuristicPolicy post-process.",
     )
+    parser.add_argument(
+        "--no_post_process",
+        type=int,
+        default=argparse.SUPPRESS,
+        choices=[0, 1],
+        help="If true, evaluate heuristic model with simple learned readout (no optimization-inspired post-process).",
+    )
     return parser.parse_args(argv)
 
 
@@ -313,6 +320,9 @@ def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
     if not hasattr(args, "use_cutoff_minimum"):
         args.use_cutoff_minimum = True
     args.use_cutoff_minimum = bool(args.use_cutoff_minimum)
+    if not hasattr(args, "no_post_process"):
+        args.no_post_process = False
+    args.no_post_process = bool(args.no_post_process)
     return args
 
 

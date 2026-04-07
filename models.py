@@ -437,6 +437,7 @@ class HeuristicPolicy(torch.nn.Module):
         sage_mlp_layers: int = 2,
         n_branching: int = 1,
         use_cutoff_minimum: bool = True,
+        no_post_process: bool = False,
     ):
         super().__init__()
         if n_layers <= 0:
@@ -448,6 +449,7 @@ class HeuristicPolicy(torch.nn.Module):
         self.branching_model = branching_model
         self.n_branching = int(n_branching)
         self.use_cutoff_minimum = bool(use_cutoff_minimum)
+        self.no_post_process = bool(no_post_process)
         if self.branching_model is not None:
             self.branching_model.eval()
             for p in self.branching_model.parameters():
@@ -483,6 +485,99 @@ class HeuristicPolicy(torch.nn.Module):
         self.vars_out = torch.nn.Sequential(
                 torch.nn.LayerNorm(emb_size),
                 MLP([emb_size, emb_size, 2], act="relu", norm=None, plain_last=True))
+        self.no_pp_cons_out = torch.nn.Sequential(
+                torch.nn.LayerNorm(emb_size),
+                MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
+        self.no_pp_vars_out = torch.nn.Sequential(
+                torch.nn.LayerNorm(emb_size),
+                MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
+
+    def _simple_obj_readout(
+        self,
+        Y_emb,
+        X_emb,
+        *,
+        shape_info,
+        real_y_mask,
+        real_x_mask,
+        top_local,
+        branching_candidates_global,
+        nb_candidates,
+        n_variables_per_graph,
+        data=None,
+        return_aux: bool = False,
+    ):
+        bsz, t, n_constraints_max, n_variables_max = shape_info
+        device = Y_emb.device
+        dtype = Y_emb.dtype
+
+        y_nodes = self.no_pp_cons_out(Y_emb).squeeze(-1).view(bsz, 1 + t, 2, n_constraints_max)
+        x_nodes = self.no_pp_vars_out(X_emb).squeeze(-1).view(bsz, 1 + t, 2, n_variables_max)
+
+        y_nodes = y_nodes.masked_fill(~real_y_mask, 0.0)
+        x_nodes = x_nodes.masked_fill(~real_x_mask, 0.0)
+
+        view_obj = y_nodes.sum(dim=-1) + x_nodes.sum(dim=-1)
+        parent_obj = view_obj[:, 0, :].mean(dim=1)
+        down_obj_topk = view_obj[:, 1:, 0]
+        up_obj_topk = view_obj[:, 1:, 1]
+
+        if self.use_cutoff_minimum and data is not None and "cutoffbound" in data:
+            cutoffbound = data["cutoffbound"]
+            if torch.is_tensor(cutoffbound):
+                cutoffbound = cutoffbound.to(device=device, dtype=dtype).reshape(-1)
+            else:
+                cutoffbound = torch.as_tensor(cutoffbound, device=device, dtype=dtype).reshape(-1)
+            if cutoffbound.numel() == 1:
+                cutoffbound = cutoffbound.repeat(bsz)
+            down_obj_topk = torch.minimum(down_obj_topk, cutoffbound.unsqueeze(1))
+            up_obj_topk = torch.minimum(up_obj_topk, cutoffbound.unsqueeze(1))
+
+        gain_down_topk = torch.clamp(down_obj_topk - parent_obj.unsqueeze(1), min=1e-9)
+        gain_up_topk = torch.clamp(up_obj_topk - parent_obj.unsqueeze(1), min=1e-9)
+        pseudo_scores_topk = gain_down_topk * gain_up_topk
+
+        n_variables_per_graph = n_variables_per_graph.to(device=device, dtype=torch.long).reshape(-1)
+        variable_offsets = torch.cumsum(
+            torch.cat((torch.zeros(1, device=device, dtype=torch.long), n_variables_per_graph[:-1])),
+            dim=0,
+        )
+        branching_candidates_local = branching_candidates_global - variable_offsets.unsqueeze(1)
+        valid_topk = (
+            (branching_candidates_local >= 0)
+            & (branching_candidates_local < n_variables_per_graph.unsqueeze(1))
+        )
+        branching_candidates_local_safe = branching_candidates_local.clamp(min=0, max=n_variables_max - 1)
+        pseudo_scores_topk = pseudo_scores_topk.masked_fill(~valid_topk, -1e8)
+
+        nb_candidates = nb_candidates.to(device=device, dtype=torch.long).reshape(-1)
+        max_pad = int(nb_candidates.max().item())
+        padded_logits = pseudo_scores_topk.mean(dim=1, keepdim=True).expand(-1, max_pad).clone()
+        top_local = top_local.to(device=device, dtype=torch.long).clamp(min=0, max=max_pad - 1)
+        padded_logits.scatter_(1, top_local, pseudo_scores_topk)
+        logits = torch.cat(
+            [padded_logits[i, : int(nb_candidates[i].item())] for i in range(bsz)],
+            dim=0,
+        )
+
+        if not return_aux:
+            return logits, padded_logits, pseudo_scores_topk
+
+        aux = {
+            "top_local": top_local,
+            "branching_candidates_global": branching_candidates_global,
+            "branching_candidates_local": branching_candidates_local_safe,
+            "real_y_mask_topk": real_y_mask[:, 1:, :, :],
+            "real_x_mask_topk": real_x_mask[:, 1:, :, :],
+            "topk_y": y_nodes[:, 1:, :, :],
+            "topk_alpha": x_nodes[:, 1:, :, :],
+            "topk_beta": x_nodes[:, 1:, :, :],
+            "topk_down_obj": down_obj_topk,
+            "topk_up_obj": up_obj_topk,
+            "topk_pseudo_scores": pseudo_scores_topk,
+            "parent_obj": parent_obj,
+        }
+        return logits, padded_logits, aux
 
     def get_top_k(
         self,
@@ -754,6 +849,21 @@ class HeuristicPolicy(torch.nn.Module):
                                      edge_features,
                                      X,
                                      n_variables_per_graph=n_variables_per_graph)
+
+        if self.no_post_process:
+            return self._simple_obj_readout(
+                Y,
+                X,
+                shape_info=shape_info,
+                real_y_mask=real_y_mask,
+                real_x_mask=real_x_mask,
+                top_local=top_local,
+                branching_candidates_global=branching_candidates,
+                nb_candidates=nb_candidates,
+                n_variables_per_graph=n_variables_per_graph,
+                data=data,
+                return_aux=return_aux,
+            )
 
         # 5. readout constraint features
         # (PyG's MLP should work fine with both PyG style or (B, 1+T, 2, n_max, F) style)

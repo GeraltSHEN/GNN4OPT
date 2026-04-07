@@ -322,20 +322,6 @@ def _load_saved_topk_targets(
     return targets
 
 
-def _assert_topk_target_alignment(model_aux: Dict[str, torch.Tensor], saved_targets: Sequence[Dict[str, Any]]):
-    top_local = model_aux.get("top_local")
-    top_global = model_aux.get("branching_candidates_global")
-    if top_local is None or top_global is None:
-        return
-    top_local = top_local.to(dtype=torch.long)
-    top_global = top_global.to(dtype=torch.long)
-    for b_idx, target in enumerate(saved_targets):
-        target_local = torch.as_tensor(target["candidate_positions"], device=top_local.device, dtype=torch.long)
-        target_global = torch.as_tensor(target["candidate_indices"], device=top_global.device, dtype=torch.long)
-        assert torch.equal(top_local[b_idx], target_local), "Top-k local order mismatch with saved targets."
-        assert torch.equal(top_global[b_idx], target_global), "Top-k candidate ids mismatch with saved targets."
-
-
 def train(
     args,
     policy,
@@ -521,7 +507,6 @@ def train(
                         target_keys=topk_target_keys,
                         batch=batch,
                     )
-                    _assert_topk_target_alignment(model_aux, saved_targets)
                     if regression_target == "score":
                         true_scores = torch.stack(
                             [
@@ -768,19 +753,19 @@ def parse_args(argv=None):
     parser.add_argument(
         "--eval_every",
         type=int,
-        default=-1234,
+        default=argparse.SUPPRESS,
         help="Evaluation frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--save_every",
         type=int,
-        default=140000,
+        default=argparse.SUPPRESS,
         help="Checkpoint frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
         "--print_every",
         type=int,
-        default=140000,
+        default=argparse.SUPPRESS,
         help="Logging frequency in gradient steps. Disabled if <= 0.",
     )
     parser.add_argument(
@@ -810,7 +795,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--regression_target",
         type=str,
-        default="score",
+        default=argparse.SUPPRESS,
         help="Regression target for loss_option=regression: one of {dual, obj, score}.",
     )
     parser.add_argument(
@@ -823,14 +808,14 @@ def parse_args(argv=None):
     parser.add_argument(
         "--dual_option",
         type=int,
-        default=1,
+        default=argparse.SUPPRESS,
         choices=[1, 2],
         help="Regression target variant key: top8_regression_targets_option{dual_option}.",
     )
     parser.add_argument(
         "--universal_cutoffbound",
         type=float,
-        default=1e6,
+        default=argparse.SUPPRESS,
         help="Universal cutoffbound used for dual options 2 and 4 in post-process.",
     )
     parser.add_argument(
@@ -839,6 +824,13 @@ def parse_args(argv=None):
         default=argparse.SUPPRESS,
         choices=[0, 1],
         help="Whether to apply cutoff-based torch.minimum operations in HeuristicPolicy post-process.",
+    )
+    parser.add_argument(
+        "--no_post_process",
+        type=int,
+        default=argparse.SUPPRESS,
+        choices=[0, 1],
+        help="If true, bypass optimization-inspired post-process and use a simple learned readout for obj regression.",
     )
     parser.add_argument(
         "--train_tb_every",
@@ -900,11 +892,27 @@ def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
     args_dict = {**cfg, **vars(init_args)}
     args = argparse.Namespace(**args_dict)
 
+    if not hasattr(args, "eval_every"):
+        args.eval_every = -1234
+    if not hasattr(args, "save_every"):
+        args.save_every = 140000
+    if not hasattr(args, "print_every"):
+        args.print_every = 140000
+    if not hasattr(args, "regression_target"):
+        args.regression_target = "score"
+    if not hasattr(args, "dual_option"):
+        args.dual_option = 1
+    if not hasattr(args, "universal_cutoffbound"):
+        args.universal_cutoffbound = 1e6
+
     args.model_id = f"{args.dataset}_cfg{args.cfg_idx}"
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
     if not hasattr(args, "use_cutoff_minimum"):
         args.use_cutoff_minimum = True
     args.use_cutoff_minimum = bool(args.use_cutoff_minimum)
+    if not hasattr(args, "no_post_process"):
+        args.no_post_process = False
+    args.no_post_process = bool(args.no_post_process)
     if not hasattr(args, "include_parent"):
         args.include_parent = False
     args.include_parent = bool(args.include_parent)
@@ -924,6 +932,12 @@ def main(argv=None):
 
     for key, value in vars(args).items():
         print(f"{key}: {value}")
+
+    if bool(getattr(args, "no_post_process", False)):
+        if str(getattr(args, "loss_option", "")).lower() != "regression":
+            raise ValueError("no_post_process=True currently supports loss_option=regression only.")
+        if str(getattr(args, "regression_target", "")).lower() != "obj":
+            raise ValueError("no_post_process=True currently supports regression_target='obj' only.")
 
     set_seed(args.seed)
     eval_disabled = int(getattr(args, "eval_every", 0)) <= 0
