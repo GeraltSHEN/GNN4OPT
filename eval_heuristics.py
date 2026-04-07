@@ -352,14 +352,15 @@ def main(argv=None):
     if not model_dir.exists():
         raise FileNotFoundError(f"Model directory does not exist: {model_dir}")
 
+    requested_step = _checkpoint_step_value(str(args.checkpoint_step))
     loaded_step = load_checkpoint(
         policy,
         None,
-        step=_checkpoint_step_value(str(args.checkpoint_step)),
+        step=requested_step,
         save_dir=str(model_dir),
         device=args.device,
     )
-    if int(loaded_step) == 0:
+    if int(loaded_step) == 0 and requested_step == "max":
         raise RuntimeError(f"No checkpoint found in model directory: {model_dir}")
     print(f"Loaded checkpoint step: {loaded_step}")
 

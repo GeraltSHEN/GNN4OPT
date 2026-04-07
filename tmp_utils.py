@@ -689,15 +689,20 @@ def load_checkpoint(model, optimizer=None, step='max', save_dir='checkpoints', d
 
     checkpoints = [x for x in os.listdir(save_dir) if not x.startswith('events') and not x.endswith('.json') and not x.endswith('.pkl')]
 
+    save_path = None
     if step == 'max':
         step = 0
         if checkpoints:
             step, last_checkpoint = max([(int(x.split('.')[0]), x) for x in checkpoints])
+            save_path = os.path.join(save_dir, last_checkpoint)
     else:
+        step = int(step)
         last_checkpoint = str(step) + '.pth'
-    
-    if step:
         save_path = os.path.join(save_dir, last_checkpoint)
+        if not os.path.exists(save_path):
+            raise FileNotFoundError(f"Checkpoint not found: {save_path}")
+
+    if save_path is not None:
         state = torch.load(save_path, map_location=device)
 
         if len(exclude_keys) > 0:

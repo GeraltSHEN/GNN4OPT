@@ -220,10 +220,73 @@ def _wrap_loader_for_postprocess(
 
 TOPK_TARGET_KEY = "top8_regression_targets"
 TOPK_TARGET_KEY_PREFIX = "top8_regression_targets_option"
+GRAD_MONITOR_PARAM_NAMES = (
+    "var_embedding.1.lins.0.weight",
+    "data_encoder.conv_0_v_to_c.output_module.2.weight",
+    "data_encoder.conv_0_c_to_v.output_module.2.weight",
+    "vars_out.1.lins.0.weight",
+    "vars_out.1.lins.1.weight",
+)
 
 
 def _topk_target_key_for_option(dual_option: int) -> str:
     return f"{TOPK_TARGET_KEY_PREFIX}{int(dual_option)}"
+
+
+def _tensor_norm_or_zero(tensor: Optional[torch.Tensor]) -> float:
+    if tensor is None:
+        return 0.0
+    return float(tensor.norm().item())
+
+
+def _log_gradient_diagnostics(
+    writer: SummaryWriter,
+    policy: torch.nn.Module,
+    step: int,
+):
+    named_params = dict(policy.named_parameters())
+
+    total_grad_sq = 0.0
+    for param in policy.parameters():
+        if param.grad is None:
+            continue
+        grad_norm = float(param.grad.norm().item())
+        total_grad_sq += grad_norm * grad_norm
+    writer.add_scalar("GradNorm/total", total_grad_sq ** 0.5, step)
+
+    for name in GRAD_MONITOR_PARAM_NAMES:
+        param = named_params.get(name)
+        if param is None:
+            continue
+        writer.add_scalar(f"GradNorm/{name}", _tensor_norm_or_zero(param.grad), step)
+        writer.add_scalar(f"ParamNorm/{name}", _tensor_norm_or_zero(param.data), step)
+
+    var_embed_weight = named_params.get("var_embedding.1.lins.0.weight")
+    if var_embed_weight is not None and var_embed_weight.dim() == 2 and var_embed_weight.size(1) >= 3:
+        param_base = var_embed_weight.data[:, :-2]
+        param_branch = var_embed_weight.data[:, -2:]
+        param_base_norm = _tensor_norm_or_zero(param_base)
+        param_branch_norm = _tensor_norm_or_zero(param_branch)
+        writer.add_scalar("ParamNorm/var_embedding_l0_base", param_base_norm, step)
+        writer.add_scalar("ParamNorm/var_embedding_l0_branch", param_branch_norm, step)
+        writer.add_scalar(
+            "ParamRatio/var_embedding_l0_branch_over_base",
+            param_branch_norm / max(param_base_norm, 1e-12),
+            step,
+        )
+
+        if var_embed_weight.grad is not None:
+            grad_base = var_embed_weight.grad[:, :-2]
+            grad_branch = var_embed_weight.grad[:, -2:]
+            grad_base_norm = _tensor_norm_or_zero(grad_base)
+            grad_branch_norm = _tensor_norm_or_zero(grad_branch)
+            writer.add_scalar("GradNorm/var_embedding_l0_base", grad_base_norm, step)
+            writer.add_scalar("GradNorm/var_embedding_l0_branch", grad_branch_norm, step)
+            writer.add_scalar(
+                "GradRatio/var_embedding_l0_branch_over_base",
+                grad_branch_norm / max(grad_base_norm, 1e-12),
+                step,
+            )
 
 
 def _load_saved_topk_targets(
@@ -259,6 +322,20 @@ def _load_saved_topk_targets(
     return targets
 
 
+def _assert_topk_target_alignment(model_aux: Dict[str, torch.Tensor], saved_targets: Sequence[Dict[str, Any]]):
+    top_local = model_aux.get("top_local")
+    top_global = model_aux.get("branching_candidates_global")
+    if top_local is None or top_global is None:
+        return
+    top_local = top_local.to(dtype=torch.long)
+    top_global = top_global.to(dtype=torch.long)
+    for b_idx, target in enumerate(saved_targets):
+        target_local = torch.as_tensor(target["candidate_positions"], device=top_local.device, dtype=torch.long)
+        target_global = torch.as_tensor(target["candidate_indices"], device=top_global.device, dtype=torch.long)
+        assert torch.equal(top_local[b_idx], target_local), "Top-k local order mismatch with saved targets."
+        assert torch.equal(top_global[b_idx], target_global), "Top-k candidate ids mismatch with saved targets."
+
+
 def train(
     args,
     policy,
@@ -280,6 +357,7 @@ def train(
     print_every = args.print_every
     loss_option = args.loss_option
     regression_target = None
+    include_parent = bool(getattr(args, "include_parent", False))
     dual_option = int(getattr(args, "dual_option", 1))
     if dual_option not in (1, 2):
         raise ValueError(f"Unsupported dual_option '{dual_option}'. Use one of: 1, 2.")
@@ -324,6 +402,7 @@ def train(
         ranking_loss_fn = ranking_loss_cls()
     score_th = float('inf')
     train_tb_every = max(int(getattr(args, "train_tb_every", 100)), 1)
+    grad_log_every = max(int(getattr(args, "grad_log_every", train_tb_every)), 1)
 
     model_dir = Path(model_dir)
     log_dir = Path(log_dir)
@@ -389,6 +468,7 @@ def train(
 
             batch = batch.to(device, non_blocking=True)
             model_aux = None
+            parent_loss_item = None
             if loss_option == "regression":
                 flat_logits, precomputed_padded_logits, model_aux = _forward_with_optional_postprocess(
                     policy,
@@ -441,6 +521,7 @@ def train(
                         target_keys=topk_target_keys,
                         batch=batch,
                     )
+                    _assert_topk_target_alignment(model_aux, saved_targets)
                     if regression_target == "score":
                         true_scores = torch.stack(
                             [
@@ -470,7 +551,25 @@ def train(
                             ],
                             dim=0,
                         )
-                        loss = F.mse_loss(pred_obj, true_obj)
+                        obj_loss = F.mse_loss(pred_obj, true_obj)
+                        if include_parent:
+                            pred_parent_obj = model_aux["parent_obj"]
+                            true_parent_obj = torch.stack(
+                                [
+                                    torch.as_tensor(
+                                        target["parent_obj"],
+                                        device=device,
+                                        dtype=pred_parent_obj.dtype,
+                                    )
+                                    for target in saved_targets
+                                ],
+                                dim=0,
+                            ).reshape(-1)
+                            parent_loss = F.mse_loss(pred_parent_obj.reshape(-1), true_parent_obj)
+                            parent_loss_item = float(parent_loss.detach().item())
+                            loss = obj_loss + parent_loss
+                        else:
+                            loss = obj_loss
                     elif regression_target == "dual":
                         pred_y = model_aux["topk_y"]
                         pred_alpha = model_aux["topk_alpha"]
@@ -521,6 +620,8 @@ def train(
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if num_gradient_steps % grad_log_every == 0:
+                _log_gradient_diagnostics(writer, policy, num_gradient_steps)
             optimizer.step()
             num_gradient_steps += 1
 
@@ -543,6 +644,8 @@ def train(
 
             if num_gradient_steps % train_tb_every == 0:
                 writer.add_scalar("Loss/train", loss.item(), num_gradient_steps)
+                if parent_loss_item is not None:
+                    writer.add_scalar("ParentObjLoss/train", parent_loss_item, num_gradient_steps)
                 writer.add_scalar("Accuracy/train", accuracy, num_gradient_steps)
                 writer.add_scalar("Top5_Accuracy/train", top5_acc, num_gradient_steps)
                 writer.add_scalar("Score_diff/train", score_diff, num_gradient_steps)
@@ -711,6 +814,13 @@ def parse_args(argv=None):
         help="Regression target for loss_option=regression: one of {dual, obj, score}.",
     )
     parser.add_argument(
+        "--include_parent",
+        type=int,
+        default=argparse.SUPPRESS,
+        choices=[0, 1],
+        help="When regression_target=obj, add parent objective MSE to the training loss.",
+    )
+    parser.add_argument(
         "--dual_option",
         type=int,
         default=1,
@@ -735,6 +845,12 @@ def parse_args(argv=None):
         type=int,
         default=argparse.SUPPRESS,
         help="TensorBoard write frequency in gradient steps for train metrics.",
+    )
+    parser.add_argument(
+        "--grad_log_every",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="TensorBoard write frequency for gradient/parameter diagnostics.",
     )
     parser.add_argument(
         "--postprocess_cache_size",
@@ -789,6 +905,11 @@ def _merge_args_with_config(init_args, cfg: Dict[str, Any]):
     if not hasattr(args, "use_cutoff_minimum"):
         args.use_cutoff_minimum = True
     args.use_cutoff_minimum = bool(args.use_cutoff_minimum)
+    if not hasattr(args, "include_parent"):
+        args.include_parent = False
+    args.include_parent = bool(args.include_parent)
+    if not hasattr(args, "grad_log_every"):
+        args.grad_log_every = int(getattr(args, "train_tb_every", 100))
     if hasattr(args, "persistent_workers"):
         args.persistent_workers = bool(args.persistent_workers)
     if hasattr(args, "pin_memory"):
