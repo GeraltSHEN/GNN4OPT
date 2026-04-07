@@ -10,7 +10,7 @@ import tqdm
 import yaml
 from torch_geometric.loader import DataLoader
 
-from tmp_utils import (
+from utils import (
     load_data,
     load_model,
     load_checkpoint,

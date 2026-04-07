@@ -16,7 +16,7 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 from torch_geometric.loader import DataLoader
 
-from tmp_utils import (
+from utils import (
     get_optimizer,
     load_model,
     load_data,
