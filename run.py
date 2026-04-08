@@ -99,8 +99,6 @@ def main(args: DictConfig):
             else:
                 trainer.patience += 1
 
-            trainer.step(val_loss)
-
             if trainer.patience > args.train.patience:
                 break
 

@@ -34,6 +34,16 @@ def _cat_with_offsets(
     return constraint_features, variable_features, batched_edge_index, batched_edge_attr
 
 
+def _split_down_up(item_lp_graphs: List[Dict[str, Any]]):
+    down = [g for g in item_lp_graphs if int(g["branch_dir"]) == 0]
+    up = [g for g in item_lp_graphs if int(g["branch_dir"]) == 1]
+    down.sort(key=lambda g: int(g["topk_rank"]))
+    up.sort(key=lambda g: int(g["topk_rank"]))
+    if len(down) == 0 or len(up) == 0 or len(down) != len(up):
+        raise ValueError("Each sample must contain matching down/up LP graphs.")
+    return down, up
+
+
 def collate_fn_lp_base(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collate a batch of LPDataset items into one flattened LP-graph batch.
 
@@ -46,17 +56,36 @@ def collate_fn_lp_base(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     if len(batch) == 0:
         raise ValueError("Empty batch provided to collate_fn_lp_base.")
 
-    lp_graphs: List[Dict[str, Any]] = []
+    ordered_lp_graphs: List[Dict[str, Any]] = []
+    down_rows: List[torch.Tensor] = []
+    up_rows: List[torch.Tensor] = []
+    score_rows: List[torch.Tensor] = []
+    parent_objs: List[float] = []
+    top_k: int | None = None
+
     for item in batch:
-        lp_graphs.extend(item["lp_graphs"])
-    if len(lp_graphs) == 0:
+        down, up = _split_down_up(item["lp_graphs"])
+        k = len(down)
+        if top_k is None:
+            top_k = k
+        elif top_k != k:
+            raise ValueError(f"Inconsistent top-k within one minibatch: {top_k} vs {k}")
+
+        ordered_lp_graphs.extend(down)
+        ordered_lp_graphs.extend(up)
+        down_rows.append(torch.as_tensor([float(g["target_obj"]) for g in down], dtype=torch.float32))
+        up_rows.append(torch.as_tensor([float(g["target_obj"]) for g in up], dtype=torch.float32))
+        score_rows.append(torch.as_tensor([float(g["target_score"]) for g in down], dtype=torch.float32))
+        parent_objs.append(float(down[0]["parent_obj"]))
+
+    if len(ordered_lp_graphs) == 0:
         raise ValueError("No LP graphs found in batch.")
 
     n_constraints_per_graph = torch.as_tensor(
-        [int(g["n_constraints"]) for g in lp_graphs], dtype=torch.long
+        [int(g["n_constraints"]) for g in ordered_lp_graphs], dtype=torch.long
     )
     n_variables_per_graph = torch.as_tensor(
-        [int(g["n_variables"]) for g in lp_graphs], dtype=torch.long
+        [int(g["n_variables"]) for g in ordered_lp_graphs], dtype=torch.long
     )
 
     (
@@ -64,25 +93,32 @@ def collate_fn_lp_base(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         variable_features,
         edge_index,
         edge_attr,
-    ) = _cat_with_offsets(lp_graphs, n_constraints_per_graph, n_variables_per_graph)
+    ) = _cat_with_offsets(ordered_lp_graphs, n_constraints_per_graph, n_variables_per_graph)
 
-    target_y = torch.cat([g["target_y"] for g in lp_graphs], dim=0)
-    target_alpha = torch.cat([g["target_alpha"] for g in lp_graphs], dim=0)
-    target_beta = torch.cat([g["target_beta"] for g in lp_graphs], dim=0)
-    target_obj = torch.as_tensor([float(g["target_obj"]) for g in lp_graphs], dtype=torch.float32)
-    target_score = torch.as_tensor([float(g["target_score"]) for g in lp_graphs], dtype=torch.float32)
+    target_y = torch.cat([g["target_y"] for g in ordered_lp_graphs], dim=0)
+    target_alpha = torch.cat([g["target_alpha"] for g in ordered_lp_graphs], dim=0)
+    target_beta = torch.cat([g["target_beta"] for g in ordered_lp_graphs], dim=0)
 
-    branch_var_index = torch.as_tensor([int(g["branch_var_index"]) for g in lp_graphs], dtype=torch.long)
-    branch_dir = torch.as_tensor([int(g["branch_dir"]) for g in lp_graphs], dtype=torch.long)
-    topk_rank = torch.as_tensor([int(g["topk_rank"]) for g in lp_graphs], dtype=torch.long)
-    parent_obj = torch.as_tensor([float(g["parent_obj"]) for g in lp_graphs], dtype=torch.float32)
-    cutoffbound = torch.as_tensor([float(g["cutoffbound"]) for g in lp_graphs], dtype=torch.float32)
+    # Shapes expected by trainer:
+    # target_obj: [2 * B, K] (first half down, second half up)
+    # target_score: [B, K]
+    # parent_obj: [B]
+    target_obj = torch.stack(down_rows + up_rows, dim=0)
+    target_score = torch.stack(score_rows, dim=0)
 
-    source_sample_index = torch.as_tensor([int(g["sample_index"]) for g in lp_graphs], dtype=torch.long)
-    source_sample_path = [str(g["sample_path"]) for g in lp_graphs]
+    branch_var_index = torch.as_tensor([int(g["branch_var_index"]) for g in ordered_lp_graphs], dtype=torch.long)
+    branch_dir = torch.as_tensor([int(g["branch_dir"]) for g in ordered_lp_graphs], dtype=torch.long)
+    topk_rank = torch.as_tensor([int(g["topk_rank"]) for g in ordered_lp_graphs], dtype=torch.long)
+    parent_obj = torch.as_tensor(parent_objs, dtype=torch.float32)
+    cutoffbound = torch.as_tensor([float(g["cutoffbound"]) for g in ordered_lp_graphs], dtype=torch.float32)
+
+    source_sample_index = torch.as_tensor([int(g["sample_index"]) for g in ordered_lp_graphs], dtype=torch.long)
+    source_sample_path = [str(g["sample_path"]) for g in ordered_lp_graphs]
 
     return {
-        "num_lp_graphs": int(len(lp_graphs)),
+        "num_milp_graphs": int(len(batch)),
+        "num_lp_graphs": int(len(ordered_lp_graphs)),
+        "top_k": int(top_k if top_k is not None else 0),
         "constraint_features": constraint_features.contiguous(),
         "variable_features": variable_features.contiguous(),
         "edge_index": edge_index.contiguous(),
