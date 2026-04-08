@@ -72,7 +72,6 @@ def _build_milp_graph_from_sample(
     *,
     sample_path: Path,
     use_default_features: bool,
-    use_cutoffbound_feature: bool,
     remove_bad_candidates: bool,
 ) -> Dict[str, Any]:
     sample_data = sample["data"]
@@ -99,17 +98,8 @@ def _build_milp_graph_from_sample(
 
     cutoff_feature_name = "cutoffbound_normalized"
     if use_default_features:
-        if use_cutoffbound_feature:
-            variable_features = variable_default_features
-            constraint_features = constraint_default_features
-        else:
-            variable_keep_names = [name for name in variable_names if name != cutoff_feature_name]
-            constraint_keep_names = [name for name in constraint_names if name != cutoff_feature_name]
-            variable_keep_idxs = [variable_feature_indices[name] for name in variable_keep_names]
-            constraint_keep_idxs = [constraint_feature_indices[name] for name in constraint_keep_names]
-            variable_features = variable_default_features[:, variable_keep_idxs]
-            constraint_features = constraint_default_features[:, constraint_keep_idxs]
-            variable_feature_indices = {name: i for i, name in enumerate(variable_keep_names)}
+        variable_features = variable_default_features
+        constraint_features = constraint_default_features
     else:
         variable_required = [
             "type_0",
@@ -123,11 +113,9 @@ def _build_milp_graph_from_sample(
             "sol_frac",
             "coef_normalized",
             "sol_val",
+            cutoff_feature_name,
         ]
-        constraint_required = ["bias", "dualsol_val_normalized"]
-        if use_cutoffbound_feature:
-            variable_required.append(cutoff_feature_name)
-            constraint_required.append(cutoff_feature_name)
+        constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
 
         missing_variable = [name for name in variable_required if name not in variable_feature_indices]
         missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
@@ -203,7 +191,6 @@ class MILPDataset(Dataset):
         *,
         file_pattern: str = "sample_*.pkl",
         use_default_features: bool = False,
-        use_cutoffbound_feature: bool = True,
         remove_bad_candidates: bool = True,
         transform=None,
     ):
@@ -217,7 +204,6 @@ class MILPDataset(Dataset):
             raise RuntimeError(f"No files matched pattern '{self.file_pattern}' in {self.split_dir}")
 
         self.use_default_features = bool(use_default_features)
-        self.use_cutoffbound_feature = bool(use_cutoffbound_feature)
         self.remove_bad_candidates = bool(remove_bad_candidates)
         self.transform = transform
 
@@ -231,7 +217,6 @@ class MILPDataset(Dataset):
             sample,
             sample_path=path,
             use_default_features=self.use_default_features,
-            use_cutoffbound_feature=self.use_cutoffbound_feature,
             remove_bad_candidates=self.remove_bad_candidates,
         )
         graph.update(
@@ -268,7 +253,6 @@ class LPDataset(Dataset):
         dual_option: int = 1,
         file_pattern: str = "sample_*.pkl",
         use_default_features: bool = False,
-        use_cutoffbound_feature: bool = True,
         remove_bad_candidates: bool = True,
         transform=None,
     ):
@@ -283,7 +267,6 @@ class LPDataset(Dataset):
             split=split,
             file_pattern=file_pattern,
             use_default_features=use_default_features,
-            use_cutoffbound_feature=use_cutoffbound_feature,
             remove_bad_candidates=remove_bad_candidates,
             transform=None,
         )
