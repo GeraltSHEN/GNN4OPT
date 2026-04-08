@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+import gzip
+import pickle
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+
+def load_gzip_sample(path: Path) -> Dict[str, Any]:
+    with gzip.open(path, "rb") as fh:
+        return pickle.load(fh)
+
+
+def _split_dir(dataset_root: Path, split: str) -> Path:
+    split_map = {"train": "train", "valid": "valid", "val": "valid", "test": "test"}
+    key = str(split).lower()
+    if key not in split_map:
+        raise ValueError(f"Unsupported split '{split}'. Use one of: train, valid/val, test.")
+    split_dir = dataset_root / split_map[key]
+    if split_dir.exists() and split_dir.is_dir():
+        return split_dir
+    if dataset_root.exists() and dataset_root.is_dir():
+        return dataset_root
+    raise FileNotFoundError(f"Dataset directory not found: {split_dir}")
+
+
+def _name_to_index(names: Sequence[str]) -> Dict[str, int]:
+    return {name: idx for idx, name in enumerate(names)}
+
+
+def _resolve_target_keys(dual_option: int) -> List[str]:
+    if int(dual_option) == 1:
+        return ["top8_regression_targets_option1", "top8_regression_targets", "top8_regression_targets_option2"]
+    if int(dual_option) == 2:
+        return ["top8_regression_targets_option2", "top8_regression_targets_option1", "top8_regression_targets"]
+    return ["top8_regression_targets", "top8_regression_targets_option1", "top8_regression_targets_option2"]
+
+
+def _select_topk_target(sample: Dict[str, Any], dual_option: int) -> Dict[str, Any]:
+    for key in _resolve_target_keys(dual_option):
+        if key in sample:
+            return sample[key]
+    raise KeyError(f"Missing top-k target keys for dual_option={dual_option}.")
+
+
+def _clean_candidates(
+    candidates: torch.Tensor,
+    candidate_scores: torch.Tensor,
+    candidate_choice_node_id: int,
+    variable_features: torch.Tensor,
+    variable_feature_indices: Dict[str, int],
+) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    sol_is_not_at_lb = variable_features[candidates, variable_feature_indices["sol_is_at_lb"]] == 0
+    sol_is_not_at_ub = variable_features[candidates, variable_feature_indices["sol_is_at_ub"]] == 0
+    sol_is_not_at_lub = sol_is_not_at_lb & sol_is_not_at_ub
+    cleaned_candidates = candidates[sol_is_not_at_lub]
+    cleaned_candidate_scores = candidate_scores[sol_is_not_at_lub]
+    if cleaned_candidates.numel() < 1:
+        raise ValueError("No candidate exists after cleaning.")
+    if candidate_choice_node_id not in cleaned_candidates:
+        new_candidate_choice = cleaned_candidate_scores.argmax().item()
+        candidate_choice_node_id = int(cleaned_candidates[new_candidate_choice].item())
+    return cleaned_candidates, cleaned_candidate_scores, candidate_choice_node_id
+
+
+def _build_milp_graph_from_sample(
+    sample: Dict[str, Any],
+    *,
+    sample_path: Path,
+    use_default_features: bool,
+    use_cutoffbound_feature: bool,
+    remove_bad_candidates: bool,
+) -> Dict[str, Any]:
+    sample_data = sample["data"]
+    if not isinstance(sample_data, (list, tuple)) or len(sample_data) < 5:
+        raise ValueError(f"Expected sample['data'] length >= 5. Got {type(sample_data)}")
+
+    sample_state = sample_data[0]
+    sample_action = int(sample_data[2])
+    sample_action_set = sample_data[3]
+    sample_scores = sample_data[4]
+    sample_cutoffbound = float(sample_data[5]) if len(sample_data) > 5 else float("nan")
+
+    constraint_dict, edge_dict, variable_dict = sample_state
+    edge_index = torch.as_tensor(edge_dict["indices"], dtype=torch.long)
+    edge_attr = torch.as_tensor(edge_dict["values"], dtype=torch.float32)
+
+    variable_names = list(variable_dict["names"])
+    variable_default_features = torch.as_tensor(variable_dict["values"], dtype=torch.float32)
+    variable_feature_indices = _name_to_index(variable_names)
+
+    constraint_names = list(constraint_dict["names"])
+    constraint_default_features = torch.as_tensor(constraint_dict["values"], dtype=torch.float32)
+    constraint_feature_indices = _name_to_index(constraint_names)
+
+    cutoff_feature_name = "cutoffbound_normalized"
+    if use_default_features:
+        if use_cutoffbound_feature:
+            variable_features = variable_default_features
+            constraint_features = constraint_default_features
+        else:
+            variable_keep_names = [name for name in variable_names if name != cutoff_feature_name]
+            constraint_keep_names = [name for name in constraint_names if name != cutoff_feature_name]
+            variable_keep_idxs = [variable_feature_indices[name] for name in variable_keep_names]
+            constraint_keep_idxs = [constraint_feature_indices[name] for name in constraint_keep_names]
+            variable_features = variable_default_features[:, variable_keep_idxs]
+            constraint_features = constraint_default_features[:, constraint_keep_idxs]
+            variable_feature_indices = {name: i for i, name in enumerate(variable_keep_names)}
+    else:
+        variable_required = [
+            "type_0",
+            "type_1",
+            "type_2",
+            "type_3",
+            "has_lb",
+            "has_ub",
+            "sol_is_at_lb",
+            "sol_is_at_ub",
+            "sol_frac",
+            "coef_normalized",
+            "sol_val",
+        ]
+        constraint_required = ["bias", "dualsol_val_normalized"]
+        if use_cutoffbound_feature:
+            variable_required.append(cutoff_feature_name)
+            constraint_required.append(cutoff_feature_name)
+
+        missing_variable = [name for name in variable_required if name not in variable_feature_indices]
+        missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
+        if missing_variable:
+            raise KeyError(f"Missing variable features {missing_variable} in {sample_path}")
+        if missing_constraint:
+            raise KeyError(f"Missing constraint features {missing_constraint} in {sample_path}")
+
+        variable_features = torch.stack(
+            [variable_default_features[:, variable_feature_indices[name]] for name in variable_required],
+            dim=-1,
+        )
+        constraint_features = torch.stack(
+            [constraint_default_features[:, constraint_feature_indices[name]] for name in constraint_required],
+            dim=-1,
+        )
+        variable_feature_indices = {name: i for i, name in enumerate(variable_required)}
+
+    candidates = torch.as_tensor(sample_action_set, dtype=torch.long)
+    candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
+    candidate_choice_node_id = sample_action
+
+    if remove_bad_candidates:
+        if "sol_is_at_lb" not in variable_feature_indices or "sol_is_at_ub" not in variable_feature_indices:
+            raise KeyError("remove_bad_candidates=True requires sol_is_at_lb and sol_is_at_ub features.")
+        candidates, candidate_scores, candidate_choice_node_id = _clean_candidates(
+            candidates,
+            candidate_scores,
+            candidate_choice_node_id,
+            variable_features,
+            variable_feature_indices,
+        )
+
+    choice_tensor = torch.where(candidates == torch.as_tensor(candidate_choice_node_id, dtype=torch.long))[0]
+    if choice_tensor.numel() == 0:
+        raise ValueError(f"Chosen candidate id {candidate_choice_node_id} not present in candidates.")
+    candidate_choice_local = int(choice_tensor[0].item())
+
+    is_not_fixed_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
+    is_not_fixed_feature[torch.as_tensor(sample_action_set, dtype=torch.long)] = 1.0
+    candidates_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
+    candidates_feature[candidates] = 1.0
+    variable_features = torch.cat(
+        [variable_features, is_not_fixed_feature.unsqueeze(-1), candidates_feature.unsqueeze(-1)],
+        dim=-1,
+    )
+
+    return {
+        "constraint_features": constraint_features.contiguous(),
+        "edge_index": edge_index.contiguous(),
+        "edge_attr": edge_attr.contiguous(),
+        "variable_features": variable_features.contiguous(),
+        "n_constraints": int(constraint_features.size(0)),
+        "n_variables": int(variable_features.size(0)),
+        "candidates": candidates.contiguous(),
+        "candidate_scores": candidate_scores.contiguous(),
+        "candidate_choice_local": candidate_choice_local,
+        "candidate_choice_node_id": int(candidate_choice_node_id),
+        "sample_cutoffbound": sample_cutoffbound,
+    }
+
+
+class MILPDataset(Dataset):
+    """Dataset of MILP parent graphs from raw sample files.
+
+    This class does not touch top-k targets. It only prepares parent MILP graph tensors.
+    """
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str = "train",
+        *,
+        file_pattern: str = "sample_*.pkl",
+        use_default_features: bool = False,
+        use_cutoffbound_feature: bool = True,
+        remove_bad_candidates: bool = True,
+        transform=None,
+    ):
+        super().__init__()
+        self.dataset_root = Path(dataset_root)
+        self.split = split
+        self.split_dir = _split_dir(self.dataset_root, split)
+        self.file_pattern = str(file_pattern)
+        self.sample_files = sorted(self.split_dir.glob(self.file_pattern))
+        if not self.sample_files:
+            raise RuntimeError(f"No files matched pattern '{self.file_pattern}' in {self.split_dir}")
+
+        self.use_default_features = bool(use_default_features)
+        self.use_cutoffbound_feature = bool(use_cutoffbound_feature)
+        self.remove_bad_candidates = bool(remove_bad_candidates)
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.sample_files)
+
+    def _get_one(self, index: int) -> Dict[str, Any]:
+        path = self.sample_files[int(index)]
+        sample = load_gzip_sample(path)
+        graph = _build_milp_graph_from_sample(
+            sample,
+            sample_path=path,
+            use_default_features=self.use_default_features,
+            use_cutoffbound_feature=self.use_cutoffbound_feature,
+            remove_bad_candidates=self.remove_bad_candidates,
+        )
+        graph.update(
+            {
+                "sample_index": int(index),
+                "sample_path": str(path),
+            }
+        )
+        if self.transform is not None:
+            graph = self.transform(graph)
+        return graph
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return [self._get_one(i) for i in range(start, stop, step)]
+        return self._get_one(int(index))
+
+
+class LPDataset(Dataset):
+    """Dataset that expands each MILP sample into 2 * top_k LP sub-problem graphs.
+
+    - Uses saved top-k targets from sample files (no live get_top_k).
+    - Does NOT include parent graph in expansion by design.
+    - Stores parent_obj and cutoffbound on each LP graph record.
+    """
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str = "train",
+        *,
+        top_k: int = 8,
+        dual_option: int = 1,
+        file_pattern: str = "sample_*.pkl",
+        use_default_features: bool = False,
+        use_cutoffbound_feature: bool = True,
+        remove_bad_candidates: bool = True,
+        transform=None,
+    ):
+        super().__init__()
+        if int(top_k) <= 0:
+            raise ValueError("top_k must be >= 1.")
+        self.top_k = int(top_k)
+        self.dual_option = int(dual_option)
+        self.transform = transform
+        self.base = MILPDataset(
+            dataset_root=dataset_root,
+            split=split,
+            file_pattern=file_pattern,
+            use_default_features=use_default_features,
+            use_cutoffbound_feature=use_cutoffbound_feature,
+            remove_bad_candidates=remove_bad_candidates,
+            transform=None,
+        )
+
+    @property
+    def sample_files(self) -> List[Path]:
+        return self.base.sample_files
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def _expand_one(self, index: int) -> Dict[str, Any]:
+        milp_graph = self.base._get_one(index)
+        sample_path = Path(milp_graph["sample_path"])
+        sample = load_gzip_sample(sample_path)
+        target = _select_topk_target(sample, self.dual_option)
+
+        candidate_indices = np.asarray(target["candidate_indices"], dtype=np.int64).reshape(-1)
+        scores = np.asarray(target["scores"], dtype=np.float32).reshape(-1)
+        obj = np.asarray(target["obj"], dtype=np.float32)
+        y = np.asarray(target["y"], dtype=np.float32)
+        alpha = np.asarray(target["alpha"], dtype=np.float32)
+        beta = np.asarray(target["beta"], dtype=np.float32)
+        parent_obj = float(target["parent_obj"])
+        cutoffbound = float(target["cutoffbound"])
+
+        if candidate_indices.size == 0:
+            raise ValueError(f"No candidate_indices in target for sample {sample_path}")
+        if obj.ndim != 2 or obj.shape[1] != 2:
+            raise ValueError(f"Expected obj shape (k,2), got {obj.shape} in {sample_path}")
+        if y.ndim != 3 or y.shape[1] != 2:
+            raise ValueError(f"Expected y shape (k,2,m), got {y.shape} in {sample_path}")
+        if alpha.ndim != 3 or alpha.shape[1] != 2:
+            raise ValueError(f"Expected alpha shape (k,2,n), got {alpha.shape} in {sample_path}")
+        if beta.ndim != 3 or beta.shape[1] != 2:
+            raise ValueError(f"Expected beta shape (k,2,n), got {beta.shape} in {sample_path}")
+
+        k_available = int(candidate_indices.shape[0])
+        k_eff = min(self.top_k, k_available)
+        if k_eff < self.top_k:
+            pad_count = self.top_k - k_eff
+            candidate_indices = np.concatenate([candidate_indices[:k_eff], np.repeat(candidate_indices[0], pad_count)])
+            scores = np.concatenate([scores[:k_eff], np.repeat(scores[0], pad_count)])
+            obj = np.concatenate([obj[:k_eff], np.repeat(obj[:1], pad_count, axis=0)], axis=0)
+            y = np.concatenate([y[:k_eff], np.repeat(y[:1], pad_count, axis=0)], axis=0)
+            alpha = np.concatenate([alpha[:k_eff], np.repeat(alpha[:1], pad_count, axis=0)], axis=0)
+            beta = np.concatenate([beta[:k_eff], np.repeat(beta[:1], pad_count, axis=0)], axis=0)
+        else:
+            candidate_indices = candidate_indices[: self.top_k]
+            scores = scores[: self.top_k]
+            obj = obj[: self.top_k]
+            y = y[: self.top_k]
+            alpha = alpha[: self.top_k]
+            beta = beta[: self.top_k]
+
+        n_constraints = int(milp_graph["n_constraints"])
+        n_variables = int(milp_graph["n_variables"])
+
+        lp_graphs: List[Dict[str, Any]] = []
+        for rank in range(self.top_k):
+            branch_var = int(candidate_indices[rank])
+            if branch_var < 0 or branch_var >= n_variables:
+                raise ValueError(f"branch_var {branch_var} out of range [0, {n_variables}) in {sample_path}")
+
+            for branch_dir in (0, 1):  # 0=down, 1=up
+                lp_graphs.append(
+                    {
+                        "constraint_features": milp_graph["constraint_features"],
+                        "edge_index": milp_graph["edge_index"],
+                        "edge_attr": milp_graph["edge_attr"],
+                        "variable_features": milp_graph["variable_features"],
+                        "n_constraints": n_constraints,
+                        "n_variables": n_variables,
+                        "branch_var_index": branch_var,
+                        "branch_dir": int(branch_dir),
+                        "topk_rank": int(rank),
+                        "target_y": torch.as_tensor(y[rank, branch_dir, :n_constraints], dtype=torch.float32).contiguous(),
+                        "target_alpha": torch.as_tensor(alpha[rank, branch_dir, :n_variables], dtype=torch.float32).contiguous(),
+                        "target_beta": torch.as_tensor(beta[rank, branch_dir, :n_variables], dtype=torch.float32).contiguous(),
+                        "target_obj": float(obj[rank, branch_dir]),
+                        "target_score": float(scores[rank]),
+                        "parent_obj": parent_obj,
+                        "cutoffbound": cutoffbound,
+                        "sample_index": int(index),
+                        "sample_path": str(sample_path),
+                    }
+                )
+
+        item = {
+            "sample_index": int(index),
+            "sample_path": str(sample_path),
+            "n_lp_graphs": len(lp_graphs),
+            "lp_graphs": lp_graphs,
+        }
+        if self.transform is not None:
+            item = self.transform(item)
+        return item
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return [self._expand_one(i) for i in range(start, stop, step)]
+        return self._expand_one(int(index))
