@@ -12,11 +12,11 @@ from torch import optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from gnn_data.collate_func import collate_fn_lp_base # TODO
-from gnn_data.dataset import LPDataset # TODO
+from gnn_data.collate_func import collate_fn_lp_base
+from gnn_data.dataset import LPDataset
 from gnn_models import get_model # TODO
-from trainer import DualTrainer # TODO
-from utils.experiment import save_run_config, setup_wandb, count_parameters # TODO
+from trainer import DualTrainer
+from utils.experiment import save_run_config, setup_wandb, count_parameters
 
 torch.set_float32_matmul_precision('high')
 
@@ -26,7 +26,6 @@ def main(args: DictConfig):
     log_folder_name = save_run_config(args)
     setup_wandb(args)
 
-    # TODO: use the most efficient Dataset
     train_set = LPDataset(args.train.datapath, 'train', transform=None)
     valid_set = LPDataset(args.train.datapath, 'valid', transform=None)
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
@@ -36,22 +35,23 @@ def main(args: DictConfig):
         valid_set = valid_set[:20]
         test_set = test_set[:20]
 
-    # TODO: also add num_worker? 
-    # TODO: do we need to create a collate_fn_lp_base to accomodate LP graphs created?
     train_loader = DataLoader(train_set,
                       batch_size=args.train.batchsize,
                       shuffle=True,
                       collate_fn=collate_fn_lp_base,
+                      num_worker=8, persistent_workers=1, prefetch_factor=2,
                       pin_memory=True)
     val_loader = DataLoader(valid_set,
                             batch_size=args.train.batchsize,
                             shuffle=False,
                             collate_fn=collate_fn_lp_base,
+                            num_worker=8, persistent_workers=1, prefetch_factor=2
                             pin_memory=True)
     test_loader = DataLoader(test_set,
                              batch_size=args.train.batchsize,
                              shuffle=False,
                              collate_fn=collate_fn_lp_base,
+                             num_worker=8, persistent_workers=1, prefetch_factor=2
                              pin_memory=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

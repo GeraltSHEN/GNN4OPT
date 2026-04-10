@@ -1,0 +1,4 @@
+gnn:
+  emb_size: 256
+  n_layers: 3
+  gnn_backbone: bipartite

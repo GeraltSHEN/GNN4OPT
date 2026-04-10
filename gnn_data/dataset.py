@@ -237,7 +237,7 @@ class MILPDataset(Dataset):
 
 
 class LPDataset(Dataset):
-    """Dataset that expands each MILP sample into 2 * top_k LP sub-problem graphs.
+    """Dataset that expands each MILP sample into up to 2 * top_k LP sub-problem graphs.
 
     - Uses saved top-k targets from sample files (no live get_top_k).
     - Does NOT include parent graph in expansion by design.
@@ -306,27 +306,18 @@ class LPDataset(Dataset):
 
         k_available = int(candidate_indices.shape[0])
         k_eff = min(self.top_k, k_available)
-        if k_eff < self.top_k:
-            pad_count = self.top_k - k_eff
-            candidate_indices = np.concatenate([candidate_indices[:k_eff], np.repeat(candidate_indices[0], pad_count)])
-            scores = np.concatenate([scores[:k_eff], np.repeat(scores[0], pad_count)])
-            obj = np.concatenate([obj[:k_eff], np.repeat(obj[:1], pad_count, axis=0)], axis=0)
-            y = np.concatenate([y[:k_eff], np.repeat(y[:1], pad_count, axis=0)], axis=0)
-            alpha = np.concatenate([alpha[:k_eff], np.repeat(alpha[:1], pad_count, axis=0)], axis=0)
-            beta = np.concatenate([beta[:k_eff], np.repeat(beta[:1], pad_count, axis=0)], axis=0)
-        else:
-            candidate_indices = candidate_indices[: self.top_k]
-            scores = scores[: self.top_k]
-            obj = obj[: self.top_k]
-            y = y[: self.top_k]
-            alpha = alpha[: self.top_k]
-            beta = beta[: self.top_k]
+        candidate_indices = candidate_indices[:k_eff]
+        scores = scores[:k_eff]
+        obj = obj[:k_eff]
+        y = y[:k_eff]
+        alpha = alpha[:k_eff]
+        beta = beta[:k_eff]
 
         n_constraints = int(milp_graph["n_constraints"])
         n_variables = int(milp_graph["n_variables"])
 
         lp_graphs: List[Dict[str, Any]] = []
-        for rank in range(self.top_k):
+        for rank in range(k_eff):
             branch_var = int(candidate_indices[rank])
             if branch_var < 0 or branch_var >= n_variables:
                 raise ValueError(f"branch_var {branch_var} out of range [0, {n_variables}) in {sample_path}")

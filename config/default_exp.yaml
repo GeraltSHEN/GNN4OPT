@@ -1,0 +1,15 @@
+wandb:
+  project: default
+  name: ''
+  enable: False
+
+train:
+  datapath: null
+  debug: false
+  runs: 1
+  ckpt: false
+  lr: 1.e-3
+  weight_decay: 0.
+  epoch: 10
+  patience: 8
+  batchsize: 8
