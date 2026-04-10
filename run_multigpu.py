@@ -17,14 +17,14 @@ from torch.utils.data.distributed import DistributedSampler
 
 from gnn_data.collate_func import collate_fn_lp_base
 from gnn_data.dataset import LPDataset
-from gnn_models import get_model # TODO
-from trainer import DualTrainer
+from gnn_models import get_model
+from trainer import ObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
 
 torch.set_float32_matmul_precision('high')
 
 
-@hydra.main(version_base=None, config_path='./config', config_name="ppgn")
+@hydra.main(version_base=None, config_path='./config', config_name="lp")
 def main(args: DictConfig):
     world_size = int(os.environ['WORLD_SIZE'])  # Total number of processes
     rank = int(os.environ['RANK'])  # Rank of the current process
@@ -39,9 +39,9 @@ def main(args: DictConfig):
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
     if args.train.debug:
-        train_set = train_set[:20]
-        valid_set = valid_set[:20]
-        test_set = test_set[:20]
+        train_set = train_set[:4]
+        valid_set = valid_set[:4]
+        test_set = test_set[:4]
     
     train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank)
     val_sampler = DistributedSampler(valid_set, num_replicas=world_size, rank=rank)
@@ -50,19 +50,19 @@ def main(args: DictConfig):
     train_loader = DataLoader(train_set,
                             batch_size=args.train.batchsize // world_size,
                             collate_fn=collate_fn_lp_base,
-                            num_worker=8, persistent_workers=1, prefetch_factor=2,
+                            num_workers=8, persistent_workers=1, prefetch_factor=2,
                             pin_memory=True,
                             sampler=train_sampler)
     val_loader = DataLoader(valid_set,
                             batch_size=args.train.batchsize // world_size,
                             collate_fn=collate_fn_lp_base,
-                            num_worker=8, persistent_workers=1, prefetch_factor=2,
+                            num_workers=8, persistent_workers=1, prefetch_factor=2,
                             pin_memory=True,
                             sampler=val_sampler)
     test_loader = DataLoader(test_set,
                              batch_size=args.train.batchsize // world_size,
                              collate_fn=collate_fn_lp_base,
-                             num_worker=8, persistent_workers=1, prefetch_factor=2,
+                             num_workers=8, persistent_workers=1, prefetch_factor=2,
                              pin_memory=True,
                              sampler=test_sampler)
     if rank == 0:
@@ -89,8 +89,8 @@ def main(args: DictConfig):
                                                          factor=0.5,
                                                          patience=int(args.train.patience * 0.6),
                                                          min_lr=1.e-5)
-        if args.gnn.target == 'dual':
-            trainer = DualTrainer()
+        if args.gnn.target == 'obj':
+            trainer = ObjTrainer()
         else:
             raise ValueError
 

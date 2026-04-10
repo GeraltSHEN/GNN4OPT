@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-class DualTrainer:
+class ObjTrainer:
     def __init__(self):
         self.best_acc = 0
         self.patience = 0

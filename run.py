@@ -14,14 +14,14 @@ from tqdm import tqdm
 
 from gnn_data.collate_func import collate_fn_lp_base
 from gnn_data.dataset import LPDataset
-from gnn_models import get_model # TODO
-from trainer import DualTrainer
+from gnn_models import get_model
+from trainer import ObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
 
 torch.set_float32_matmul_precision('high')
 
 
-@hydra.main(version_base=None, config_path='./config', config_name="ppgn")
+@hydra.main(version_base=None, config_path='./config', config_name="lp")
 def main(args: DictConfig):
     log_folder_name = save_run_config(args)
     setup_wandb(args)
@@ -31,27 +31,27 @@ def main(args: DictConfig):
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
     if args.train.debug:
-        train_set = train_set[:20]
-        valid_set = valid_set[:20]
-        test_set = test_set[:20]
+        train_set = train_set[:4]
+        valid_set = valid_set[:4]
+        test_set = test_set[:4]
 
     train_loader = DataLoader(train_set,
                       batch_size=args.train.batchsize,
                       shuffle=True,
                       collate_fn=collate_fn_lp_base,
-                      num_worker=8, persistent_workers=1, prefetch_factor=2,
+                      num_workers=8, persistent_workers=1, prefetch_factor=2,
                       pin_memory=True)
     val_loader = DataLoader(valid_set,
                             batch_size=args.train.batchsize,
                             shuffle=False,
                             collate_fn=collate_fn_lp_base,
-                            num_worker=8, persistent_workers=1, prefetch_factor=2
+                            num_workers=8, persistent_workers=1, prefetch_factor=2,
                             pin_memory=True)
     test_loader = DataLoader(test_set,
                              batch_size=args.train.batchsize,
                              shuffle=False,
                              collate_fn=collate_fn_lp_base,
-                             num_worker=8, persistent_workers=1, prefetch_factor=2
+                             num_workers=8, persistent_workers=1, prefetch_factor=2,
                              pin_memory=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -72,8 +72,8 @@ def main(args: DictConfig):
                                                          factor=0.5,
                                                          patience=int(args.train.patience * 0.6),
                                                          min_lr=1.e-5)
-        if args.gnn.target == 'dual':
-            trainer = DualTrainer()
+        if args.gnn.target == 'obj':
+            trainer = ObjTrainer()
         else:
             raise ValueError
 

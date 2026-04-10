@@ -6,4 +6,5 @@ defaults:
   # append _self_ to the end of the Defaults List.
 
 gnn:
-
+  type: lp
+  target: obj

@@ -71,7 +71,6 @@ def _build_milp_graph_from_sample(
     sample: Dict[str, Any],
     *,
     sample_path: Path,
-    use_default_features: bool,
     remove_bad_candidates: bool,
 ) -> Dict[str, Any]:
     sample_data = sample["data"]
@@ -97,11 +96,7 @@ def _build_milp_graph_from_sample(
     constraint_feature_indices = _name_to_index(constraint_names)
 
     cutoff_feature_name = "cutoffbound_normalized"
-    if use_default_features:
-        variable_features = variable_default_features
-        constraint_features = constraint_default_features
-    else:
-        variable_required = [
+    variable_required = [
             "type_0",
             "type_1",
             "type_2",
@@ -115,24 +110,24 @@ def _build_milp_graph_from_sample(
             "sol_val",
             cutoff_feature_name,
         ]
-        constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
+    constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
 
-        missing_variable = [name for name in variable_required if name not in variable_feature_indices]
-        missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
-        if missing_variable:
-            raise KeyError(f"Missing variable features {missing_variable} in {sample_path}")
-        if missing_constraint:
-            raise KeyError(f"Missing constraint features {missing_constraint} in {sample_path}")
+    missing_variable = [name for name in variable_required if name not in variable_feature_indices]
+    missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
+    if missing_variable:
+        raise KeyError(f"Missing variable features {missing_variable} in {sample_path}")
+    if missing_constraint:
+        raise KeyError(f"Missing constraint features {missing_constraint} in {sample_path}")
 
-        variable_features = torch.stack(
+    variable_features = torch.stack(
             [variable_default_features[:, variable_feature_indices[name]] for name in variable_required],
             dim=-1,
         )
-        constraint_features = torch.stack(
+    constraint_features = torch.stack(
             [constraint_default_features[:, constraint_feature_indices[name]] for name in constraint_required],
             dim=-1,
         )
-        variable_feature_indices = {name: i for i, name in enumerate(variable_required)}
+    variable_feature_indices = {name: i for i, name in enumerate(variable_required)}
 
     candidates = torch.as_tensor(sample_action_set, dtype=torch.long)
     candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
@@ -190,7 +185,6 @@ class MILPDataset(Dataset):
         split: str = "train",
         *,
         file_pattern: str = "sample_*.pkl",
-        use_default_features: bool = False,
         remove_bad_candidates: bool = True,
         transform=None,
     ):
@@ -203,7 +197,6 @@ class MILPDataset(Dataset):
         if not self.sample_files:
             raise RuntimeError(f"No files matched pattern '{self.file_pattern}' in {self.split_dir}")
 
-        self.use_default_features = bool(use_default_features)
         self.remove_bad_candidates = bool(remove_bad_candidates)
         self.transform = transform
 
@@ -216,7 +209,6 @@ class MILPDataset(Dataset):
         graph = _build_milp_graph_from_sample(
             sample,
             sample_path=path,
-            use_default_features=self.use_default_features,
             remove_bad_candidates=self.remove_bad_candidates,
         )
         graph.update(
@@ -252,7 +244,6 @@ class LPDataset(Dataset):
         top_k: int = 8,
         dual_option: int = 1,
         file_pattern: str = "sample_*.pkl",
-        use_default_features: bool = False,
         remove_bad_candidates: bool = True,
         transform=None,
     ):
@@ -266,7 +257,6 @@ class LPDataset(Dataset):
             dataset_root=dataset_root,
             split=split,
             file_pattern=file_pattern,
-            use_default_features=use_default_features,
             remove_bad_candidates=remove_bad_candidates,
             transform=None,
         )
