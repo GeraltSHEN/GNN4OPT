@@ -31,9 +31,9 @@ def main(args: DictConfig):
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
     if args.train.debug:
-        train_set = train_set[:4]
-        valid_set = valid_set[:4]
-        test_set = test_set[:4]
+        train_set = train_set[:1000]
+        valid_set = valid_set[:1000]
+        test_set = test_set[:1000]
 
     train_loader = DataLoader(train_set,
                       batch_size=args.train.batchsize,

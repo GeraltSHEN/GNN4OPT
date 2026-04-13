@@ -32,16 +32,16 @@ def main(args: DictConfig):
     assert world_size > 1, "This running file for multi gpu usage only!!!!"
 
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=local_rank)
 
     train_set = LPDataset(args.train.datapath, 'train', transform=None)
     valid_set = LPDataset(args.train.datapath, 'valid', transform=None)
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
     if args.train.debug:
-        train_set = train_set[:4]
-        valid_set = valid_set[:4]
-        test_set = test_set[:4]
+        train_set = train_set[:1000]
+        valid_set = valid_set[:1000]
+        test_set = test_set[:1000]
     
     train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank)
     val_sampler = DistributedSampler(valid_set, num_replicas=world_size, rank=rank)
@@ -119,12 +119,10 @@ def main(args: DictConfig):
                 trainer.patience = 0
                 trainer.best_acc = val_acc
                 best_model = copy.deepcopy(model.state_dict())
-                if args.train.ckpt:
-                    torch.save(model.state_dict(), os.path.join(log_folder_name, f'best_model{run}.pt'))
+                if args.train.ckpt and rank == 0:
+                    torch.save(model.module.state_dict(), os.path.join(log_folder_name, f'best_model{run}.pt'))
             else:
                 trainer.patience += 1
-
-            trainer.step(val_loss)
 
             if trainer.patience > args.train.patience:
                 break
@@ -142,7 +140,7 @@ def main(args: DictConfig):
 
         dist.barrier()
         model.load_state_dict(best_model)
-        test_loss, test_acc, test_top5_acc, test_score_diff, test_normalized_score_diff = trainer.eval(test_loader, model, device)
+        test_loss, test_acc, test_top5_acc, test_score_diff, test_normalized_score_diff = trainer.eval(test_loader, model, local_rank)
         dist.all_reduce(test_loss, op=dist.ReduceOp.AVG)
         dist.all_reduce(test_acc, op=dist.ReduceOp.AVG)
         dist.all_reduce(test_top5_acc, op=dist.ReduceOp.AVG)
@@ -154,8 +152,8 @@ def main(args: DictConfig):
 
         if rank == 0:
             best_val_accs.append(trainer.best_acc)
-            test_losses.append(test_loss.item())
-            test_accs.append(test_acc.item())
+            test_losses.append(test_loss)
+            test_accs.append(test_acc)
             test_top5_accs.append(test_top5_acc.item())
             test_score_diffs.append(test_score_diff.item())
             test_normalized_score_diffs.append(test_normalized_score_diff.item())
