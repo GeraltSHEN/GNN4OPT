@@ -39,7 +39,7 @@ def main(args: DictConfig):
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
     if args.train.debug:
-        train_set = train_set[:1000]
+        train_set = train_set[:10000]
         valid_set = valid_set[:1000]
         test_set = test_set[:1000]
     

@@ -305,6 +305,7 @@ class LPDataset(Dataset):
 
         n_constraints = int(milp_graph["n_constraints"])
         n_variables = int(milp_graph["n_variables"])
+        base_variable_features = milp_graph["variable_features"]
 
         lp_graphs: List[Dict[str, Any]] = []
         for rank in range(k_eff):
@@ -313,12 +314,15 @@ class LPDataset(Dataset):
                 raise ValueError(f"branch_var {branch_var} out of range [0, {n_variables}) in {sample_path}")
 
             for branch_dir in (0, 1):  # 0=down, 1=up
+                branch_onehot = torch.zeros((n_variables, 2), dtype=base_variable_features.dtype)
+                branch_onehot[branch_var, int(branch_dir)] = 1.0
+                variable_features = torch.cat([base_variable_features, branch_onehot], dim=-1).contiguous()
                 lp_graphs.append(
                     {
                         "constraint_features": milp_graph["constraint_features"],
                         "edge_index": milp_graph["edge_index"],
                         "edge_attr": milp_graph["edge_attr"],
-                        "variable_features": milp_graph["variable_features"],
+                        "variable_features": variable_features,
                         "n_constraints": n_constraints,
                         "n_variables": n_variables,
                         "branch_var_index": branch_var,

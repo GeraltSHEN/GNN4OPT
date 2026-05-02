@@ -14,7 +14,7 @@ def get_model(args):
         return LPGNN(
             emb_size=args.emb_size,
             cons_nfeats=3,
-            var_nfeats=14,
+            var_nfeats=16,
             n_layers=args.n_layers,
             gnn_backbone=args.gnn_backbone)
     else:
