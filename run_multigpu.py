@@ -18,7 +18,7 @@ from torch.utils.data.distributed import DistributedSampler
 from gnn_data.collate_func import collate_fn_lp_base
 from gnn_data.dataset import LPDataset
 from gnn_models import get_model
-from trainer import ObjTrainer
+from trainer import DeltaObjTrainer, ObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
 
 torch.set_float32_matmul_precision('high')
@@ -91,8 +91,10 @@ def main(args: DictConfig):
                                                          min_lr=1.e-5)
         if args.gnn.target == 'obj':
             trainer = ObjTrainer()
+        elif args.gnn.target == 'deltaobj':
+            trainer = DeltaObjTrainer()
         else:
-            raise ValueError
+            raise ValueError(f"Unsupported gnn.target: {args.gnn.target}")
 
         for epoch in range(args.train.epoch):
             train_sampler.set_epoch(epoch)
