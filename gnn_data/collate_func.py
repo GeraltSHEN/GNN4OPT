@@ -125,3 +125,70 @@ def collate_fn_lp_base(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "source_sample_index": source_sample_index.contiguous(),
         "source_sample_path": source_sample_path,
     }
+
+
+def collate_fn_lp_flat(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Collate a batch of flat LP graphs.
+
+    Input:
+      - list of LP graph dicts (one LP graph per dataset item).
+
+    Output:
+      - PyG-style concatenated graph tensors plus per-LP metadata and targets.
+    """
+    if len(batch) == 0:
+        raise ValueError("Empty batch provided to collate_fn_lp_flat.")
+
+    lp_graphs = batch
+    n_constraints_per_graph = torch.as_tensor(
+        [int(g["n_constraints"]) for g in lp_graphs], dtype=torch.long
+    )
+    n_variables_per_graph = torch.as_tensor(
+        [int(g["n_variables"]) for g in lp_graphs], dtype=torch.long
+    )
+
+    (
+        constraint_features,
+        variable_features,
+        edge_index,
+        edge_attr,
+    ) = _cat_with_offsets(lp_graphs, n_constraints_per_graph, n_variables_per_graph)
+
+    target_y = torch.cat([g["target_y"] for g in lp_graphs], dim=0)
+    target_alpha = torch.cat([g["target_alpha"] for g in lp_graphs], dim=0)
+    target_beta = torch.cat([g["target_beta"] for g in lp_graphs], dim=0)
+    target_obj = torch.as_tensor([float(g["target_obj"]) for g in lp_graphs], dtype=torch.float32)
+    target_score = torch.as_tensor([float(g["target_score"]) for g in lp_graphs], dtype=torch.float32)
+
+    branch_var_index = torch.as_tensor([int(g["branch_var_index"]) for g in lp_graphs], dtype=torch.long)
+    branch_dir = torch.as_tensor([int(g["branch_dir"]) for g in lp_graphs], dtype=torch.long)
+    topk_rank = torch.as_tensor([int(g["topk_rank"]) for g in lp_graphs], dtype=torch.long)
+    parent_obj = torch.as_tensor([float(g["parent_obj"]) for g in lp_graphs], dtype=torch.float32)
+    cutoffbound = torch.as_tensor([float(g["cutoffbound"]) for g in lp_graphs], dtype=torch.float32)
+
+    source_sample_index = torch.as_tensor([int(g["sample_index"]) for g in lp_graphs], dtype=torch.long)
+    source_sample_path = [str(g["sample_path"]) for g in lp_graphs]
+    num_milp_graphs = int(torch.unique(source_sample_index).numel())
+
+    return {
+        "num_milp_graphs": num_milp_graphs,
+        "num_lp_graphs": int(len(lp_graphs)),
+        "constraint_features": constraint_features.contiguous(),
+        "variable_features": variable_features.contiguous(),
+        "edge_index": edge_index.contiguous(),
+        "edge_attr": edge_attr.contiguous(),
+        "n_constraints_per_graph": n_constraints_per_graph.contiguous(),
+        "n_variables_per_graph": n_variables_per_graph.contiguous(),
+        "branch_var_index": branch_var_index.contiguous(),
+        "branch_dir": branch_dir.contiguous(),
+        "topk_rank": topk_rank.contiguous(),
+        "parent_obj": parent_obj.contiguous(),
+        "cutoffbound": cutoffbound.contiguous(),
+        "target_y": target_y.contiguous(),
+        "target_alpha": target_alpha.contiguous(),
+        "target_beta": target_beta.contiguous(),
+        "target_obj": target_obj.contiguous(),
+        "target_score": target_score.contiguous(),
+        "source_sample_index": source_sample_index.contiguous(),
+        "source_sample_path": source_sample_path,
+    }

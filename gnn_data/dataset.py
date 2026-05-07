@@ -355,3 +355,74 @@ class LPDataset(Dataset):
             start, stop, step = index.indices(len(self))
             return [self._expand_one(i) for i in range(start, stop, step)]
         return self._expand_one(int(index))
+
+
+class LPGraphDataset(Dataset):
+    """Dataset of individual LP graphs sampled from a global LP pool.
+
+    This is intended for training with highly diverse LP batches where LP graphs
+    from the same MILP are unlikely to co-occur in a mini-batch.
+
+    Uses fixed slots per MILP sample: `2 * top_k`.
+    If a sample contains fewer than `2 * top_k` LP graphs, 
+    slot selection wraps modulo available LP graphs for that sample.
+    """
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str = "train",
+        *,
+        top_k: int = 8,
+        dual_option: int = 1,
+        file_pattern: str = "sample_*.pkl",
+        remove_bad_candidates: bool = True,
+        transform=None,
+    ):
+        super().__init__()
+        self.transform = transform
+        self.grouped = LPDataset(
+            dataset_root=dataset_root,
+            split=split,
+            top_k=top_k,
+            dual_option=dual_option,
+            file_pattern=file_pattern,
+            remove_bad_candidates=remove_bad_candidates,
+            transform=None,
+        )
+        self.top_k = int(self.grouped.top_k)
+        self.lp_graphs_per_milp = int(2 * self.top_k)
+
+    @property
+    def sample_files(self) -> List[Path]:
+        return self.grouped.sample_files
+
+    def __len__(self) -> int:
+        return len(self.grouped) * self.lp_graphs_per_milp
+
+    def _get_one(self, index: int) -> Dict[str, Any]:
+        total = len(self)
+        idx = int(index)
+        if idx < 0:
+            idx += total
+        if idx < 0 or idx >= total:
+            raise IndexError(f"Index out of range: {index} for dataset of size {total}.")
+
+        sample_index = idx // self.lp_graphs_per_milp
+        local_index = idx % self.lp_graphs_per_milp
+
+        item = self.grouped._expand_one(sample_index)
+        lp_graphs = item["lp_graphs"]
+        if len(lp_graphs) == 0:
+            raise ValueError(f"No LP graphs found for sample index {sample_index}.")
+        lp_graph = lp_graphs[local_index % len(lp_graphs)]
+
+        if self.transform is not None:
+            lp_graph = self.transform(lp_graph)
+        return lp_graph
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return [self._get_one(i) for i in range(start, stop, step)]
+        return self._get_one(int(index))

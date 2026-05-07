@@ -15,8 +15,8 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from gnn_data.collate_func import collate_fn_lp_base
-from gnn_data.dataset import LPDataset
+from gnn_data.collate_func import collate_fn_lp_base, collate_fn_lp_flat
+from gnn_data.dataset import LPGraphDataset, LPDataset
 from gnn_models import get_model
 from trainer import DeltaObjTrainer, ObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
@@ -34,7 +34,11 @@ def main(args: DictConfig):
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl", device_id=local_rank)
 
-    train_set = LPDataset(args.train.datapath, 'train', transform=None)
+    train_set = (
+        LPGraphDataset(args.train.datapath, 'train', transform=None)
+        if args.train.shuffle_lp
+        else LPDataset(args.train.datapath, 'train', transform=None)
+    )
     valid_set = LPDataset(args.train.datapath, 'valid', transform=None)
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
@@ -49,7 +53,7 @@ def main(args: DictConfig):
 
     train_loader = DataLoader(train_set,
                             batch_size=args.train.batchsize // world_size,
-                            collate_fn=collate_fn_lp_base,
+                            collate_fn=collate_fn_lp_flat if args.train.shuffle_lp else collate_fn_lp_base,
                             num_workers=8, persistent_workers=1, prefetch_factor=2,
                             pin_memory=True,
                             sampler=train_sampler)

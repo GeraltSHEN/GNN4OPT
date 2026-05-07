@@ -13,3 +13,4 @@ train:
   epoch: 10
   patience: 8
   batchsize: 8
+  shuffle_lp: false
