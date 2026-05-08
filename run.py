@@ -45,14 +45,15 @@ def main(args: DictConfig):
                       collate_fn=collate_fn_lp_flat if args.train.shuffle_lp else collate_fn_lp_base,
                       num_workers=8, persistent_workers=1, prefetch_factor=2,
                       pin_memory=True)
+    eval_batchsize = args.train.batchsize // 16 if args.train.shuffle_lp else args.train.batchsize
     val_loader = DataLoader(valid_set,
-                            batch_size=args.train.batchsize,
+                            batch_size=eval_batchsize,
                             shuffle=False,
                             collate_fn=collate_fn_lp_base,
                             num_workers=8, persistent_workers=1, prefetch_factor=2,
                             pin_memory=True)
     test_loader = DataLoader(test_set,
-                             batch_size=args.train.batchsize,
+                             batch_size=eval_batchsize,
                              shuffle=False,
                              collate_fn=collate_fn_lp_base,
                              num_workers=8, persistent_workers=1, prefetch_factor=2,
