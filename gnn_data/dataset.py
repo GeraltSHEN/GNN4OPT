@@ -47,6 +47,28 @@ def _select_topk_target(sample: Dict[str, Any], dual_option: int) -> Dict[str, A
     raise KeyError(f"Missing top-k target keys for dual_option={dual_option}.")
 
 
+def _target_tensor_or_nan(
+    target: Dict[str, Any],
+    key: str,
+    *,
+    k: int,
+    dim: int,
+    sample_path: Path,
+) -> np.ndarray:
+    raw = target.get(key, None)
+    if raw is None:
+        return np.full((int(k), 2, int(dim)), np.nan, dtype=np.float32)
+
+    arr = np.asarray(raw, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[1] != 2:
+        raise ValueError(f"Expected {key} shape (k,2,d), got {arr.shape} in {sample_path}")
+    if arr.shape[0] < int(k):
+        raise ValueError(f"{key} has too few candidates: {arr.shape[0]} < {k} in {sample_path}")
+    if arr.shape[2] < int(dim):
+        raise ValueError(f"{key} has too few features: {arr.shape[2]} < {dim} in {sample_path}")
+    return arr[: int(k), :, : int(dim)].astype(np.float32, copy=False)
+
+
 def _clean_candidates(
     candidates: torch.Tensor,
     candidate_scores: torch.Tensor,
@@ -277,22 +299,47 @@ class LPDataset(Dataset):
         candidate_indices = np.asarray(target["candidate_indices"], dtype=np.int64).reshape(-1)
         scores = np.asarray(target["scores"], dtype=np.float32).reshape(-1)
         obj = np.asarray(target["obj"], dtype=np.float32)
-        y = np.asarray(target["y"], dtype=np.float32)
-        alpha = np.asarray(target["alpha"], dtype=np.float32)
-        beta = np.asarray(target["beta"], dtype=np.float32)
         parent_obj = float(target["parent_obj"])
         cutoffbound = float(target["cutoffbound"])
 
         if candidate_indices.size == 0:
             raise ValueError(f"No candidate_indices in target for sample {sample_path}")
+        if scores.shape[0] < candidate_indices.shape[0]:
+            raise ValueError(
+                f"Expected scores length >= {candidate_indices.shape[0]}, "
+                f"got {scores.shape[0]} in {sample_path}"
+            )
         if obj.ndim != 2 or obj.shape[1] != 2:
             raise ValueError(f"Expected obj shape (k,2), got {obj.shape} in {sample_path}")
-        if y.ndim != 3 or y.shape[1] != 2:
-            raise ValueError(f"Expected y shape (k,2,m), got {y.shape} in {sample_path}")
-        if alpha.ndim != 3 or alpha.shape[1] != 2:
-            raise ValueError(f"Expected alpha shape (k,2,n), got {alpha.shape} in {sample_path}")
-        if beta.ndim != 3 or beta.shape[1] != 2:
-            raise ValueError(f"Expected beta shape (k,2,n), got {beta.shape} in {sample_path}")
+        if obj.shape[0] < candidate_indices.shape[0]:
+            raise ValueError(
+                f"Expected obj first dim >= {candidate_indices.shape[0]}, "
+                f"got {obj.shape[0]} in {sample_path}"
+            )
+
+        n_constraints = int(milp_graph["n_constraints"])
+        n_variables = int(milp_graph["n_variables"])
+        y = _target_tensor_or_nan(
+            target,
+            "y",
+            k=int(candidate_indices.shape[0]),
+            dim=n_constraints,
+            sample_path=sample_path,
+        )
+        alpha = _target_tensor_or_nan(
+            target,
+            "alpha",
+            k=int(candidate_indices.shape[0]),
+            dim=n_variables,
+            sample_path=sample_path,
+        )
+        beta = _target_tensor_or_nan(
+            target,
+            "beta",
+            k=int(candidate_indices.shape[0]),
+            dim=n_variables,
+            sample_path=sample_path,
+        )
 
         k_available = int(candidate_indices.shape[0])
         k_eff = min(self.top_k, k_available)
@@ -303,8 +350,6 @@ class LPDataset(Dataset):
         alpha = alpha[:k_eff]
         beta = beta[:k_eff]
 
-        n_constraints = int(milp_graph["n_constraints"])
-        n_variables = int(milp_graph["n_variables"])
         base_variable_features = milp_graph["variable_features"]
 
         lp_graphs: List[Dict[str, Any]] = []

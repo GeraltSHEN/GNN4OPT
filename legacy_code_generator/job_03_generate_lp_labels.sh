@@ -13,4 +13,6 @@
 module load anaconda
 conda activate opt-ml-env
 
-python 03_generate_lp_labels.py --data_path data/samples/facilities_xCutoffBound/100_100_5 --dual_options 1 --num_workers 8
+# Option 1 is now embedded by 02_generate_samples.py (patched PySCIPOpt).
+# Keep this step only for option 2
+python 03_generate_lp_labels.py --data_path data/samples/facilities_xCutoffBound/100_100_5 --dual_options 2 --num_workers 8

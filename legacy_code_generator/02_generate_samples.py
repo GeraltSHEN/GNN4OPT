@@ -11,12 +11,76 @@ import pyscipopt as scip
 import utilities
 
 
-def compute_sbs(parent_obj: float, child_one_obj: float, child_zero_obj: float, cutoffbound: float) -> float:
-    child_one_obj_capped = min(child_one_obj, cutoffbound)
-    child_zero_obj_capped = min(child_zero_obj, cutoffbound)
-    gain_one = max(child_one_obj_capped - parent_obj, 1e-9)
-    gain_zero = max(child_zero_obj_capped - parent_obj, 1e-9)
-    return float(gain_one * gain_zero)
+DUAL_OPTION_DEFAULT = 1
+LEGACY_TARGET_KEY = "top8_regression_targets"
+OPTION1_TOPK_TARGET_KEY = "top8_regression_targets_option1"
+OPTION1_ALL_TARGET_KEY = "all_regression_targets_option1"
+
+
+def select_topk_local_positions(candidate_scores: np.ndarray, k: int) -> np.ndarray:
+    scores = np.asarray(candidate_scores, dtype=np.float32).reshape(-1)
+    if scores.size == 0 or int(k) <= 0:
+        return np.empty((0,), dtype=np.int64)
+    k_eff = int(min(max(int(k), 0), scores.size))
+    top_positions = np.argsort(-scores)[:k_eff]
+    return top_positions.astype(np.int64, copy=False)
+
+
+def build_option1_targets(
+    action_set,
+    scores,
+    canddowns,
+    candups,
+    cutoffbound: float,
+    parent_obj: float,
+    top_k: int,
+):
+    if canddowns is None or candups is None:
+        return None, None
+
+    action_set = np.asarray(action_set, dtype=np.int64).reshape(-1)
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    canddowns = np.asarray(canddowns, dtype=np.float32).reshape(-1)
+    candups = np.asarray(candups, dtype=np.float32).reshape(-1)
+    if not (action_set.size == scores.size == canddowns.size == candups.size):
+        raise ValueError(
+            "Mismatched candidate payload sizes: "
+            f"action_set={action_set.size}, scores={scores.size}, "
+            f"canddowns={canddowns.size}, candups={candups.size}"
+        )
+
+    all_positions = np.arange(action_set.size, dtype=np.int64)
+    all_obj = np.stack((canddowns, candups), axis=1).astype(np.float32, copy=False)
+
+    effective_top_k = action_set.size if int(top_k) <= 0 else int(top_k)
+    top_positions = select_topk_local_positions(scores, effective_top_k)
+    top_candidates = action_set[top_positions]
+    top_scores = scores[top_positions]
+    top_obj = all_obj[top_positions]
+
+    option_one_top = {
+        "candidate_positions": top_positions.copy(),
+        "candidate_indices": top_candidates.copy(),
+        "scores": top_scores.copy(),
+        "sample_scores": top_scores.copy(),
+        "obj": top_obj.copy(),
+        "parent_obj": np.float32(parent_obj),
+        "cutoffbound": np.float32(cutoffbound),
+        "sample_cutoffbound": np.float32(cutoffbound),
+        "dual_option": int(DUAL_OPTION_DEFAULT),
+    }
+    option_one_all = {
+        "candidate_positions": all_positions.copy(),
+        "candidate_indices": action_set.copy(),
+        "scores": scores.copy(),
+        "sample_scores": scores.copy(),
+        "obj": all_obj.copy(),
+        "parent_obj": np.float32(parent_obj),
+        "cutoffbound": np.float32(cutoffbound),
+        "sample_cutoffbound": np.float32(cutoffbound),
+        "dual_option": int(DUAL_OPTION_DEFAULT),
+    }
+    return option_one_top, option_one_all
 
 
 class SamplingAgent(scip.Branchrule):
@@ -35,164 +99,10 @@ class SamplingAgent(scip.Branchrule):
         self.rng = np.random.RandomState(seed)
         self.new_node = True
         self.sample_counter = 0
+        self.warned_missing_cand_obj = False
 
     def branchinit(self):
         self.khalil_root_buffer = {}
-        self.dual_state_buffer = None
-    
-    def solve_child_lp_with_dive(self, var, bound_type, bound_value):
-        assert bound_type in {"lb", "ub"}
-
-        self.model.startDive()
-        try:
-            if bound_type == "lb":
-                self.model.chgVarLbDive(var, float(bound_value))
-            else:
-                self.model.chgVarUbDive(var, float(bound_value))
-            lperror, cutoff = self.model.solveDiveLP()
-            lpsolstat = int(self.model.getLPSolstat())
-            child = {
-                "lperror": bool(lperror),
-                "cutoff": bool(cutoff),
-                "lp_solstat": lpsolstat,
-                "lp_obj": None,
-                "rc_obj": None,
-                "dual_solvals": None,
-                "bias": None,
-            }
-
-            if not lperror and not cutoff and lpsolstat == int(scip.SCIP_LPSOLSTAT.OPTIMAL):
-                child["lp_obj"] = float(self.model.getLPObjVal())
-                lp_state = self.model.getState(self.dual_state_buffer)
-                self.dual_state_buffer = lp_state
-
-                row_lhss = np.asarray(lp_state["row"]["lhss"], dtype=np.float64)
-                row_rhss = np.asarray(lp_state["row"]["rhss"], dtype=np.float64)
-                has_lhs = np.nonzero(~np.isnan(row_lhss))[0]
-                has_rhs = np.nonzero(~np.isnan(row_rhss))[0]
-                row_bias = np.concatenate((
-                    -row_lhss[has_lhs],
-                    +row_rhss[has_rhs],
-                ))
-
-                row_duals_raw = np.asarray(lp_state["row"]["dualsols"], dtype=np.float64)
-                row_duals = np.concatenate((
-                    -row_duals_raw[has_lhs],
-                    +row_duals_raw[has_rhs],
-                ))
-
-                row_obj = float(np.dot(row_duals, row_bias))
-                col_redcosts = np.asarray(lp_state["col"]["redcosts"], dtype=np.float64)
-                col_solvals = np.asarray(lp_state["col"]["solvals"], dtype=np.float64)
-                rc_obj = float(np.dot(col_redcosts, col_solvals))
-                computed_obj = row_obj + rc_obj
-                lp_obj_val = float(self.model.getLPObjVal())
-                if not np.isclose(computed_obj, lp_obj_val, rtol=1e-6, atol=1e-6):
-                    print(
-                        "[DUAL-OBJ-CHECK][FAIL] "
-                        f"row_obj={row_obj} rc_obj={rc_obj} computed_obj={computed_obj} lp_obj={lp_obj_val}"
-                    )
-                    raise RuntimeError("child dual objective check failed in solve_child_lp_with_dive")
-                child["rc_obj"] = rc_obj
-                child["dual_solvals"] = row_duals.astype(np.float32, copy=False).copy()
-                child["bias"] = row_bias.astype(np.float32, copy=False).copy()
-            return child
-        
-        finally:
-            self.model.endDive()
-
-    def collect_topk_branching_duals(self, cands, scores, cutoffbound):
-        if self.dual_top_k <= 0 or scores is None:
-            return None
-
-        self.dual_state_buffer = None
-        scores = np.asarray(scores, dtype=np.float64)
-        if scores.size == 0:
-            return None
-
-        k_eff = int(min(self.dual_top_k, scores.size))
-        topk_positions = np.argsort(scores)[-k_eff:][::-1]
-        parent_obj = float(self.model.getLPObjVal())
-
-        topk_records = []
-        for pos in topk_positions.tolist():
-            var = cands[pos]
-            lp_pos = int(var.getCol().getLPPos())
-            lpsol = float(var.getLPSol())
-            lb_local = float(var.getLbLocal())
-            ub_local = float(var.getUbLocal())
-            down_ub = min(float(np.floor(lpsol)), ub_local)
-            up_lb = max(float(np.ceil(lpsol)), lb_local)
-
-            down_data = self.solve_child_lp_with_dive(var, "ub", down_ub)
-            up_data = self.solve_child_lp_with_dive(var, "lb", up_lb)
-            child_zero_obj = float("inf") if down_data["lp_obj"] is None else float(down_data["lp_obj"])
-            child_one_obj = float("inf") if up_data["lp_obj"] is None else float(up_data["lp_obj"])
-            computed_score = compute_sbs(parent_obj, child_one_obj, child_zero_obj, cutoffbound)
-
-            topk_records.append(
-                {
-                    "cand_position": int(pos),
-                    "cand_lp_pos": lp_pos,
-                    "cand_score": float(scores[pos]),
-                    "lpsol": lpsol,
-                    "lb_local": lb_local,
-                    "ub_local": ub_local,
-                    "down_ub": down_ub,
-                    "up_lb": up_lb,
-                    "parent_lp_obj": parent_obj,
-                    "child_zero_lp_obj": child_zero_obj,
-                    "child_one_lp_obj": child_one_obj,
-                    "computed_score": computed_score,
-                    "down": down_data,
-                    "up": up_data,
-                }
-            )
-
-        original_rank = sorted(
-            topk_records,
-            key=lambda row: (-float(row["cand_score"]), int(row["cand_position"])),
-        )
-        computed_rank = sorted(
-            topk_records,
-            key=lambda row: (-float(row["computed_score"]), int(row["cand_position"])),
-        )
-        original_order = [int(row["cand_position"]) for row in original_rank]
-        computed_order = [int(row["cand_position"]) for row in computed_rank]
-        if original_order != computed_order:
-            print(
-                f"[SB-CHECK][MISMATCH] node={self.model.getCurrentNode().getNumber()} "
-                f"depth={self.model.getCurrentNode().getDepth()} k={k_eff} "
-                f"original={original_order} computed={computed_order}"
-            )
-            for row in topk_records:
-                print(
-                    "[SB-CHECK][MISMATCH] "
-                    f"cand_pos={row['cand_position']} lp_pos={row['cand_lp_pos']} "
-                    f"orig_score={row['cand_score']:.12g} "
-                    f"computed_score={row['computed_score']:.12g} "
-                    f"parent_obj={row['parent_lp_obj']:.12g} "
-                    f"child1_obj={row['child_one_lp_obj']:.12g} "
-                    f"child0_obj={row['child_zero_lp_obj']:.12g} "
-                    f"child1_lperror={row['up']['lperror']} "
-                    f"child0_lperror={row['down']['lperror']} "
-                    f"child1_cutoff={row['up']['cutoff']} "
-                    f"child0_cutoff={row['down']['cutoff']} "
-                    f"child1_lp_solstat={row['up']['lp_solstat']} "
-                    f"child0_lp_solstat={row['down']['lp_solstat']}"
-                )
-            print(f"cutoffbound: {cutoffbound}")
-            raise RuntimeError(
-                "Top-k ranking mismatch between vanillafullstrong scores and computed SBS "
-                f"(original={original_order}, computed={computed_order})"
-            )
-
-        return {
-            "k": k_eff,
-            "topk_by_score": topk_records,
-            "topk_rank_original": original_order,
-            "topk_rank_computed": computed_order,
-        }
 
     def branchexeclp(self, allowaddcons):
 
@@ -209,7 +119,7 @@ class SamplingAgent(scip.Branchrule):
             state_khalil = utilities.extract_khalil_variable_features(self.model, cands, self.khalil_root_buffer)
 
             result = self.model.executeBranchRule('vanillafullstrong', allowaddcons)
-            cands_, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
+            cands_, scores, canddowns, candups, _npriocands, bestcand = self.model.getVanillafullstrongData()
 
             assert result == scip.SCIP_RESULT.DIDNOTRUN
             assert all([c1.getCol().getLPPos() == c2.getCol().getLPPos() for c1, c2 in zip(cands, cands_)])
@@ -221,18 +131,39 @@ class SamplingAgent(scip.Branchrule):
            
             # Do not record inconsistent scores. May happen if SCIP was early stopped (time limit).
             if not any([s < 0 for s in scores]):
-                # topk_branching_duals = self.collect_topk_branching_duals(cands_, scores, cutoffbound)
+                sample_payload = {
+                    'episode': self.episode,
+                    'instance': self.instance,
+                    'seed': self.seed,
+                    'node_number': self.model.getCurrentNode().getNumber(),
+                    'node_depth': self.model.getCurrentNode().getDepth(),
+                    'data': data,
+                }
+
+                option_one_top, option_one_all = build_option1_targets(
+                    action_set=action_set,
+                    scores=scores,
+                    canddowns=canddowns,
+                    candups=candups,
+                    cutoffbound=float(cutoffbound),
+                    parent_obj=float(self.model.getLPObjVal()),
+                    top_k=self.dual_top_k,
+                )
+                if option_one_top is not None:
+                    sample_payload[OPTION1_TOPK_TARGET_KEY] = option_one_top
+                    sample_payload[LEGACY_TARGET_KEY] = option_one_top
+                    sample_payload[OPTION1_ALL_TARGET_KEY] = option_one_all
+                elif not self.warned_missing_cand_obj:
+                    print(
+                        "[WARN] getVanillafullstrongData() did not return canddowns/candups; "
+                        "option1 labels are not embedded in samples. "
+                        "Use patched PySCIPOpt or run 03_generate_lp_labels.py."
+                    )
+                    self.warned_missing_cand_obj = True
 
                 filename = f'{self.out_dir}/sample_{self.episode}_{self.sample_counter}.pkl'
                 with gzip.open(filename, 'wb') as f:
-                    pickle.dump({
-                        'episode': self.episode,
-                        'instance': self.instance,
-                        'seed': self.seed,
-                        'node_number': self.model.getCurrentNode().getNumber(),
-                        'node_depth': self.model.getCurrentNode().getDepth(),
-                        'data': data,
-                        }, f)
+                    pickle.dump(sample_payload, f)
 
                 self.out_queue.put({
                     'type': 'sample',
@@ -253,7 +184,7 @@ class SamplingAgent(scip.Branchrule):
         # apply 'vanillafullstrong' branching decision if needed
         if query_expert and self.follow_expert or self.exploration_policy == 'vanillafullstrong':
             assert result == scip.SCIP_RESULT.DIDNOTRUN
-            cands, scores, npriocands, bestcand = self.model.getVanillafullstrongData()
+            cands, _scores, _canddowns, _candups, _npriocands, bestcand = self.model.getVanillafullstrongData()
             self.model.branchVar(cands[bestcand])
             result = scip.SCIP_RESULT.BRANCHED
 
@@ -474,7 +405,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--dual_top_k',
-        help='Number of top-scored candidates for which down/up child LP duals are saved.',
+        help='Number of top-scored candidates saved under top8_regression_targets_option1 (<=0 means all).',
         type=int,
         default=8,
     )
@@ -503,9 +434,9 @@ if __name__ == '__main__':
 
     print(f"seed {args.seed}")
 
-    train_size = 100000
-    valid_size = 20000
-    test_size = 20000
+    train_size = 100000 # 100000
+    valid_size = 20000 # 20000
+    test_size = 20000 # 20000
     if is_debug:
         train_size //= 10
         valid_size //= 10

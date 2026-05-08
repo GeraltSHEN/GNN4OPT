@@ -13,13 +13,13 @@
 module load anaconda
 conda activate opt-ml-env
 
-# python 02_generate_samples.py setcover xCutoffBound -j 16  # number of available CPUs
-# echo "setcover Samples Generated"
+python 02_generate_samples.py setcover xCutoffBound_new -j 16  # number of available CPUs
+echo "setcover Samples Generated"
 
 # python 02_generate_samples.py cauctions -j 8
 # echo "cauctions Samples Generated"
 
-python 02_generate_samples.py facilities xCutoffBound -j 16
+python 02_generate_samples.py facilities xCutoffBound_new -j 16
 echo "facilities Samples Generated"
 
 # python 02_generate_samples.py indset -j 8
