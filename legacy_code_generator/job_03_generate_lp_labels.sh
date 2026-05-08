@@ -13,4 +13,4 @@
 module load anaconda
 conda activate opt-ml-env
 
-python 03_generate_lp_labels.py --data_path data/samples/facilities_xCutoffBound/100_100_5 --dual_options 1,2 --universal_cutoffbound 1e4 --num_workers 8
+python 03_generate_lp_labels.py --data_path data/samples/facilities_xCutoffBound/100_100_5 --dual_options 1 --num_workers 8
