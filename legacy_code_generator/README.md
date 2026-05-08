@@ -5,7 +5,7 @@ https://github.com/ds4dm/learn2branch/tree/master
 
 Set-up a desired installation path for SCIP / SoPlex (e.g., `/opt/scip`):
 ```
-export SCIPOPTDIR='/opt/scip'
+export SCIPOPTDIR="/opt/scip"
 ```
 
 ## SoPlex
@@ -42,6 +42,12 @@ Apply patch file in `learn2branch/scip_patch/`
 
 ```
 patch -p1 < $RCAC_SCRATCH/GNN4OPT/scip_patch/vanillafullstrong.patch
+```
+
+New patch created by me 
+
+```
+patch -p1 < $RCAC_SCRATCH/GNN4OPT/scip_patch_new/vanillafullstrong_v2.patch
 ```
 
 ```
