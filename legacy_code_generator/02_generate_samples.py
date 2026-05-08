@@ -22,7 +22,11 @@ def select_topk_local_positions(candidate_scores: np.ndarray, k: int) -> np.ndar
     if scores.size == 0 or int(k) <= 0:
         return np.empty((0,), dtype=np.int64)
     k_eff = int(min(max(int(k), 0), scores.size))
-    top_positions = np.argsort(-scores)[:k_eff]
+    if k_eff >= scores.size:
+        top_positions = np.arange(scores.size, dtype=np.int64)
+    else:
+        top_positions = np.argpartition(-scores, kth=k_eff - 1)[:k_eff]
+        top_positions = np.sort(top_positions)
     return top_positions.astype(np.int64, copy=False)
 
 
