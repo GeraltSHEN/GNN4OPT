@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from gnn_data.collate_func import collate_fn_lp_base, collate_fn_lp_flat
-from gnn_data.dataset import LPGraphDataset, LPDataset, selectedLPGraphDataset
+from gnn_data.dataset import LPGraphDataset, LPDataset
 from gnn_models import get_model
 from trainer import DeltaObjTrainer, ObjTrainer, RealObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
@@ -27,16 +27,13 @@ def main(args: DictConfig):
     setup_wandb(args)
 
     target = str(args.gnn.target).lower()
-    use_selected_obj = target in {"realobj", "real_obj"}
-    use_flat_train = bool(args.train.shuffle_lp) or use_selected_obj
-    if use_selected_obj:
-        train_set = selectedLPGraphDataset(args.train.datapath, 'train', transform=None)
-    else:
-        train_set = (
-            LPGraphDataset(args.train.datapath, 'train', transform=None)
-            if use_flat_train
-            else LPDataset(args.train.datapath, 'train', transform=None)
-        )
+    use_real_obj = target in {"realobj", "real_obj"}
+    use_flat_train = bool(args.train.shuffle_lp) or use_real_obj
+    train_set = (
+        LPGraphDataset(args.train.datapath, 'train', transform=None)
+        if use_flat_train
+        else LPDataset(args.train.datapath, 'train', transform=None)
+    )
     valid_set = LPDataset(args.train.datapath, 'valid', transform=None)
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
@@ -85,7 +82,7 @@ def main(args: DictConfig):
                                                          min_lr=1.e-5)
         if target == 'obj':
             trainer = ObjTrainer()
-        elif use_selected_obj:
+        elif use_real_obj:
             trainer = RealObjTrainer()
         elif target == 'deltaobj':
             trainer = DeltaObjTrainer()

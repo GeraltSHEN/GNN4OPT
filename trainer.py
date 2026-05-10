@@ -145,15 +145,31 @@ class RealObjTrainer:
             cutoffbound = data["cutoffbound"].reshape(-1).to(device=pred_obj.device, dtype=pred_obj.dtype)
             pred_obj = torch.minimum(pred_obj, cutoffbound)
             true_obj = data["target_obj"].reshape(-1)
-            loss = F.mse_loss(pred_obj, true_obj)
+            valid_mask = true_obj < cutoffbound
+            valid_count = valid_mask.sum()
+            global_valid_count = valid_count.detach().clone()
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(global_valid_count, op=torch.distributed.ReduceOp.SUM)
+            if int(global_valid_count.item()) == 0:
+                continue
+            if int(valid_count.item()) > 0:
+                loss = F.mse_loss(pred_obj[valid_mask], true_obj[valid_mask])
+            else:
+                loss = pred_obj.sum() * 0.0
 
-            train_losses += loss.detach() * data["num_lp_graphs"]
-            num_lp_graphs += data["num_lp_graphs"]
+            train_losses += loss.detach() * valid_count
+            num_lp_graphs += int(valid_count.item())
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
             optimizer.step()
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            num_lp_graphs_tensor = torch.as_tensor(float(num_lp_graphs), device=device)
+            torch.distributed.all_reduce(train_losses, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(num_lp_graphs_tensor, op=torch.distributed.ReduceOp.SUM)
+            num_lp_graphs = int(num_lp_graphs_tensor.item())
 
         return train_losses / max(1, num_lp_graphs)
 
