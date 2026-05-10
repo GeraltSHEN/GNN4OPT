@@ -118,6 +118,7 @@ def _build_milp_graph_from_sample(
     constraint_feature_indices = _name_to_index(constraint_names)
 
     cutoff_feature_name = "cutoffbound_normalized"
+    # TODO: exp1: hide hide sol_frac, sol_val
     variable_required = [
             "type_0",
             "type_1",
@@ -127,12 +128,28 @@ def _build_milp_graph_from_sample(
             "has_ub",
             "sol_is_at_lb",
             "sol_is_at_ub",
-            "sol_frac",
+            # "sol_frac",
             "coef_normalized",
-            "sol_val",
+            # "sol_val",
             cutoff_feature_name,
         ]
-    constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
+    # variable_required = [
+    #         "type_0",
+    #         "type_1",
+    #         "type_2",
+    #         "type_3",
+    #         "has_lb",
+    #         "has_ub",
+    #         "sol_is_at_lb",
+    #         "sol_is_at_ub",
+    #         "sol_frac",
+    #         "coef_normalized",
+    #         "sol_val",
+    #         cutoff_feature_name,
+    #     ]
+    # TODO: exp1: hide dualsol_val_normalized
+    constraint_required = ["bias", cutoff_feature_name]
+    # constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
 
     missing_variable = [name for name in variable_required if name not in variable_feature_indices]
     missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
@@ -171,14 +188,15 @@ def _build_milp_graph_from_sample(
         raise ValueError(f"Chosen candidate id {candidate_choice_node_id} not present in candidates.")
     candidate_choice_local = int(choice_tensor[0].item())
 
-    is_not_fixed_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
-    is_not_fixed_feature[torch.as_tensor(sample_action_set, dtype=torch.long)] = 1.0
-    candidates_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
-    candidates_feature[candidates] = 1.0
-    variable_features = torch.cat(
-        [variable_features, is_not_fixed_feature.unsqueeze(-1), candidates_feature.unsqueeze(-1)],
-        dim=-1,
-    )
+    # TODO: exp1: hide added features
+    # is_not_fixed_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
+    # is_not_fixed_feature[torch.as_tensor(sample_action_set, dtype=torch.long)] = 1.0
+    # candidates_feature = torch.zeros(variable_features.size(0), dtype=torch.float32)
+    # candidates_feature[candidates] = 1.0
+    # variable_features = torch.cat(
+    #     [variable_features, is_not_fixed_feature.unsqueeze(-1), candidates_feature.unsqueeze(-1)],
+    #     dim=-1,
+    # )
 
     return {
         "constraint_features": constraint_features.contiguous(),
