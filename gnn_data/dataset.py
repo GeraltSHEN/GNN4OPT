@@ -489,3 +489,95 @@ class LPGraphDataset(Dataset):
             start, stop, step = index.indices(len(self))
             return [self._get_one(i) for i in range(start, stop, step)]
         return self._get_one(int(index))
+
+
+class selectedLPGraphDataset(Dataset):
+    """Flat LP-graph dataset that keeps only LPs with target_obj < cutoffbound.
+
+    Like LPGraphDataset, this returns one LP graph per item for shuffled LP
+    training. Unlike LPGraphDataset, the global LP pool contains only LP graphs
+    whose target objective is strictly better than the cutoff bound.
+    """
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str = "train",
+        *,
+        top_k: int = 8,
+        dual_option: int = 1,
+        file_pattern: str = "sample_*.pkl",
+        remove_bad_candidates: bool = True,
+        transform=None,
+    ):
+        super().__init__()
+        self.transform = transform
+        self.grouped = LPDataset(
+            dataset_root=dataset_root,
+            split=split,
+            top_k=top_k,
+            dual_option=dual_option,
+            file_pattern=file_pattern,
+            remove_bad_candidates=remove_bad_candidates,
+            transform=None,
+        )
+        self.top_k = int(self.grouped.top_k)
+        self.selected_lp_indices: List[Tuple[int, int]] = []
+        self._build_selected_lp_indices()
+        if not self.selected_lp_indices:
+            raise RuntimeError(
+                "No LP graphs matched target_obj < cutoffbound in "
+                f"{self.grouped.base.split_dir}."
+            )
+
+    @property
+    def sample_files(self) -> List[Path]:
+        return self.grouped.sample_files
+
+    def _build_selected_lp_indices(self) -> None:
+        for sample_index, sample_path in enumerate(self.sample_files):
+            sample = load_gzip_sample(sample_path)
+            target = _select_topk_target(sample, self.grouped.dual_option)
+
+            candidate_indices = np.asarray(target["candidate_indices"], dtype=np.int64).reshape(-1)
+            obj = np.asarray(target["obj"], dtype=np.float32)
+            cutoffbound = float(target["cutoffbound"])
+
+            if obj.ndim != 2 or obj.shape[1] != 2:
+                raise ValueError(f"Expected obj shape (k,2), got {obj.shape} in {sample_path}")
+            if obj.shape[0] < candidate_indices.shape[0]:
+                raise ValueError(
+                    f"Expected obj first dim >= {candidate_indices.shape[0]}, "
+                    f"got {obj.shape[0]} in {sample_path}"
+                )
+
+            k_eff = min(self.top_k, int(candidate_indices.shape[0]))
+            for rank in range(k_eff):
+                for branch_dir in (0, 1):
+                    if float(obj[rank, branch_dir]) < cutoffbound:
+                        self.selected_lp_indices.append((int(sample_index), int(2 * rank + branch_dir)))
+
+    def __len__(self) -> int:
+        return len(self.selected_lp_indices)
+
+    def _get_one(self, index: int) -> Dict[str, Any]:
+        total = len(self)
+        idx = int(index)
+        if idx < 0:
+            idx += total
+        if idx < 0 or idx >= total:
+            raise IndexError(f"Index out of range: {index} for dataset of size {total}.")
+
+        sample_index, local_index = self.selected_lp_indices[idx]
+        item = self.grouped._expand_one(sample_index)
+        lp_graph = item["lp_graphs"][local_index]
+
+        if self.transform is not None:
+            lp_graph = self.transform(lp_graph)
+        return lp_graph
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return [self._get_one(i) for i in range(start, stop, step)]
+        return self._get_one(int(index))

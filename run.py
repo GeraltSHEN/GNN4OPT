@@ -13,9 +13,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from gnn_data.collate_func import collate_fn_lp_base, collate_fn_lp_flat
-from gnn_data.dataset import LPGraphDataset, LPDataset
+from gnn_data.dataset import LPGraphDataset, LPDataset, selectedLPGraphDataset
 from gnn_models import get_model
-from trainer import DeltaObjTrainer, ObjTrainer
+from trainer import DeltaObjTrainer, ObjTrainer, RealObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
 
 torch.set_float32_matmul_precision('high')
@@ -26,11 +26,17 @@ def main(args: DictConfig):
     log_folder_name = save_run_config(args)
     setup_wandb(args)
 
-    train_set = (
-        LPGraphDataset(args.train.datapath, 'train', transform=None)
-        if args.train.shuffle_lp
-        else LPDataset(args.train.datapath, 'train', transform=None)
-    )
+    target = str(args.gnn.target).lower()
+    use_selected_obj = target in {"realobj", "real_obj"}
+    use_flat_train = bool(args.train.shuffle_lp) or use_selected_obj
+    if use_selected_obj:
+        train_set = selectedLPGraphDataset(args.train.datapath, 'train', transform=None)
+    else:
+        train_set = (
+            LPGraphDataset(args.train.datapath, 'train', transform=None)
+            if use_flat_train
+            else LPDataset(args.train.datapath, 'train', transform=None)
+        )
     valid_set = LPDataset(args.train.datapath, 'valid', transform=None)
     test_set = LPDataset(args.train.datapath, 'test', transform=None)
 
@@ -42,10 +48,10 @@ def main(args: DictConfig):
     train_loader = DataLoader(train_set,
                       batch_size=args.train.batchsize,
                       shuffle=True,
-                      collate_fn=collate_fn_lp_flat if args.train.shuffle_lp else collate_fn_lp_base,
+                      collate_fn=collate_fn_lp_flat if use_flat_train else collate_fn_lp_base,
                       num_workers=8, persistent_workers=1, prefetch_factor=2,
                       pin_memory=True)
-    eval_batchsize = args.train.batchsize // 16 if args.train.shuffle_lp else args.train.batchsize
+    eval_batchsize = max(1, args.train.batchsize // 16) if use_flat_train else args.train.batchsize
     val_loader = DataLoader(valid_set,
                             batch_size=eval_batchsize,
                             shuffle=False,
@@ -77,9 +83,11 @@ def main(args: DictConfig):
                                                          factor=0.5,
                                                          patience=int(args.train.patience * 0.6),
                                                          min_lr=1.e-5)
-        if args.gnn.target == 'obj':
+        if target == 'obj':
             trainer = ObjTrainer()
-        elif args.gnn.target == 'deltaobj':
+        elif use_selected_obj:
+            trainer = RealObjTrainer()
+        elif target == 'deltaobj':
             trainer = DeltaObjTrainer()
         else:
             raise ValueError(f"Unsupported gnn.target: {args.gnn.target}")
