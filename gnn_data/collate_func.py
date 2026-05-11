@@ -34,6 +34,32 @@ def _cat_with_offsets(
     return constraint_features, variable_features, batched_edge_index, batched_edge_attr
 
 
+def _collate_parent_graphs(lp_graphs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    parent_lp_graphs = [g["parent_lp_graph"] for g in lp_graphs]
+    parent_n_constraints_per_graph = torch.as_tensor(
+        [int(g["n_constraints"]) for g in parent_lp_graphs], dtype=torch.long
+    )
+    parent_n_variables_per_graph = torch.as_tensor(
+        [int(g["n_variables"]) for g in parent_lp_graphs], dtype=torch.long
+    )
+    (
+        parent_constraint_features,
+        parent_variable_features,
+        parent_edge_index,
+        parent_edge_attr,
+    ) = _cat_with_offsets(parent_lp_graphs, parent_n_constraints_per_graph, parent_n_variables_per_graph)
+
+    return {
+        "num_parent_lp_graphs": int(len(parent_lp_graphs)),
+        "parent_constraint_features": parent_constraint_features.contiguous(),
+        "parent_variable_features": parent_variable_features.contiguous(),
+        "parent_edge_index": parent_edge_index.contiguous(),
+        "parent_edge_attr": parent_edge_attr.contiguous(),
+        "parent_n_constraints_per_graph": parent_n_constraints_per_graph.contiguous(),
+        "parent_n_variables_per_graph": parent_n_variables_per_graph.contiguous(),
+    }
+
+
 def _split_down_up(item_lp_graphs: List[Dict[str, Any]]):
     down = [g for g in item_lp_graphs if int(g["branch_dir"]) == 0]
     up = [g for g in item_lp_graphs if int(g["branch_dir"]) == 1]
@@ -124,6 +150,7 @@ def collate_fn_lp_base(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "target_score": target_score.contiguous(),
         "source_sample_index": source_sample_index.contiguous(),
         "source_sample_path": source_sample_path,
+        **_collate_parent_graphs(lp_graphs),
     }
 
 
@@ -191,4 +218,5 @@ def collate_fn_lp_flat(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "target_score": target_score.contiguous(),
         "source_sample_index": source_sample_index.contiguous(),
         "source_sample_path": source_sample_path,
+        **_collate_parent_graphs(lp_graphs),
     }

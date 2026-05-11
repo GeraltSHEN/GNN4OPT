@@ -21,10 +21,10 @@ class LPGNN(nn.Module):
 
         # EMBEDDING
         self.cons_embedding = torch.nn.Sequential(
-                torch.nn.LayerNorm(cons_nfeats),
+                # torch.nn.LayerNorm(cons_nfeats),
                 MLP([cons_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
         self.var_embedding = torch.nn.Sequential(
-                torch.nn.LayerNorm(var_nfeats),
+                # torch.nn.LayerNorm(var_nfeats),
                 MLP([var_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
 
         # DATA ENCODER
@@ -41,10 +41,10 @@ class LPGNN(nn.Module):
 
         # FINAL MLP
         self.cons_out = torch.nn.Sequential(
-                torch.nn.LayerNorm(emb_size),
+                # torch.nn.LayerNorm(emb_size),
                 MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
         self.vars_out = torch.nn.Sequential(
-                torch.nn.LayerNorm(emb_size),
+                # torch.nn.LayerNorm(emb_size),
                 MLP([emb_size, emb_size, 1], act="relu", norm=None, plain_last=True))
 
     def forward(self, data):

@@ -2,6 +2,17 @@ import torch
 import torch.nn.functional as F
 
 
+def _parent_model_data(data):
+    return {
+        "constraint_features": data["parent_constraint_features"],
+        "edge_index": data["parent_edge_index"],
+        "edge_attr": data["parent_edge_attr"],
+        "variable_features": data["parent_variable_features"],
+        "n_constraints_per_graph": data["parent_n_constraints_per_graph"],
+        "n_variables_per_graph": data["parent_n_variables_per_graph"],
+    }
+
+
 class ObjTrainer:
     def __init__(self):
         self.best_acc = 0
@@ -276,6 +287,9 @@ class DeltaObjTrainer:
         self.best_acc = 0
         self.patience = 0
 
+    def predict_delta(self, data, model):
+        return model(data).reshape(-1)
+
     def train(self, dataloader, model, optimizer, device):
         model.train()
         device = torch.device(device)
@@ -288,8 +302,7 @@ class DeltaObjTrainer:
                 for key, value in data.items()
             }
 
-            pred_delta = model(data)
-            pred_delta = pred_delta.reshape(-1)
+            pred_delta = self.predict_delta(data, model)
             true_obj = data["target_obj"].reshape(-1)
             parent_obj = data["parent_obj"].reshape(-1)
             true_delta = true_obj - parent_obj
@@ -324,8 +337,7 @@ class DeltaObjTrainer:
                 for key, value in data.items()
             }
 
-            pred_delta = model(data)
-            pred_delta = pred_delta.reshape(-1)
+            pred_delta = self.predict_delta(data, model)
             true_obj = data["target_obj"].reshape(-1)
             parent_obj = data["parent_obj"].reshape(-1)
             true_delta = true_obj - parent_obj
@@ -395,6 +407,9 @@ class RealDeltaObjTrainer:
         self.best_acc = 0
         self.patience = 0
 
+    def predict_delta(self, data, model):
+        return model(data).reshape(-1)
+
     def train(self, dataloader, model, optimizer, device):
         model.train()
         device = torch.device(device)
@@ -407,8 +422,7 @@ class RealDeltaObjTrainer:
                 for key, value in data.items()
             }
 
-            pred_delta = model(data)
-            pred_delta = pred_delta.reshape(-1)
+            pred_delta = self.predict_delta(data, model)
             true_obj = data["target_obj"].reshape(-1)
             parent_obj = data["parent_obj"].reshape(-1)
             cutoffbound = data["cutoffbound"].reshape(-1).to(device=pred_delta.device, dtype=pred_delta.dtype)
@@ -463,8 +477,7 @@ class RealDeltaObjTrainer:
                 for key, value in data.items()
             }
 
-            pred_delta = model(data)
-            pred_delta = pred_delta.reshape(-1)
+            pred_delta = self.predict_delta(data, model)
             true_obj = data["target_obj"].reshape(-1)
             parent_obj = data["parent_obj"].reshape(-1)
             cutoffbound = data["cutoffbound"].reshape(-1).to(device=pred_delta.device, dtype=pred_delta.dtype)
@@ -529,3 +542,17 @@ class RealDeltaObjTrainer:
             score_diffs / max(1, num_milp_graphs),
             normalized_score_diffs / max(1, num_milp_graphs),
         )
+
+
+class ContrastDeltaObjTrainer(DeltaObjTrainer):
+    def predict_delta(self, data, model):
+        pred_child_obj = model(data).reshape(-1)
+        pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
+        return pred_child_obj - pred_parent_obj
+
+
+class ContrastRealDeltaObjTrainer(RealDeltaObjTrainer):
+    def predict_delta(self, data, model):
+        pred_child_obj = model(data).reshape(-1)
+        pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
+        return pred_child_obj - pred_parent_obj

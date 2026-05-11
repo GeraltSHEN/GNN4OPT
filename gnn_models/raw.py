@@ -20,10 +20,10 @@ class GNNPolicy(nn.Module):
 
         # EMBEDDING
         self.cons_embedding = torch.nn.Sequential(
-                torch.nn.LayerNorm(cons_nfeats),
+                # torch.nn.LayerNorm(cons_nfeats),
                 MLP([cons_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
         self.var_embedding = torch.nn.Sequential(
-                torch.nn.LayerNorm(var_nfeats),
+                # torch.nn.LayerNorm(var_nfeats),
                 MLP([var_nfeats, emb_size, emb_size], act="relu", norm=None, plain_last=False))
 
         # DATA ENCODER

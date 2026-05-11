@@ -130,7 +130,7 @@ def _build_milp_graph_from_sample(
             "sol_is_at_ub",
             # "sol_frac",
             "coef_normalized",
-            cutoff_feature_name,
+            # cutoff_feature_name,
             "lbs",
             "ubs",
         ]
@@ -149,7 +149,10 @@ def _build_milp_graph_from_sample(
     #         cutoff_feature_name,
     #     ]
     # TODO: exp1: hide dualsol_val_normalized
-    constraint_required = ["bias", cutoff_feature_name]
+    constraint_required = [
+        "bias", 
+        #cutoff_feature_name
+        ]
     # constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
 
     synthetic_variable_features = {"lbs", "ubs"}
@@ -305,7 +308,7 @@ class LPDataset(Dataset):
     """Dataset that expands each MILP sample into up to 2 * top_k LP sub-problem graphs.
 
     - Uses saved top-k targets from sample files (no live get_top_k).
-    - Does NOT include parent graph in expansion by design.
+    - Includes the corresponding parent LP graph for each child LP graph.
     - Stores parent_obj and cutoffbound on each LP graph record.
     """
 
@@ -403,6 +406,14 @@ class LPDataset(Dataset):
 
         base_variable_features = milp_graph["variable_features"]
         variable_feature_indices = milp_graph["variable_feature_indices"]
+        parent_lp_graph = {
+            "constraint_features": milp_graph["constraint_features"],
+            "edge_index": milp_graph["edge_index"],
+            "edge_attr": milp_graph["edge_attr"],
+            "variable_features": base_variable_features,
+            "n_constraints": n_constraints,
+            "n_variables": n_variables,
+        }
         has_lb_idx = int(variable_feature_indices["has_lb"])
         has_ub_idx = int(variable_feature_indices["has_ub"])
         sol_is_at_lb_idx = int(variable_feature_indices["sol_is_at_lb"])
@@ -469,6 +480,7 @@ class LPDataset(Dataset):
                         "target_obj": float(obj[rank, branch_dir]),
                         "target_score": float(scores[rank]),
                         "parent_obj": parent_obj,
+                        "parent_lp_graph": parent_lp_graph,
                         "cutoffbound": cutoffbound,
                         "sample_index": int(index),
                         "sample_path": str(sample_path),
