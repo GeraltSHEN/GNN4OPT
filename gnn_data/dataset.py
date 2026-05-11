@@ -203,6 +203,7 @@ def _build_milp_graph_from_sample(
         "edge_index": edge_index.contiguous(),
         "edge_attr": edge_attr.contiguous(),
         "variable_features": variable_features.contiguous(),
+        "variable_feature_indices": dict(variable_feature_indices),
         "n_constraints": int(constraint_features.size(0)),
         "n_variables": int(variable_features.size(0)),
         "candidates": candidates.contiguous(),
@@ -369,23 +370,44 @@ class LPDataset(Dataset):
         beta = beta[:k_eff]
 
         base_variable_features = milp_graph["variable_features"]
+        variable_feature_indices = milp_graph["variable_feature_indices"]
+        has_lb_idx = int(variable_feature_indices["has_lb"])
+        has_ub_idx = int(variable_feature_indices["has_ub"])
+        sol_is_at_lb_idx = int(variable_feature_indices["sol_is_at_lb"])
+        sol_is_at_ub_idx = int(variable_feature_indices["sol_is_at_ub"])
 
         lp_graphs: List[Dict[str, Any]] = []
         for rank in range(k_eff):
             branch_var = int(candidate_indices[rank])
             if branch_var < 0 or branch_var >= n_variables:
                 raise ValueError(f"branch_var {branch_var} out of range [0, {n_variables}) in {sample_path}")
+            previous_value_on_lb = base_variable_features[branch_var, sol_is_at_lb_idx]
+            previous_value_on_ub = base_variable_features[branch_var, sol_is_at_ub_idx]
+            if previous_value_on_lb.item() == 1 and previous_value_on_ub.item() == 1:
+                print(f"top-8 candidate_indices: {candidate_indices[:8]}")
+                print(f"features: {base_variable_features[candidate_indices[:8], :]}")
+                raise ValueError(
+                        f"Expected variable {branch_var} is not at both lb and ub before branching, "
+                        f"got 1 on both sol_is_at_lb and sol_is_at_ub in {sample_path}")
 
             for branch_dir in (0, 1):  # 0=down, 1=up
-                branch_onehot = torch.zeros((n_variables, 2), dtype=base_variable_features.dtype)
-                branch_onehot[branch_var, int(branch_dir)] = 1.0
-                variable_features = torch.cat([base_variable_features, branch_onehot], dim=-1).contiguous()
+                if int(branch_dir) == 0:
+                    has_b_idx = has_lb_idx
+                    sol_is_at_b_idx = sol_is_at_lb_idx
+                else:
+                    has_b_idx = has_ub_idx
+                    sol_is_at_b_idx = sol_is_at_ub_idx
+                variable_features = base_variable_features.clone()
+                variable_features[branch_var, has_b_idx] = 1.0
+                variable_features[branch_var, sol_is_at_b_idx] = 1.0
+                variable_features = variable_features.contiguous()
                 lp_graphs.append(
                     {
                         "constraint_features": milp_graph["constraint_features"],
                         "edge_index": milp_graph["edge_index"],
                         "edge_attr": milp_graph["edge_attr"],
                         "variable_features": variable_features,
+                        "variable_feature_indices": variable_feature_indices,
                         "n_constraints": n_constraints,
                         "n_variables": n_variables,
                         "branch_var_index": branch_var,

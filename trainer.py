@@ -143,9 +143,14 @@ class RealObjTrainer:
             pred_obj = model(data)
             pred_obj = pred_obj.reshape(-1)
             cutoffbound = data["cutoffbound"].reshape(-1).to(device=pred_obj.device, dtype=pred_obj.dtype)
-            pred_obj = torch.minimum(pred_obj, cutoffbound)
+            # pred_obj = torch.minimum(pred_obj, cutoffbound)
             true_obj = data["target_obj"].reshape(-1)
-            valid_mask = true_obj < cutoffbound
+
+            # if torch.any(true_obj > cutoffbound + 1e-6).item():
+            #     print(f"true_obj: {true_obj} > cutoffbound {cutoffbound} + 1e-6")
+            #     raise ValueError(f"true obj shouldn't be greater than cutoffbound. dataset incorrect somewhere")
+
+            valid_mask = true_obj < cutoffbound + 1e-6
             valid_count = valid_mask.sum()
             global_valid_count = valid_count.detach().clone()
             if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -153,11 +158,13 @@ class RealObjTrainer:
             if int(global_valid_count.item()) == 0:
                 continue
             if int(valid_count.item()) > 0:
-                loss = F.mse_loss(pred_obj[valid_mask], true_obj[valid_mask])
+                loss_sum = F.mse_loss(pred_obj[valid_mask], true_obj[valid_mask], reduction="sum")
+                loss = loss_sum / valid_count
             else:
-                loss = pred_obj.sum() * 0.0
+                loss_sum = pred_obj.sum() * 0.0
+                loss = loss_sum
 
-            train_losses += loss.detach() * valid_count
+            train_losses += loss_sum.detach()
             num_lp_graphs += int(valid_count.item())
 
             optimizer.zero_grad()
