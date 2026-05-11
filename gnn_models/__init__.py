@@ -7,14 +7,14 @@ def get_model(args):
         return GNNPolicy(
             emb_size=args.emb_size,
             cons_nfeats=2,
-            var_nfeats=10,
+            var_nfeats=12,
             n_layers=args.n_layers,
             gnn_backbone=args.gnn_backbone)
     elif args.type == "lp":
         return LPGNN(
             emb_size=args.emb_size,
             cons_nfeats=2,
-            var_nfeats=10,
+            var_nfeats=12,
             n_layers=args.n_layers,
             gnn_backbone=args.gnn_backbone)
     else:

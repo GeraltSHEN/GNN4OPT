@@ -130,8 +130,9 @@ def _build_milp_graph_from_sample(
             "sol_is_at_ub",
             # "sol_frac",
             "coef_normalized",
-            # "sol_val",
             cutoff_feature_name,
+            "lbs",
+            "ubs",
         ]
     # variable_required = [
     #         "type_0",
@@ -151,17 +152,48 @@ def _build_milp_graph_from_sample(
     constraint_required = ["bias", cutoff_feature_name]
     # constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
 
-    missing_variable = [name for name in variable_required if name not in variable_feature_indices]
+    synthetic_variable_features = {"lbs", "ubs"}
+    missing_variable = [
+        name
+        for name in variable_required
+        if name not in variable_feature_indices and name not in synthetic_variable_features
+    ]
     missing_constraint = [name for name in constraint_required if name not in constraint_feature_indices]
     if missing_variable:
         raise KeyError(f"Missing variable features {missing_variable} in {sample_path}")
+    if "sol_val" not in variable_feature_indices:
+        raise KeyError(f"Missing variable feature 'sol_val' in {sample_path}")
     if missing_constraint:
         raise KeyError(f"Missing constraint features {missing_constraint} in {sample_path}")
 
-    variable_features = torch.stack(
-            [variable_default_features[:, variable_feature_indices[name]] for name in variable_required],
-            dim=-1,
-        )
+    n_variables = int(variable_default_features.shape[0])
+    fixed_mask = (
+        (variable_default_features[:, variable_feature_indices["sol_is_at_lb"]] == 1)
+        & (variable_default_features[:, variable_feature_indices["sol_is_at_ub"]] == 1)
+    )
+    sol_vals = variable_default_features[:, variable_feature_indices["sol_val"]]
+    lbs = torch.zeros(
+        n_variables,
+        dtype=variable_default_features.dtype,
+        device=variable_default_features.device,
+    )
+    ubs = torch.ones(
+        n_variables,
+        dtype=variable_default_features.dtype,
+        device=variable_default_features.device,
+    )
+    lbs[fixed_mask] = sol_vals[fixed_mask]
+    ubs[fixed_mask] = sol_vals[fixed_mask]
+
+    variable_feature_columns = []
+    for name in variable_required:
+        if name == "lbs":
+            variable_feature_columns.append(lbs)
+        elif name == "ubs":
+            variable_feature_columns.append(ubs)
+        else:
+            variable_feature_columns.append(variable_default_features[:, variable_feature_indices[name]])
+    variable_features = torch.stack(variable_feature_columns, dim=-1)
     constraint_features = torch.stack(
             [constraint_default_features[:, constraint_feature_indices[name]] for name in constraint_required],
             dim=-1,
@@ -172,16 +204,16 @@ def _build_milp_graph_from_sample(
     candidate_scores = torch.as_tensor(sample_scores, dtype=torch.float32)
     candidate_choice_node_id = sample_action
 
-    if remove_bad_candidates:
-        if "sol_is_at_lb" not in variable_feature_indices or "sol_is_at_ub" not in variable_feature_indices:
-            raise KeyError("remove_bad_candidates=True requires sol_is_at_lb and sol_is_at_ub features.")
-        candidates, candidate_scores, candidate_choice_node_id = _clean_candidates(
-            candidates,
-            candidate_scores,
-            candidate_choice_node_id,
-            variable_features,
-            variable_feature_indices,
-        )
+    # if remove_bad_candidates:
+    #     if "sol_is_at_lb" not in variable_feature_indices or "sol_is_at_ub" not in variable_feature_indices:
+    #         raise KeyError("remove_bad_candidates=True requires sol_is_at_lb and sol_is_at_ub features.")
+    #     candidates, candidate_scores, candidate_choice_node_id = _clean_candidates(
+    #         candidates,
+    #         candidate_scores,
+    #         candidate_choice_node_id,
+    #         variable_features,
+    #         variable_feature_indices,
+    #     )
 
     choice_tensor = torch.where(candidates == torch.as_tensor(candidate_choice_node_id, dtype=torch.long))[0]
     if choice_tensor.numel() == 0:
@@ -375,6 +407,24 @@ class LPDataset(Dataset):
         has_ub_idx = int(variable_feature_indices["has_ub"])
         sol_is_at_lb_idx = int(variable_feature_indices["sol_is_at_lb"])
         sol_is_at_ub_idx = int(variable_feature_indices["sol_is_at_ub"])
+        lbs_idx = int(variable_feature_indices["lbs"])
+        ubs_idx = int(variable_feature_indices["ubs"])
+
+        # top8_candidate_indices = candidate_indices[:8]
+        # top8_candidate_features = base_variable_features[top8_candidate_indices, :]
+        # top8_candidate_set = set(int(idx) for idx in top8_candidate_indices)
+        # non_candidate_indices = []
+        # for var_idx in range(n_variables):
+        #     if var_idx not in candidate_indices:
+        #         non_candidate_indices.append(var_idx)
+        #         if len(non_candidate_indices) == 8:
+        #             break
+        # print(f"top-8 candidate_indices: {top8_candidate_indices}")
+        # print(f"top-8 candidate variable_features: {top8_candidate_features}")
+        # print(f"non-candidate_indices: {non_candidate_indices}")
+        # if non_candidate_indices:
+        #     print(f"non-candidate variable_features: {base_variable_features[non_candidate_indices, :]}")
+        # raise RuntimeError(f"Debug variable feature printout complete for {sample_path}")
 
         lp_graphs: List[Dict[str, Any]] = []
         for rank in range(k_eff):
@@ -391,15 +441,15 @@ class LPDataset(Dataset):
                         f"got 1 on both sol_is_at_lb and sol_is_at_ub in {sample_path}")
 
             for branch_dir in (0, 1):  # 0=down, 1=up
-                if int(branch_dir) == 0:
-                    has_b_idx = has_lb_idx
-                    sol_is_at_b_idx = sol_is_at_lb_idx
-                else:
-                    has_b_idx = has_ub_idx
-                    sol_is_at_b_idx = sol_is_at_ub_idx
                 variable_features = base_variable_features.clone()
-                variable_features[branch_var, has_b_idx] = 1.0
-                variable_features[branch_var, sol_is_at_b_idx] = 1.0
+                branch_value = float(branch_dir)
+                variable_features[branch_var, has_lb_idx] = 1.0
+                variable_features[branch_var, has_ub_idx] = 1.0
+                variable_features[branch_var, sol_is_at_lb_idx] = 1.0
+                variable_features[branch_var, sol_is_at_ub_idx] = 1.0
+                variable_features[branch_var, lbs_idx] = branch_value
+                variable_features[branch_var, ubs_idx] = branch_value
+
                 variable_features = variable_features.contiguous()
                 lp_graphs.append(
                     {
