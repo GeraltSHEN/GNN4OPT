@@ -18,7 +18,7 @@ from torch.utils.data.distributed import DistributedSampler
 from gnn_data.collate_func import collate_fn_lp_base, collate_fn_lp_flat
 from gnn_data.dataset import LPGraphDataset, LPDataset
 from gnn_models import get_model
-from trainer import DeltaObjTrainer, ObjTrainer, RealObjTrainer
+from trainer import DeltaObjTrainer, ObjTrainer, RealDeltaObjTrainer, RealObjTrainer
 from utils.experiment import save_run_config, setup_wandb, count_parameters
 
 torch.set_float32_matmul_precision('high')
@@ -36,7 +36,8 @@ def main(args: DictConfig):
 
     target = str(args.gnn.target).lower()
     use_real_obj = target in {"realobj", "real_obj"}
-    use_flat_train = bool(args.train.shuffle_lp) or use_real_obj
+    use_real_delta_obj = target in {"realdeltaobj", "real_deltaobj", "real_delta_obj"}
+    use_flat_train = bool(args.train.shuffle_lp) or use_real_obj or use_real_delta_obj
     train_set = (
         LPGraphDataset(args.train.datapath, 'train', transform=None)
         if use_flat_train
@@ -107,6 +108,8 @@ def main(args: DictConfig):
             trainer = RealObjTrainer()
         elif target == 'deltaobj':
             trainer = DeltaObjTrainer()
+        elif use_real_delta_obj:
+            trainer = RealDeltaObjTrainer()
         else:
             raise ValueError(f"Unsupported gnn.target: {args.gnn.target}")
 
