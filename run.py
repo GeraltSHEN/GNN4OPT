@@ -92,7 +92,8 @@ def main(args: DictConfig):
         else:
             raise ValueError(f"Unsupported gnn.target: {args.gnn.target}")
 
-        pbar = tqdm(range(args.train.epoch))
+        print_every = 5
+        pbar = tqdm(range(args.train.epoch), miniters=print_every)
         for epoch in pbar:
             train_loss = trainer.train(train_loader, model, optimizer, device).item()
             val_loss, val_acc, val_top5_acc, val_score_diff, val_normalized_score_diff = trainer.eval(val_loader, model, device)
@@ -125,7 +126,12 @@ def main(args: DictConfig):
                           'val_normalized_score_diff': val_normalized_score_diff, 
                           'lr': scheduler.optimizer.param_groups[0]["lr"]}
 
-            pbar.set_postfix(stats_dict)
+            should_print = (
+                epoch == 0
+                or (epoch + 1) % print_every == 0
+                or epoch + 1 == args.train.epoch
+            )
+            pbar.set_postfix(stats_dict, refresh=should_print)
             wandb.log(stats_dict)
 
         model.load_state_dict(best_model)
