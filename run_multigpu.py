@@ -22,6 +22,8 @@ from trainer import (
     ContrastDeltaObjTrainer,
     ContrastRealDeltaObjTrainer,
     DeltaObjTrainer,
+    MultiContrastDeltaObjTrainer,
+    MultiContrastRealDeltaObjTrainer,
     ObjTrainer,
     RealDeltaObjTrainer,
     RealObjTrainer,
@@ -51,11 +53,25 @@ def main(args: DictConfig):
         "contrast_real_deltaobj",
         "contrast_real_delta_obj",
     }
+    use_multi_contrast_delta_obj = target in {
+        "multicontrastdeltaobj",
+        "multi_contrastdeltaobj",
+        "multi_contrast_deltaobj",
+        "multi_contrast_delta_obj",
+    }
+    use_multi_contrast_real_delta_obj = target in {
+        "multicontrastrealdeltaobj",
+        "multi_contrastrealdeltaobj",
+        "multi_contrast_realdeltaobj",
+        "multi_contrast_real_deltaobj",
+        "multi_contrast_real_delta_obj",
+    }
     use_flat_train = (
         bool(args.train.shuffle_lp)
         or use_real_obj
         or use_real_delta_obj
         or use_contrast_real_delta_obj
+        or use_multi_contrast_real_delta_obj
     )
     train_set = (
         LPGraphDataset(args.train.datapath, 'train', transform=None)
@@ -133,6 +149,10 @@ def main(args: DictConfig):
             trainer = ContrastDeltaObjTrainer()
         elif use_contrast_real_delta_obj:
             trainer = ContrastRealDeltaObjTrainer()
+        elif use_multi_contrast_delta_obj:
+            trainer = MultiContrastDeltaObjTrainer()
+        elif use_multi_contrast_real_delta_obj:
+            trainer = MultiContrastRealDeltaObjTrainer()
         else:
             raise ValueError(f"Unsupported gnn.target: {args.gnn.target}")
 

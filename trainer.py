@@ -1,5 +1,7 @@
 import torch
 import torch.nn.functional as F
+from conflictfree.grad_operator import ConFIG_update
+from conflictfree.utils import apply_gradient_vector, get_gradient_vector
 
 
 def _parent_model_data(data):
@@ -11,6 +13,12 @@ def _parent_model_data(data):
         "n_constraints_per_graph": data["parent_n_constraints_per_graph"],
         "n_variables_per_graph": data["parent_n_variables_per_graph"],
     }
+
+
+def _contrast_outputs(data, model):
+    pred_child_obj = model(data).reshape(-1)
+    pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
+    return pred_child_obj, pred_parent_obj, pred_child_obj - pred_parent_obj
 
 
 class ObjTrainer:
@@ -546,13 +554,108 @@ class RealDeltaObjTrainer:
 
 class ContrastDeltaObjTrainer(DeltaObjTrainer):
     def predict_delta(self, data, model):
-        pred_child_obj = model(data).reshape(-1)
-        pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
-        return pred_child_obj - pred_parent_obj
+        return _contrast_outputs(data, model)[2]
 
 
 class ContrastRealDeltaObjTrainer(RealDeltaObjTrainer):
     def predict_delta(self, data, model):
-        pred_child_obj = model(data).reshape(-1)
-        pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
-        return pred_child_obj - pred_parent_obj
+        return _contrast_outputs(data, model)[2]
+
+
+class _ConFIGStepMixin:
+    def _config_step(self, model, optimizer, loss_fns):
+        grads = []
+        losses = []
+        for loss_fn in loss_fns:
+            optimizer.zero_grad()
+            loss = loss_fn()
+            losses.append(loss.detach())
+            loss.backward()
+            grads.append(get_gradient_vector(model))
+
+        g_config = ConFIG_update(grads)
+        apply_gradient_vector(model, g_config)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
+        optimizer.step()
+        return losses
+
+
+class MultiContrastDeltaObjTrainer(_ConFIGStepMixin, ContrastDeltaObjTrainer):
+    def train(self, dataloader, model, optimizer, device):
+        model.train()
+        device = torch.device(device)
+
+        train_losses = torch.tensor(0.0, device=device)
+        num_lp_graphs = 0
+        for i, data in enumerate(dataloader):
+            data = {
+                key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
+                for key, value in data.items()
+            }
+            true_obj = data["target_obj"].reshape(-1)
+            true_parent_obj = data["parent_obj"].reshape(-1)
+            true_delta = true_obj - true_parent_obj
+
+            def delta_loss():
+                return F.mse_loss(_contrast_outputs(data, model)[2], true_delta)
+
+            def parent_loss():
+                pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
+                return F.mse_loss(pred_parent_obj, true_parent_obj)
+
+            loss_values = self._config_step(model, optimizer, [delta_loss, parent_loss])
+
+            train_losses += loss_values[0] * data["num_lp_graphs"]
+            num_lp_graphs += data["num_lp_graphs"]
+
+        return train_losses / max(1, num_lp_graphs)
+
+
+class MultiContrastRealDeltaObjTrainer(_ConFIGStepMixin, ContrastRealDeltaObjTrainer):
+    def train(self, dataloader, model, optimizer, device):
+        model.train()
+        device = torch.device(device)
+
+        train_losses = torch.tensor(0.0, device=device)
+        num_lp_graphs = 0
+        for i, data in enumerate(dataloader):
+            data = {
+                key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
+                for key, value in data.items()
+            }
+            true_obj = data["target_obj"].reshape(-1)
+            true_parent_obj = data["parent_obj"].reshape(-1)
+            cutoffbound = data["cutoffbound"].reshape(-1).to(device=true_obj.device, dtype=true_obj.dtype)
+            valid_mask = true_obj < cutoffbound + 1e-6
+            valid_count = valid_mask.sum()
+            valid_count_int = int(valid_count.item())
+            global_valid_count = valid_count.detach().clone()
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(global_valid_count, op=torch.distributed.ReduceOp.SUM)
+            if int(global_valid_count.item()) == 0:
+                continue
+
+            true_delta = true_obj - true_parent_obj
+
+            def delta_loss():
+                _, _, pred_delta = _contrast_outputs(data, model)
+                if valid_count_int > 0:
+                    return F.mse_loss(pred_delta[valid_mask], true_delta[valid_mask])
+                return pred_delta.sum() * 0.0
+
+            def parent_loss():
+                pred_parent_obj = model(_parent_model_data(data)).reshape(-1)
+                return F.mse_loss(pred_parent_obj, true_parent_obj)
+
+            loss_values = self._config_step(model, optimizer, [delta_loss, parent_loss])
+
+            train_losses += loss_values[0] * valid_count_int
+            num_lp_graphs += valid_count_int
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            num_lp_graphs_tensor = torch.as_tensor(float(num_lp_graphs), device=device)
+            torch.distributed.all_reduce(train_losses, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(num_lp_graphs_tensor, op=torch.distributed.ReduceOp.SUM)
+            num_lp_graphs = int(num_lp_graphs_tensor.item())
+
+        return train_losses / max(1, num_lp_graphs)

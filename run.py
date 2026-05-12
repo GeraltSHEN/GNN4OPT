@@ -19,6 +19,8 @@ from trainer import (
     ContrastDeltaObjTrainer,
     ContrastRealDeltaObjTrainer,
     DeltaObjTrainer,
+    MultiContrastDeltaObjTrainer,
+    MultiContrastRealDeltaObjTrainer,
     ObjTrainer,
     RealDeltaObjTrainer,
     RealObjTrainer,
@@ -43,11 +45,25 @@ def main(args: DictConfig):
         "contrast_real_deltaobj",
         "contrast_real_delta_obj",
     }
+    use_multi_contrast_delta_obj = target in {
+        "multicontrastdeltaobj",
+        "multi_contrastdeltaobj",
+        "multi_contrast_deltaobj",
+        "multi_contrast_delta_obj",
+    }
+    use_multi_contrast_real_delta_obj = target in {
+        "multicontrastrealdeltaobj",
+        "multi_contrastrealdeltaobj",
+        "multi_contrast_realdeltaobj",
+        "multi_contrast_real_deltaobj",
+        "multi_contrast_real_delta_obj",
+    }
     use_flat_train = (
         bool(args.train.shuffle_lp)
         or use_real_obj
         or use_real_delta_obj
         or use_contrast_real_delta_obj
+        or use_multi_contrast_real_delta_obj
     )
     train_set = (
         LPGraphDataset(args.train.datapath, 'train', transform=None)
@@ -112,6 +128,10 @@ def main(args: DictConfig):
             trainer = ContrastDeltaObjTrainer()
         elif use_contrast_real_delta_obj:
             trainer = ContrastRealDeltaObjTrainer()
+        elif use_multi_contrast_delta_obj:
+            trainer = MultiContrastDeltaObjTrainer()
+        elif use_multi_contrast_real_delta_obj:
+            trainer = MultiContrastRealDeltaObjTrainer()
         else:
             raise ValueError(f"Unsupported gnn.target: {args.gnn.target}")
 
@@ -156,6 +176,9 @@ def main(args: DictConfig):
             )
             pbar.set_postfix(stats_dict, refresh=should_print)
             wandb.log(stats_dict)
+
+        if args.train.ckpt:
+            torch.save(model.state_dict(), os.path.join(log_folder_name, f'last_model{run}.pt'))
 
         model.load_state_dict(best_model)
         test_loss, test_acc, test_top5_acc, test_score_diff, test_normalized_score_diff = trainer.eval(test_loader, model, device)
