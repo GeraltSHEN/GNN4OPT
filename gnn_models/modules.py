@@ -166,7 +166,10 @@ class BipartiteGraphConvolution(MessagePassing):
             torch.nn.Linear(emb_size, emb_size),
         )
 
-        self.post_conv_module = torch.nn.Sequential(torch.nn.Identity(emb_size))#torch.nn.LayerNorm(emb_size))
+        self.post_conv_module = torch.nn.Sequential(
+                                    # torch.nn.LayerNorm(emb_size)
+                                    torch.nn.Identity(emb_size)
+                                    )
 
         # output_layers
         self.output_module = torch.nn.Sequential(
