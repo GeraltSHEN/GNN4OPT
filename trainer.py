@@ -1,7 +1,8 @@
 import torch
 import torch.nn.functional as F
-from conflictfree.grad_operator import ConFIG_update
-from conflictfree.utils import apply_gradient_vector, get_gradient_vector
+# from conflictfree.grad_operator import ConFIG_update
+# from conflictfree.utils import apply_gradient_vector, get_gradient_vector
+from pcgrad import PCGrad
 
 
 def _parent_model_data(data):
@@ -587,27 +588,40 @@ class ContrastRealDeltaObjTrainer(RealDeltaObjTrainer):
         return _contrast_outputs(data, model)[2]
 
 
-class _ConFIGStepMixin:
-    def _config_step(self, model, optimizer, losses):
-        grads = []
-        detached_losses = []
-        for i, loss in enumerate(losses):
-            optimizer.zero_grad()
-            detached_losses.append(loss.detach())
-            loss.backward(retain_graph=i < len(losses) - 1)
-            grads.append(get_gradient_vector(model))
+# class _ConFIGStepMixin:
+#     def _config_step(self, model, optimizer, losses):
+#         grads = []
+#         detached_losses = []
+#         for i, loss in enumerate(losses):
+#             optimizer.zero_grad()
+#             detached_losses.append(loss.detach())
+#             loss.backward(retain_graph=i < len(losses) - 1)
+#             grads.append(get_gradient_vector(model))
+#
+#         g_config = ConFIG_update(grads)
+#         apply_gradient_vector(model, g_config)
+#         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
+#         optimizer.step()
+#         return detached_losses
 
-        g_config = ConFIG_update(grads)
-        apply_gradient_vector(model, g_config)
+
+class _PCGradStepMixin:
+    def _pcgrad_step(self, model, pc_optimizer, losses):
+        detached_losses = [loss.detach() for loss in losses]
+
+        pc_optimizer.zero_grad()
+        pc_optimizer.pc_backward(losses)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
-        optimizer.step()
+        pc_optimizer.step()
         return detached_losses
 
 
-class MultiContrastDeltaObjTrainer(_ConFIGStepMixin, ContrastDeltaObjTrainer):
+# class MultiContrastDeltaObjTrainer(_ConFIGStepMixin, ContrastDeltaObjTrainer):
+class MultiContrastDeltaObjTrainer(_PCGradStepMixin, ContrastDeltaObjTrainer):
     def train(self, dataloader, model, optimizer, device):
         model.train()
         device = torch.device(device)
+        pc_optimizer = optimizer if isinstance(optimizer, PCGrad) else PCGrad(optimizer)
 
         train_losses = torch.tensor(0.0, device=device)
         num_lp_graphs = 0
@@ -627,7 +641,8 @@ class MultiContrastDeltaObjTrainer(_ConFIGStepMixin, ContrastDeltaObjTrainer):
                 torch.cat([true_obj, true_parent_obj], dim=0),
             )
 
-            loss_values = self._config_step(model, optimizer, [delta_loss, obj_loss])
+            # loss_values = self._config_step(model, optimizer, [delta_loss, obj_loss])
+            loss_values = self._pcgrad_step(model, pc_optimizer, [delta_loss, obj_loss])
 
             train_losses += loss_values[0] * data["num_lp_graphs"]
             num_lp_graphs += data["num_lp_graphs"]
@@ -635,10 +650,12 @@ class MultiContrastDeltaObjTrainer(_ConFIGStepMixin, ContrastDeltaObjTrainer):
         return train_losses / max(1, num_lp_graphs)
 
 
-class MultiContrastRealDeltaObjTrainer(_ConFIGStepMixin, ContrastRealDeltaObjTrainer):
+# class MultiContrastRealDeltaObjTrainer(_ConFIGStepMixin, ContrastRealDeltaObjTrainer):
+class MultiContrastRealDeltaObjTrainer(_PCGradStepMixin, ContrastRealDeltaObjTrainer):
     def train(self, dataloader, model, optimizer, device):
         model.train()
         device = torch.device(device)
+        pc_optimizer = optimizer if isinstance(optimizer, PCGrad) else PCGrad(optimizer)
 
         train_losses = torch.tensor(0.0, device=device)
         num_lp_graphs = 0
@@ -682,7 +699,8 @@ class MultiContrastRealDeltaObjTrainer(_ConFIGStepMixin, ContrastRealDeltaObjTra
                 loss_scale = 1.0 / valid_count.to(device=pred_delta.device, dtype=pred_delta.dtype)
             delta_loss = delta_loss_sum * loss_scale
 
-            loss_values = self._config_step(model, optimizer, [delta_loss, obj_loss])
+            # loss_values = self._config_step(model, optimizer, [delta_loss, obj_loss])
+            loss_values = self._pcgrad_step(model, pc_optimizer, [delta_loss, obj_loss])
 
             train_losses += loss_values[0] * valid_count_int
             num_lp_graphs += valid_count_int
