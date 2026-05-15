@@ -119,21 +119,6 @@ def _build_milp_graph_from_sample(
 
     cutoff_feature_name = "cutoffbound_normalized"
     # TODO: exp1: hide hide sol_frac, sol_val
-    variable_required = [
-            "type_0",
-            "type_1",
-            "type_2",
-            "type_3",
-            "has_lb",
-            "has_ub",
-            "sol_is_at_lb",
-            "sol_is_at_ub",
-            # "sol_frac",
-            "coef_normalized",
-            # cutoff_feature_name,
-            "lbs",
-            "ubs",
-        ]
     # variable_required = [
     #         "type_0",
     #         "type_1",
@@ -143,17 +128,34 @@ def _build_milp_graph_from_sample(
     #         "has_ub",
     #         "sol_is_at_lb",
     #         "sol_is_at_ub",
-    #         "sol_frac",
+    #         # "sol_frac",
     #         "coef_normalized",
-    #         "sol_val",
-    #         cutoff_feature_name,
+    #         # cutoff_feature_name,
+    #         "lbs",
+    #         "ubs",
     #     ]
-    # TODO: exp1: hide dualsol_val_normalized
-    constraint_required = [
-        "bias", 
-        #cutoff_feature_name
+    variable_required = [
+            "type_0",
+            "type_1",
+            "type_2",
+            "type_3",
+            "has_lb",
+            "has_ub",
+            "sol_is_at_lb",
+            "sol_is_at_ub",
+            "sol_frac",
+            "coef_normalized",
+            "sol_val",
+            cutoff_feature_name,
+            "lbs",
+            "ubs",
         ]
-    # constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
+    # TODO: exp1: hide dualsol_val_normalized
+    # constraint_required = [
+    #     "bias", 
+    #     #cutoff_feature_name
+    #     ]
+    constraint_required = ["bias", "dualsol_val_normalized", cutoff_feature_name]
 
     synthetic_variable_features = {"lbs", "ubs"}
     missing_variable = [

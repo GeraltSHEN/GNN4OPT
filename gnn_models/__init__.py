@@ -6,15 +6,15 @@ def get_model(args):
     if args.type == "raw":
         return GNNPolicy(
             emb_size=args.emb_size,
-            cons_nfeats=1,
-            var_nfeats=11,
+            cons_nfeats=3, # 1,
+            var_nfeats=14,  # 11,
             n_layers=args.n_layers,
             gnn_backbone=args.gnn_backbone)
     elif args.type == "lp":
         return LPGNN(
             emb_size=args.emb_size,
-            cons_nfeats=1,
-            var_nfeats=11,
+            cons_nfeats=3, # 1,
+            var_nfeats=14, # 11,
             n_layers=args.n_layers,
             gnn_backbone=args.gnn_backbone)
     else:
